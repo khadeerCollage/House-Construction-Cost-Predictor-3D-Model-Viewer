@@ -79,10 +79,7 @@ This project provides an automated tool for analyzing floorplan images, detectin
    source venv310/bin/activate
    ```
 
-3. Install required packages:
-   ```bash
-   pip install -r requirements.txt
-   ```
+
 
 ### Large File Downloads
 
