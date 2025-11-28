@@ -1,0 +1,39 @@
+# ===========================================
+# Floor Plan to 3D Model - Requirements
+# Python 3.10 Required
+# Deploy on Streamlit Cloud
+# ===========================================
+
+# ----- Core Dependencies -----
+numpy>=2.0.0
+opencv-python-headless>=4.10.0
+pillow>=10.0.0
+
+# ----- 3D Model Generation -----
+open3d>=0.18.0
+
+# ----- Web Framework -----
+flask>=3.0.0
+streamlit>=1.30.0
+
+# ----- Data Processing -----
+pandas>=2.0.0
+scipy>=1.10.0
+
+# ----- Visualization -----
+matplotlib>=3.7.0
+plotly>=5.0.0
+seaborn>=0.13.0
+
+# ----- Machine Learning -----
+torch>=2.0.0
+torchvision>=0.15.0
+xgboost>=2.0.0
+
+# ----- YOLO Object Detection -----
+ultralytics>=8.0.0
+
+# ----- Utilities -----
+pyyaml>=6.0
+requests>=2.30.0
+tqdm>=4.65.0
