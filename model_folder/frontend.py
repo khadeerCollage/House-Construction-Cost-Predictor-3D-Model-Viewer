@@ -18,16 +18,8 @@ import sys
 import json
 import pandas as pd
 
-# Flask imports (optional - for local development with integrated backend)
-FLASK_AVAILABLE = False
-try:
-    from flask import Flask, request as flask_request, jsonify, send_from_directory
-    FLASK_AVAILABLE = True
-except ImportError:
-    Flask = None
-    flask_request = None
-    jsonify = None
-    send_from_directory = None
+# Flask imports
+from flask import Flask, request as flask_request, jsonify, send_from_directory
 
 # Add parent directory to path for imports
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -54,246 +46,256 @@ room_colors = {
 }
 
 # ==================== INTEGRATED FLASK SERVER ====================
-# Only create Flask app if Flask is available (local development)
-flask_app = None
+# Create Flask app - disable default static handling so we can use our custom route
+model_folder_path = os.path.dirname(os.path.abspath(__file__))
+static_folder_path = os.path.join(model_folder_path, 'static')
+os.makedirs(static_folder_path, exist_ok=True)
 
-if FLASK_AVAILABLE:
-    # Create Flask app
-    flask_app = Flask(__name__, static_folder='static')
+flask_app = Flask(__name__, static_folder=static_folder_path, static_url_path='/static')
 
-    # CORS for local development
+# CORS for local development
+try:
+    from flask_cors import CORS
+    CORS(flask_app)
+except ImportError:
+    pass
+
+# Load models at startup
+try:
+    model_folder = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(model_folder, "house_cost_model.pkl")
+    import joblib
+    cost_model = joblib.load(model_path) if os.path.exists(model_path) else None
+except Exception as e:
+    cost_model = None
+    print(f"Error loading house_cost_model.pkl: {e}")
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'png', 'jpg', 'jpeg'}
+
+@flask_app.route('/')
+def home():
+    return "Welcome to House Cost Prediction API! Use POST /predict to get predictions."
+
+@flask_app.route('/predict', methods=['POST'])
+def predict():
+    if cost_model is None:
+        return jsonify({'error': 'Model not loaded'}), 500
+    data = flask_request.get_json()
+    if not data:
+        return jsonify({'error': 'No input data'}), 400
     try:
-        from flask_cors import CORS
-        CORS(flask_app)
-    except ImportError:
-        pass
-
-    # Load models at startup
-    try:
-        model_folder = os.path.dirname(os.path.abspath(__file__))
-        model_path = os.path.join(model_folder, "house_cost_model.pkl")
-        import joblib
-        cost_model = joblib.load(model_path) if os.path.exists(model_path) else None
+        features = pd.DataFrame([data])
+        prediction = cost_model.predict(features)
+        estimated_cost = float(prediction[0])
+        return jsonify({'estimated_cost': round(estimated_cost, 2)})
     except Exception as e:
-        cost_model = None
-        print(f"Error loading house_cost_model.pkl: {e}")
+        return jsonify({'error': str(e)}), 500
 
-    def allowed_file(filename):
-        return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'png', 'jpg', 'jpeg'}
-
-    @flask_app.route('/')
-    def home():
-        return "Welcome to House Cost Prediction API! Use POST /predict to get predictions."
-
-    @flask_app.route('/predict', methods=['POST'])
-    def predict():
-        if cost_model is None:
-            return jsonify({'error': 'Model not loaded'}), 500
-        data = flask_request.get_json()
-        if not data:
-            return jsonify({'error': 'No input data'}), 400
+@flask_app.route('/generate-3d', methods=['POST'])
+def generate_3d():
+    if 'file' not in flask_request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+        
+    file = flask_request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+        
+    if file and allowed_file(file.filename):
+        model_folder = os.path.dirname(os.path.abspath(__file__))
+        temp_dir = os.path.join(model_folder, 'temp')
+        os.makedirs(temp_dir, exist_ok=True)
+        img_path = os.path.join(temp_dir, file.filename)
+        file.save(img_path)
+        script_path = os.path.join(model_folder, '2d-3d.py')
+        output_model_path = os.path.join(temp_dir, 'floorplan_3d_model.ply')
+        output_data_path = os.path.join(temp_dir, 'floorplan_data.json')
+        
         try:
-            features = pd.DataFrame([data])
-            prediction = cost_model.predict(features)
-            estimated_cost = float(prediction[0])
-            return jsonify({'estimated_cost': round(estimated_cost, 2)})
+            result = subprocess.run(
+                [sys.executable, script_path, '--input', img_path, '--output', output_model_path],
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            print("STDOUT:", result.stdout)
+            print("STDERR:", result.stderr)
+            
+            if result.returncode != 0:
+                return jsonify({
+                    'error': '3D model generation failed.',
+                    'stderr': result.stderr,
+                    'stdout': result.stdout
+                }), 500
+                
+        except subprocess.TimeoutExpired:
+            return jsonify({'error': '3D model generation timed out. Try a smaller image.'}), 500
         except Exception as e:
-            return jsonify({'error': str(e)}), 500
+            return jsonify({'error': f'Unexpected error: {str(e)}', 'traceback': traceback.format_exc()}), 500
+            
+        if not os.path.exists(output_model_path):
+            return jsonify({'error': '3D model file not generated'}), 500
+            
+        # Move to static for frontend viewing
+        static_dir = os.path.join(model_folder, 'static')
+        os.makedirs(static_dir, exist_ok=True)
+        static_ply_path = os.path.join(static_dir, os.path.basename(output_model_path))
+        
+        # Extract detected rooms and metrics from output
+        floorplan_data = {}
+        
+        try:
+            if detect_rooms_and_walls:
+                detection_result = detect_rooms_and_walls(img_path, output_dir=static_dir, save_visualization=False)
+                total_rooms = detection_result.get('total_rooms', 0)
+                room_counts = detection_result.get('room_counts', {})
+                
+                if not room_counts and total_rooms > 0:
+                    bedrooms = max(1, int(total_rooms * 0.2))
+                    bathrooms = max(1, int(total_rooms * 0.06))
+                    kitchen = 1
+                    living = 1
+                    other = total_rooms - (bedrooms + bathrooms + kitchen + living)
+                    room_counts = {"bedroom": bedrooms, "bathroom": bathrooms, "kitchen": kitchen, "living": living, "other": other}
+                
+                floorplan_data["room_counts"] = room_counts
+                floorplan_data["rooms"] = total_rooms
+                
+                if "estimated_area" in detection_result and detection_result["estimated_area"] > 0:
+                    floorplan_data["estimated_area"] = detection_result["estimated_area"]
+                else:
+                    floorplan_data["estimated_area"] = max(total_rooms * 6, 30)
+            else:
+                floorplan_data = {"rooms": 4, "room_counts": {"bedroom": 1, "bathroom": 1, "kitchen": 1, "living": 1}, "estimated_area": 30}
+                
+            with open(output_data_path, 'w') as f:
+                json.dump(floorplan_data, f)
+                
+        except Exception as e:
+            print(f"Error estimating room metrics: {e}")
+            floorplan_data = {"rooms": 4, "room_counts": {"bedroom": 1, "bathroom": 1, "kitchen": 1, "living": 1}, "estimated_area": 30, "error": str(e)}
+        
+        # Copy PLY file to static dir
+        with open(output_model_path, "rb") as src, open(static_ply_path, "wb") as dst:
+            dst.write(src.read())
+            
+        return jsonify({
+            '3d_model': f"/static/{os.path.basename(output_model_path)}",
+            'floorplan_data': floorplan_data
+        })
+    
+    return jsonify({'error': 'Invalid file type'}), 400
 
-    @flask_app.route('/generate-3d', methods=['POST'])
-    def generate_3d():
-        if 'file' not in flask_request.files:
-            return jsonify({'error': 'No file uploaded'}), 400
-            
-        file = flask_request.files['file']
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
-            
-        if file and allowed_file(file.filename):
-            model_folder = os.path.dirname(os.path.abspath(__file__))
-            temp_dir = os.path.join(model_folder, 'temp')
-            os.makedirs(temp_dir, exist_ok=True)
-            img_path = os.path.join(temp_dir, file.filename)
-            file.save(img_path)
-            script_path = os.path.join(model_folder, '2d-3d.py')
-            output_model_path = os.path.join(temp_dir, 'floorplan_3d_model.ply')
-            output_data_path = os.path.join(temp_dir, 'floorplan_data.json')
-            
-            try:
-                result = subprocess.run(
-                    [sys.executable, script_path, '--input', img_path, '--output', output_model_path],
-                    capture_output=True,
-                    text=True,
-                    timeout=120
-                )
-                print("STDOUT:", result.stdout)
-                print("STDERR:", result.stderr)
-                
-                if result.returncode != 0:
-                    return jsonify({
-                        'error': '3D model generation failed.',
-                        'stderr': result.stderr,
-                        'stdout': result.stdout
-                    }), 500
-                    
-            except subprocess.TimeoutExpired:
-                return jsonify({'error': '3D model generation timed out. Try a smaller image.'}), 500
-            except Exception as e:
-                return jsonify({'error': f'Unexpected error: {str(e)}', 'traceback': traceback.format_exc()}), 500
-                
-            if not os.path.exists(output_model_path):
-                return jsonify({'error': '3D model file not generated'}), 500
-                
-            # Move to static for frontend viewing
+@flask_app.route('/detect-walls-rooms', methods=['POST'])
+def detect_walls_rooms():
+    if 'file' not in flask_request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+        
+    file = flask_request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+        
+    if file and allowed_file(file.filename):
+        model_folder = os.path.dirname(os.path.abspath(__file__))
+        temp_dir = os.path.join(model_folder, 'temp')
+        os.makedirs(temp_dir, exist_ok=True)
+        timestamp = int(time.time())
+        unique_filename = f'{timestamp}_{file.filename}'
+        img_path = os.path.join(temp_dir, unique_filename)
+        file.save(img_path)
+        
+        try:
             static_dir = os.path.join(model_folder, 'static')
             os.makedirs(static_dir, exist_ok=True)
-            static_ply_path = os.path.join(static_dir, os.path.basename(output_model_path))
             
-            # Extract detected rooms and metrics from output
-            floorplan_data = {}
+            if detect_rooms_and_walls:
+                result = detect_rooms_and_walls(img_path, output_dir=static_dir)
+                
+                vis_path = result.get('visualization')
+                if vis_path:
+                    # Use /files/ route which we handle explicitly
+                    filename = os.path.basename(vis_path)
+                    rel_path = f'/files/{filename}'
+                    result['visualization'] = rel_path
+                    print(f"Visualization saved to: {vis_path}")
+                    print(f"Visualization URL path: {rel_path}")
+                    
+                result['room_config'] = ROOM_CONFIG
+            else:
+                result = {'error': 'Detection function not available', 'wall_count': 0, 'room_count': 0}
             
             try:
-                if detect_rooms_and_walls:
-                    detection_result = detect_rooms_and_walls(img_path, output_dir=static_dir, save_visualization=False)
-                    total_rooms = detection_result.get('total_rooms', 0)
-                    room_counts = detection_result.get('room_counts', {})
-                    
-                    if not room_counts and total_rooms > 0:
-                        bedrooms = max(1, int(total_rooms * 0.2))
-                        bathrooms = max(1, int(total_rooms * 0.06))
-                        kitchen = 1
-                        living = 1
-                        other = total_rooms - (bedrooms + bathrooms + kitchen + living)
-                        room_counts = {"bedroom": bedrooms, "bathroom": bathrooms, "kitchen": kitchen, "living": living, "other": other}
-                    
-                    floorplan_data["room_counts"] = room_counts
-                    floorplan_data["rooms"] = total_rooms
-                    
-                    if "estimated_area" in detection_result and detection_result["estimated_area"] > 0:
-                        floorplan_data["estimated_area"] = detection_result["estimated_area"]
-                    else:
-                        floorplan_data["estimated_area"] = max(total_rooms * 6, 30)
-                else:
-                    floorplan_data = {"rooms": 4, "room_counts": {"bedroom": 1, "bathroom": 1, "kitchen": 1, "living": 1}, "estimated_area": 30}
-                    
-                with open(output_data_path, 'w') as f:
-                    json.dump(floorplan_data, f)
-                    
-            except Exception as e:
-                print(f"Error estimating room metrics: {e}")
-                floorplan_data = {"rooms": 4, "room_counts": {"bedroom": 1, "bathroom": 1, "kitchen": 1, "living": 1}, "estimated_area": 30, "error": str(e)}
+                os.remove(img_path)
+            except:
+                pass
             
-            # Copy PLY file to static dir
-            with open(output_model_path, "rb") as src, open(static_ply_path, "wb") as dst:
-                dst.write(src.read())
-                
-            return jsonify({
-                '3d_model': f"/static/{os.path.basename(output_model_path)}",
-                'floorplan_data': floorplan_data
-            })
-        
-        return jsonify({'error': 'Invalid file type'}), 400
-
-    @flask_app.route('/detect-walls-rooms', methods=['POST'])
-    def detect_walls_rooms():
-        if 'file' not in flask_request.files:
-            return jsonify({'error': 'No file uploaded'}), 400
+            return jsonify(result)
             
-        file = flask_request.files['file']
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
-            
-        if file and allowed_file(file.filename):
-            model_folder = os.path.dirname(os.path.abspath(__file__))
-            temp_dir = os.path.join(model_folder, 'temp')
-            os.makedirs(temp_dir, exist_ok=True)
-            timestamp = int(time.time())
-            unique_filename = f'{timestamp}_{file.filename}'
-            img_path = os.path.join(temp_dir, unique_filename)
-            file.save(img_path)
-            
-            try:
-                static_dir = os.path.join(model_folder, 'static')
-                os.makedirs(static_dir, exist_ok=True)
-                
-                if detect_rooms_and_walls:
-                    result = detect_rooms_and_walls(img_path, output_dir=static_dir)
-                    
-                    vis_path = result.get('visualization')
-                    if vis_path:
-                        rel_path = '/' + os.path.join('static', os.path.basename(vis_path))
-                        result['visualization'] = rel_path
-                        
-                    result['room_config'] = ROOM_CONFIG
-                else:
-                    result = {'error': 'Detection function not available', 'wall_count': 0, 'room_count': 0}
-                
-                try:
-                    os.remove(img_path)
-                except:
-                    pass
-                
-                return jsonify(result)
-                
-            except Exception as e:
-                error_trace = traceback.format_exc()
-                print(f"Wall detection error: {str(e)}\n{error_trace}")
-                return jsonify({'error': str(e), 'traceback': error_trace}), 500
-                
-        return jsonify({'error': 'Invalid file type'}), 400
-
-    @flask_app.route('/static/<path:filename>')
-    def serve_static(filename):
-        model_folder = os.path.dirname(os.path.abspath(__file__))
-        return send_from_directory(os.path.join(model_folder, 'static'), filename)
-
-    @flask_app.route('/estimate-construction-cost', methods=['POST'])
-    def estimate_construction_cost():
-        data = flask_request.get_json()
-        if not data:
-            return jsonify({'error': 'No input data provided'}), 400
-            
-        try:
-            area = data.get('area', 0)
-            bedrooms = data.get('bedrooms', 0)
-            bathrooms = data.get('bathrooms', 0)
-            kitchen = data.get('kitchen', 0) 
-            living = data.get('living', 0)
-            location_factor = data.get('location_factor', 1.0)
-            
-            base_cost_per_sqm = 1200
-            bedroom_cost = bedrooms * 10000
-            bathroom_cost = bathrooms * 15000
-            kitchen_cost = kitchen * 20000
-            living_cost = living * 8000
-            
-            total_area_cost = area * base_cost_per_sqm
-            total_room_cost = bedroom_cost + bathroom_cost + kitchen_cost + living_cost
-            final_cost = (total_area_cost + total_room_cost) * location_factor
-            
-            return jsonify({
-                'estimated_cost': round(final_cost, 2),
-                'breakdown': {
-                    'base_area_cost': round(total_area_cost, 2),
-                    'bedroom_cost': round(bedroom_cost, 2),
-                    'bathroom_cost': round(bathroom_cost, 2),
-                    'kitchen_cost': round(kitchen_cost, 2),
-                    'living_cost': round(living_cost, 2),
-                    'location_factor': location_factor
-                }
-            })
         except Exception as e:
-            return jsonify({'error': f'Error calculating cost: {str(e)}', 'traceback': traceback.format_exc()}), 500
+            error_trace = traceback.format_exc()
+            print(f"Wall detection error: {str(e)}\n{error_trace}")
+            return jsonify({'error': str(e), 'traceback': error_trace}), 500
+            
+    return jsonify({'error': 'Invalid file type'}), 400
 
-    @flask_app.errorhandler(Exception)
-    def handle_exception(e):
-        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+@flask_app.route('/files/<path:filename>')
+def serve_files(filename):
+    """Serve files from static folder using /files/ route to avoid conflicts"""
+    file_path = os.path.join(static_folder_path, filename)
+    
+    print(f"Serving file: {filename}")
+    print(f"Full path: {file_path}")
+    print(f"File exists: {os.path.exists(file_path)}")
+    
+    if not os.path.exists(file_path):
+        return jsonify({'error': f'File not found: {filename}'}), 404
+    
+    return send_from_directory(static_folder_path, filename)
+
+@flask_app.route('/estimate-construction-cost', methods=['POST'])
+def estimate_construction_cost():
+    data = flask_request.get_json()
+    if not data:
+        return jsonify({'error': 'No input data provided'}), 400
+        
+    try:
+        area = data.get('area', 0)
+        bedrooms = data.get('bedrooms', 0)
+        bathrooms = data.get('bathrooms', 0)
+        kitchen = data.get('kitchen', 0) 
+        living = data.get('living', 0)
+        location_factor = data.get('location_factor', 1.0)
+        
+        base_cost_per_sqm = 1200
+        bedroom_cost = bedrooms * 10000
+        bathroom_cost = bathrooms * 15000
+        kitchen_cost = kitchen * 20000
+        living_cost = living * 8000
+        
+        total_area_cost = area * base_cost_per_sqm
+        total_room_cost = bedroom_cost + bathroom_cost + kitchen_cost + living_cost
+        final_cost = (total_area_cost + total_room_cost) * location_factor
+        
+        return jsonify({
+            'estimated_cost': round(final_cost, 2),
+            'breakdown': {
+                'base_area_cost': round(total_area_cost, 2),
+                'bedroom_cost': round(bedroom_cost, 2),
+                'bathroom_cost': round(bathroom_cost, 2),
+                'kitchen_cost': round(kitchen_cost, 2),
+                'living_cost': round(living_cost, 2),
+                'location_factor': location_factor
+            }
+        })
+    except Exception as e:
+        return jsonify({'error': f'Error calculating cost: {str(e)}', 'traceback': traceback.format_exc()}), 500
+
+@flask_app.errorhandler(Exception)
+def handle_exception(e):
+    return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
 
 def run_flask_server():
     """Run Flask server in a thread"""
-    if not FLASK_AVAILABLE or flask_app is None:
-        print("Flask not available - backend server not started")
-        return
     model_folder = os.path.dirname(os.path.abspath(__file__))
     static_dir = os.path.join(model_folder, 'static')
     os.makedirs(static_dir, exist_ok=True)
@@ -301,13 +303,9 @@ def run_flask_server():
 
 def start_flask_in_background():
     """Start Flask server in a background thread"""
-    if not FLASK_AVAILABLE or flask_app is None:
-        print("Flask not available - cannot start backend server")
-        return False
     flask_thread = threading.Thread(target=run_flask_server, daemon=True)
     flask_thread.start()
     print("Flask server started in background thread on http://127.0.0.1:5000/")
-    return True
 
 def ensure_backend_running():
     """Check if backend is running, start it if not"""
@@ -318,20 +316,18 @@ def ensure_backend_running():
     except:
         pass
     
-    # Not running, try to start it in background thread (only if Flask available)
-    if FLASK_AVAILABLE:
-        if not start_flask_in_background():
-            return False
-        
-        # Wait for it to start (max 10 seconds)
-        for i in range(10):
-            time.sleep(0.5)
-            try:
-                response = requests.get("http://127.0.0.1:5000/", timeout=2)
-                if response.status_code == 200:
-                    return True
-            except:
-                continue
+    # Not running, start it in background thread
+    start_flask_in_background()
+    
+    # Wait for it to start (max 10 seconds)
+    for i in range(10):
+        time.sleep(0.5)
+        try:
+            response = requests.get("http://127.0.0.1:5000/", timeout=2)
+            if response.status_code == 200:
+                return True
+        except:
+            continue
     
     return False
 
@@ -367,15 +363,11 @@ def check_backend_connection(url="http://127.0.0.1:5000/", retry_count=2, timeou
 # Function to try starting the backend server if not running
 def try_start_backend_server():
     """Attempt to start the backend server if it's not running"""
-    if not FLASK_AVAILABLE:
-        return False, "Flask not available on this platform. Backend features require a separate backend server."
     try:
         # Start Flask in background thread (integrated)
-        if start_flask_in_background():
-            time.sleep(2)
-            return True, "Backend server started in background"
-        else:
-            return False, "Failed to start Flask server"
+        start_flask_in_background()
+        time.sleep(2)
+        return True, "Backend server started in background"
     except Exception as e:
         return False, f"Failed to start backend server: {str(e)}"
 
@@ -517,32 +509,29 @@ if uploaded_file is not None:
                             st.metric("🏠 Rooms Detected", result['room_count'])
                         
                         # Display the visualization from the backend
-                        vis_url = f"http://127.0.0.1:5000{result['visualization']}"
-                        
-                        try:
-                            # Fetch and display the image with improved error handling and larger size
-                            st.image(vis_url, caption="Wall and Room Detection Results", use_container_width=True, width=800)
-                        except Exception as img_error:
-                            st.warning(f"Could not load visualization image. Error: {img_error}")
+                        vis_path = result.get('visualization')
+                        if vis_path:
+                            vis_url = f"http://127.0.0.1:5000{vis_path}"
+                            print(f"Visualization URL: {vis_url}")
                             
-                            # Alternative: Try to download and display locally
+                            # Always download the image first since st.image() doesn't work well with localhost URLs
                             try:
-                                with st.spinner("Downloading visualization image..."):
-                                    vis_response = requests.get(vis_url, timeout=30)
-                                    if vis_response.status_code == 200:
-                                        with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as img_tmp:
-                                            img_tmp.write(vis_response.content)
-                                            img_path = img_tmp.name
-                                        
-                                        st.image(img_path, caption="Wall and Room Detection Results", use_container_width=True)
-                                        try:
-                                            os.unlink(img_path)
-                                        except:
-                                            pass
-                                    else:
-                                        st.error(f"Failed to download visualization: HTTP {vis_response.status_code}")
-                            except Exception as local_err:
-                                st.error(f"Could not display visualization: {local_err}")
+                                vis_response = requests.get(vis_url, timeout=30)
+                                if vis_response.status_code == 200:
+                                    # Display image directly from bytes
+                                    st.image(vis_response.content, caption="Wall and Room Detection Results", use_container_width=True)
+                                else:
+                                    st.error(f"Failed to load visualization image: HTTP {vis_response.status_code}")
+                                    # Show more details
+                                    try:
+                                        error_detail = vis_response.json()
+                                        st.error(f"Error details: {error_detail}")
+                                    except:
+                                        st.error(f"Response: {vis_response.text[:500]}")
+                            except Exception as img_error:
+                                st.warning(f"Could not load visualization image. Error: {img_error}")
+                        else:
+                            st.warning("No visualization path returned from detection")
                         
                         # Store detection results in session state
                         st.session_state.wall_count = result['wall_count']
