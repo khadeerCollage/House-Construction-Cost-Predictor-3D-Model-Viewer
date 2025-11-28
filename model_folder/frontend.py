@@ -103,7 +103,7 @@ def show_sidebar_info():
             if success:
                 st.sidebar.success("✅ Backend started")
                 time.sleep(2)  # Short delay
-                st.experimental_rerun()
+                st.rerun()  # Updated from experimental_rerun
             else:
                 st.sidebar.error(f"Couldn't start backend: {msg}")
 
@@ -173,7 +173,7 @@ if uploaded_file is not None:
                                 if success:
                                     st.info(f"{msg}. Please wait a moment and try again.")
                                     time.sleep(3)
-                                    st.experimental_rerun()
+                                    st.rerun()
                                 else:
                                     st.error(msg)
                         with col2:
@@ -415,7 +415,7 @@ if uploaded_file is not None:
                         
                         # Add a button to return to the original view
                         if st.button("↩️ Return to Selection"):
-                            st.experimental_rerun()
+                            st.rerun()
                         
                     else:
                         try:
@@ -457,7 +457,7 @@ if uploaded_file is not None:
                             if success:
                                 st.info(f"{msg}. Please try again after a few seconds.")
                                 time.sleep(3)
-                                st.experimental_rerun()
+                                st.rerun()
                             else:
                                 st.error(msg)
                     with col2:
@@ -490,7 +490,7 @@ if uploaded_file is not None:
                                 if success:
                                     st.info(f"{msg}. Please wait a moment and try again.")
                                     time.sleep(3)
-                                    st.experimental_rerun()
+                                    st.rerun()
                                 else:
                                     st.error(msg)
                         with col2:
@@ -724,7 +724,7 @@ if uploaded_file is not None:
                                 
                             # Add a button to return to the original view
                             if st.button("↩️ Return to Selection"):
-                                st.experimental_rerun()
+                                st.rerun()
                         
                         else:
                             st.error("3D model file not found or not generated.")
