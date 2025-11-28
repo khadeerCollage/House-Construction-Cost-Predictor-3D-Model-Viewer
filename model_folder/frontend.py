@@ -13,6 +13,7 @@ import traceback  # Add this import to fix traceback error
 import subprocess
 import platform
 import socket
+import threading
 
 # Define room colors for frontend display
 room_colors = {
@@ -22,6 +23,61 @@ room_colors = {
     "Kitchen": "#FB8072",      # Salmon pink
     "Room": "#80B1D3"          # Light blue
 }
+
+# ==================== AUTO-START FLASK SERVER ====================
+def start_flask_in_background():
+    """Start Flask server in a background thread"""
+    model_folder = os.path.dirname(os.path.abspath(__file__))
+    app_path = os.path.join(model_folder, "app.py")
+    
+    try:
+        if platform.system() == "Windows":
+            # Windows: Start in new console window
+            subprocess.Popen(
+                ["python", app_path],
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+                cwd=model_folder
+            )
+        else:
+            # Linux/Mac: Start in background
+            subprocess.Popen(
+                ["python", app_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                cwd=model_folder
+            )
+    except Exception as e:
+        print(f"Failed to start Flask: {e}")
+
+def ensure_backend_running():
+    """Check if backend is running, start it if not"""
+    try:
+        response = requests.get("http://127.0.0.1:5000/", timeout=2)
+        if response.status_code == 200:
+            return True  # Already running
+    except:
+        pass
+    
+    # Not running, start it
+    start_flask_in_background()
+    
+    # Wait for it to start (max 10 seconds)
+    for i in range(10):
+        time.sleep(1)
+        try:
+            response = requests.get("http://127.0.0.1:5000/", timeout=2)
+            if response.status_code == 200:
+                return True
+        except:
+            continue
+    
+    return False
+
+# Auto-start Flask when frontend loads (only once per session)
+if 'flask_started' not in st.session_state:
+    st.session_state.flask_started = ensure_backend_running()
+
+# ================================================================
 
 # Function to check if backend is running and reachable
 def check_backend_connection(url="http://127.0.0.1:5000/", retry_count=2, timeout=3):
