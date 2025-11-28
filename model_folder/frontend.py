@@ -14,6 +14,27 @@ import subprocess
 import platform
 import socket
 import threading
+import sys
+import json
+import pandas as pd
+
+# Flask imports
+from flask import Flask, request as flask_request, jsonify, send_from_directory
+
+# Add parent directory to path for imports
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+# Import utilities
+try:
+    from utils import detect_rooms_and_walls, ROOM_CONFIG
+except ImportError:
+    try:
+        from model_folder.utils import detect_rooms_and_walls, ROOM_CONFIG
+    except ImportError:
+        ROOM_CONFIG = {}
+        detect_rooms_and_walls = None
 
 # Define room colors for frontend display
 room_colors = {
@@ -24,30 +45,250 @@ room_colors = {
     "Room": "#80B1D3"          # Light blue
 }
 
-# ==================== AUTO-START FLASK SERVER ====================
+# ==================== INTEGRATED FLASK SERVER ====================
+# Create Flask app
+flask_app = Flask(__name__, static_folder='static')
+
+# CORS for local development
+try:
+    from flask_cors import CORS
+    CORS(flask_app)
+except ImportError:
+    pass
+
+# Load models at startup
+try:
+    model_folder = os.path.dirname(os.path.abspath(__file__))
+    model_path = os.path.join(model_folder, "house_cost_model.pkl")
+    import joblib
+    cost_model = joblib.load(model_path) if os.path.exists(model_path) else None
+except Exception as e:
+    cost_model = None
+    print(f"Error loading house_cost_model.pkl: {e}")
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'png', 'jpg', 'jpeg'}
+
+@flask_app.route('/')
+def home():
+    return "Welcome to House Cost Prediction API! Use POST /predict to get predictions."
+
+@flask_app.route('/predict', methods=['POST'])
+def predict():
+    if cost_model is None:
+        return jsonify({'error': 'Model not loaded'}), 500
+    data = flask_request.get_json()
+    if not data:
+        return jsonify({'error': 'No input data'}), 400
+    try:
+        features = pd.DataFrame([data])
+        prediction = cost_model.predict(features)
+        estimated_cost = float(prediction[0])
+        return jsonify({'estimated_cost': round(estimated_cost, 2)})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@flask_app.route('/generate-3d', methods=['POST'])
+def generate_3d():
+    if 'file' not in flask_request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+        
+    file = flask_request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+        
+    if file and allowed_file(file.filename):
+        model_folder = os.path.dirname(os.path.abspath(__file__))
+        temp_dir = os.path.join(model_folder, 'temp')
+        os.makedirs(temp_dir, exist_ok=True)
+        img_path = os.path.join(temp_dir, file.filename)
+        file.save(img_path)
+        script_path = os.path.join(model_folder, '2d-3d.py')
+        output_model_path = os.path.join(temp_dir, 'floorplan_3d_model.ply')
+        output_data_path = os.path.join(temp_dir, 'floorplan_data.json')
+        
+        try:
+            result = subprocess.run(
+                [sys.executable, script_path, '--input', img_path, '--output', output_model_path],
+                capture_output=True,
+                text=True,
+                timeout=120
+            )
+            print("STDOUT:", result.stdout)
+            print("STDERR:", result.stderr)
+            
+            if result.returncode != 0:
+                return jsonify({
+                    'error': '3D model generation failed.',
+                    'stderr': result.stderr,
+                    'stdout': result.stdout
+                }), 500
+                
+        except subprocess.TimeoutExpired:
+            return jsonify({'error': '3D model generation timed out. Try a smaller image.'}), 500
+        except Exception as e:
+            return jsonify({'error': f'Unexpected error: {str(e)}', 'traceback': traceback.format_exc()}), 500
+            
+        if not os.path.exists(output_model_path):
+            return jsonify({'error': '3D model file not generated'}), 500
+            
+        # Move to static for frontend viewing
+        static_dir = os.path.join(model_folder, 'static')
+        os.makedirs(static_dir, exist_ok=True)
+        static_ply_path = os.path.join(static_dir, os.path.basename(output_model_path))
+        
+        # Extract detected rooms and metrics from output
+        floorplan_data = {}
+        
+        try:
+            if detect_rooms_and_walls:
+                detection_result = detect_rooms_and_walls(img_path, output_dir=static_dir, save_visualization=False)
+                total_rooms = detection_result.get('total_rooms', 0)
+                room_counts = detection_result.get('room_counts', {})
+                
+                if not room_counts and total_rooms > 0:
+                    bedrooms = max(1, int(total_rooms * 0.2))
+                    bathrooms = max(1, int(total_rooms * 0.06))
+                    kitchen = 1
+                    living = 1
+                    other = total_rooms - (bedrooms + bathrooms + kitchen + living)
+                    room_counts = {"bedroom": bedrooms, "bathroom": bathrooms, "kitchen": kitchen, "living": living, "other": other}
+                
+                floorplan_data["room_counts"] = room_counts
+                floorplan_data["rooms"] = total_rooms
+                
+                if "estimated_area" in detection_result and detection_result["estimated_area"] > 0:
+                    floorplan_data["estimated_area"] = detection_result["estimated_area"]
+                else:
+                    floorplan_data["estimated_area"] = max(total_rooms * 6, 30)
+            else:
+                floorplan_data = {"rooms": 4, "room_counts": {"bedroom": 1, "bathroom": 1, "kitchen": 1, "living": 1}, "estimated_area": 30}
+                
+            with open(output_data_path, 'w') as f:
+                json.dump(floorplan_data, f)
+                
+        except Exception as e:
+            print(f"Error estimating room metrics: {e}")
+            floorplan_data = {"rooms": 4, "room_counts": {"bedroom": 1, "bathroom": 1, "kitchen": 1, "living": 1}, "estimated_area": 30, "error": str(e)}
+        
+        # Copy PLY file to static dir
+        with open(output_model_path, "rb") as src, open(static_ply_path, "wb") as dst:
+            dst.write(src.read())
+            
+        return jsonify({
+            '3d_model': f"/static/{os.path.basename(output_model_path)}",
+            'floorplan_data': floorplan_data
+        })
+    
+    return jsonify({'error': 'Invalid file type'}), 400
+
+@flask_app.route('/detect-walls-rooms', methods=['POST'])
+def detect_walls_rooms():
+    if 'file' not in flask_request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+        
+    file = flask_request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+        
+    if file and allowed_file(file.filename):
+        model_folder = os.path.dirname(os.path.abspath(__file__))
+        temp_dir = os.path.join(model_folder, 'temp')
+        os.makedirs(temp_dir, exist_ok=True)
+        timestamp = int(time.time())
+        unique_filename = f'{timestamp}_{file.filename}'
+        img_path = os.path.join(temp_dir, unique_filename)
+        file.save(img_path)
+        
+        try:
+            static_dir = os.path.join(model_folder, 'static')
+            os.makedirs(static_dir, exist_ok=True)
+            
+            if detect_rooms_and_walls:
+                result = detect_rooms_and_walls(img_path, output_dir=static_dir)
+                
+                vis_path = result.get('visualization')
+                if vis_path:
+                    rel_path = '/' + os.path.join('static', os.path.basename(vis_path))
+                    result['visualization'] = rel_path
+                    
+                result['room_config'] = ROOM_CONFIG
+            else:
+                result = {'error': 'Detection function not available', 'wall_count': 0, 'room_count': 0}
+            
+            try:
+                os.remove(img_path)
+            except:
+                pass
+            
+            return jsonify(result)
+            
+        except Exception as e:
+            error_trace = traceback.format_exc()
+            print(f"Wall detection error: {str(e)}\n{error_trace}")
+            return jsonify({'error': str(e), 'traceback': error_trace}), 500
+            
+    return jsonify({'error': 'Invalid file type'}), 400
+
+@flask_app.route('/static/<path:filename>')
+def serve_static(filename):
+    model_folder = os.path.dirname(os.path.abspath(__file__))
+    return send_from_directory(os.path.join(model_folder, 'static'), filename)
+
+@flask_app.route('/estimate-construction-cost', methods=['POST'])
+def estimate_construction_cost():
+    data = flask_request.get_json()
+    if not data:
+        return jsonify({'error': 'No input data provided'}), 400
+        
+    try:
+        area = data.get('area', 0)
+        bedrooms = data.get('bedrooms', 0)
+        bathrooms = data.get('bathrooms', 0)
+        kitchen = data.get('kitchen', 0) 
+        living = data.get('living', 0)
+        location_factor = data.get('location_factor', 1.0)
+        
+        base_cost_per_sqm = 1200
+        bedroom_cost = bedrooms * 10000
+        bathroom_cost = bathrooms * 15000
+        kitchen_cost = kitchen * 20000
+        living_cost = living * 8000
+        
+        total_area_cost = area * base_cost_per_sqm
+        total_room_cost = bedroom_cost + bathroom_cost + kitchen_cost + living_cost
+        final_cost = (total_area_cost + total_room_cost) * location_factor
+        
+        return jsonify({
+            'estimated_cost': round(final_cost, 2),
+            'breakdown': {
+                'base_area_cost': round(total_area_cost, 2),
+                'bedroom_cost': round(bedroom_cost, 2),
+                'bathroom_cost': round(bathroom_cost, 2),
+                'kitchen_cost': round(kitchen_cost, 2),
+                'living_cost': round(living_cost, 2),
+                'location_factor': location_factor
+            }
+        })
+    except Exception as e:
+        return jsonify({'error': f'Error calculating cost: {str(e)}', 'traceback': traceback.format_exc()}), 500
+
+@flask_app.errorhandler(Exception)
+def handle_exception(e):
+    return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+
+def run_flask_server():
+    """Run Flask server in a thread"""
+    model_folder = os.path.dirname(os.path.abspath(__file__))
+    static_dir = os.path.join(model_folder, 'static')
+    os.makedirs(static_dir, exist_ok=True)
+    flask_app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False, threaded=True)
+
 def start_flask_in_background():
     """Start Flask server in a background thread"""
-    model_folder = os.path.dirname(os.path.abspath(__file__))
-    app_path = os.path.join(model_folder, "app.py")
-    
-    try:
-        if platform.system() == "Windows":
-            # Windows: Start in new console window
-            subprocess.Popen(
-                ["python", app_path],
-                creationflags=subprocess.CREATE_NEW_CONSOLE,
-                cwd=model_folder
-            )
-        else:
-            # Linux/Mac: Start in background
-            subprocess.Popen(
-                ["python", app_path],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                cwd=model_folder
-            )
-    except Exception as e:
-        print(f"Failed to start Flask: {e}")
+    flask_thread = threading.Thread(target=run_flask_server, daemon=True)
+    flask_thread.start()
+    print("Flask server started in background thread on http://127.0.0.1:5000/")
 
 def ensure_backend_running():
     """Check if backend is running, start it if not"""
@@ -58,12 +299,12 @@ def ensure_backend_running():
     except:
         pass
     
-    # Not running, start it
+    # Not running, start it in background thread
     start_flask_in_background()
     
     # Wait for it to start (max 10 seconds)
     for i in range(10):
-        time.sleep(1)
+        time.sleep(0.5)
         try:
             response = requests.get("http://127.0.0.1:5000/", timeout=2)
             if response.status_code == 200:
@@ -106,30 +347,10 @@ def check_backend_connection(url="http://127.0.0.1:5000/", retry_count=2, timeou
 def try_start_backend_server():
     """Attempt to start the backend server if it's not running"""
     try:
-        # Get the correct path
-        model_folder = os.path.dirname(os.path.abspath(__file__))
-        app_path = os.path.join(model_folder, "app.py")
-        
-        if platform.system() == "Windows":
-            # Use subprocess.Popen to avoid blocking the Streamlit app
-            process = subprocess.Popen(
-                ["python", app_path],
-                creationflags=subprocess.CREATE_NEW_CONSOLE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            # Give it a moment to start
-            time.sleep(3)
-            return True, "Backend server start initiated"
-        else:
-            # For other platforms like Linux or Mac
-            process = subprocess.Popen(
-                ["python", app_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
-            time.sleep(3)
-            return True, "Backend server start initiated"
+        # Start Flask in background thread (integrated)
+        start_flask_in_background()
+        time.sleep(2)
+        return True, "Backend server started in background"
     except Exception as e:
         return False, f"Failed to start backend server: {str(e)}"
 
@@ -222,18 +443,14 @@ if uploaded_file is not None:
                         st.error(f"Could not connect to backend: {status_msg}")
                         
                         # Offer to restart the backend
-                        col1, col2 = st.columns([1, 2])
-                        with col1:
-                            if st.button("🔄 Start Backend"):
-                                success, msg = try_start_backend_server()
-                                if success:
-                                    st.info(f"{msg}. Please wait a moment and try again.")
-                                    time.sleep(3)
-                                    st.rerun()
-                                else:
-                                    st.error(msg)
-                        with col2:
-                            st.code("cd c:\\Users\\USER\\Desktop\\vit_project\\model_folder && python app.py")
+                        if st.button("🔄 Start Backend", key="start_backend_1"):
+                            success, msg = try_start_backend_server()
+                            if success:
+                                st.info(f"{msg}. Please wait a moment and try again.")
+                                time.sleep(3)
+                                st.rerun()
+                            else:
+                                st.error(msg)
                         
                         st.stop()
                     
@@ -506,18 +723,14 @@ if uploaded_file is not None:
                     st.error("🔌 Connection to backend was lost. The server may have crashed or the connection was reset.")
                     
                     # Add a convenient button to try restarting the backend
-                    col1, col2 = st.columns([1, 3])
-                    with col1:
-                        if st.button("🔄 Restart Backend"):
-                            success, msg = try_start_backend_server()
-                            if success:
-                                st.info(f"{msg}. Please try again after a few seconds.")
-                                time.sleep(3)
-                                st.rerun()
-                            else:
-                                st.error(msg)
-                    with col2:
-                        st.code("cd c:\\Users\\USER\\Desktop\\vit_project\\model_folder && python app.py")
+                    if st.button("🔄 Restart Backend", key="restart_backend_1"):
+                        success, msg = try_start_backend_server()
+                        if success:
+                            st.info(f"{msg}. Please try again after a few seconds.")
+                            time.sleep(3)
+                            st.rerun()
+                        else:
+                            st.error(msg)
                 
                 except Exception as e:
                     import traceback  # Import here as well for safety
@@ -539,18 +752,14 @@ if uploaded_file is not None:
                         st.error(f"Could not connect to backend: {status_msg}")
                         
                         # Offer to restart the backend
-                        col1, col2 = st.columns([1, 2])
-                        with col1:
-                            if st.button("🔄 Start Backend"):
-                                success, msg = try_start_backend_server()
-                                if success:
-                                    st.info(f"{msg}. Please wait a moment and try again.")
-                                    time.sleep(3)
-                                    st.rerun()
-                                else:
-                                    st.error(msg)
-                        with col2:
-                            st.code("cd c:\\Users\\USER\\Desktop\\vit_project\\model_folder && python app.py")
+                        if st.button("🔄 Start Backend", key="start_backend_2"):
+                            success, msg = try_start_backend_server()
+                            if success:
+                                st.info(f"{msg}. Please wait a moment and try again.")
+                                time.sleep(3)
+                                st.rerun()
+                            else:
+                                st.error(msg)
                         
                         st.stop()
                     
@@ -799,8 +1008,12 @@ if uploaded_file is not None:
                 except requests.exceptions.Timeout:
                     st.error("3D model generation timed out. Try a smaller image.")
                 except requests.exceptions.ConnectionError:
-                    st.error("Connection to backend was lost. Make sure the Flask server is still running.")
-                    st.info("To start the Flask server, open a terminal and run: `cd c:\\Users\\USER\\Desktop\\vit_project\\model_folder && python app.py`")
+                    st.error("Connection to backend was lost. Trying to restart...")
+                    success, msg = try_start_backend_server()
+                    if success:
+                        st.info(f"{msg}. Please try again.")
+                    else:
+                        st.error(msg)
                 except Exception as e:
                     st.error(f"Unexpected error: {e}")
     
