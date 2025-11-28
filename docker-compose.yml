@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  house-cost-predictor:
+    image: khadee/house-3d-cost-design-and-detection:latest
+    ports:
+      - "8501:8501"
+      - "5000:5000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
