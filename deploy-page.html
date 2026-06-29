@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🏡 House Construction Cost Predictor - Quick Deploy</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            max-width: 600px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            text-align: center;
+        }
+        h1 { color: #333; margin-bottom: 10px; font-size: 1.8em; }
+        .subtitle { color: #666; margin-bottom: 30px; }
+        .features {
+            text-align: left;
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+        .features li {
+            padding: 8px 0;
+            color: #555;
+            list-style: none;
+        }
+        .features li::before {
+            content: "✅ ";
+        }
+        .btn {
+            display: inline-block;
+            padding: 15px 40px;
+            font-size: 1.1em;
+            font-weight: bold;
+            text-decoration: none;
+            border-radius: 50px;
+            margin: 10px;
+            transition: transform 0.3s, box-shadow 0.3s;
+        }
+        .btn:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .btn-secondary {
+            background: #333;
+            color: white;
+        }
+        .docker-cmd {
+            background: #1e1e1e;
+            color: #4ec9b0;
+            padding: 15px;
+            border-radius: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85em;
+            margin: 20px 0;
+            text-align: left;
+            overflow-x: auto;
+        }
+        .copy-btn {
+            background: #4ec9b0;
+            color: #1e1e1e;
+            border: none;
+            padding: 5px 15px;
+            border-radius: 5px;
+            cursor: pointer;
+            float: right;
+            font-weight: bold;
+        }
+        .copy-btn:hover { background: #3db89f; }
+        .tech-stack {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
+        .tech-badge {
+            background: #e9ecef;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            color: #495057;
+        }
+        footer { margin-top: 30px; color: #999; font-size: 0.85em; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🏡 House Construction Cost Predictor</h1>
+        <p class="subtitle">AI-Powered Floor Plan Analysis & 3D Model Generator</p>
+        
+        <div class="features">
+            <ul>
+                <li>Detect walls and rooms from floor plan images</li>
+                <li>Automatic room type identification (Bedroom, Kitchen, Bathroom)</li>
+                <li>Generate interactive 3D models</li>
+                <li>Estimate construction costs based on area & features</li>
+            </ul>
+        </div>
+
+        <a href="https://labs.play-with-docker.com/" target="_blank" class="btn btn-primary">
+            🐳 Try on Play with Docker (Free)
+        </a>
+        
+        <a href="https://hub.docker.com/r/khadee/house-3d-cost-design-and-detection" target="_blank" class="btn btn-secondary">
+            📦 View on Docker Hub
+        </a>
+
+        <h3 style="margin-top: 30px; color: #333;">Quick Run Commands</h3>
+        
+        <div class="docker-cmd">
+            <button class="copy-btn" onclick="copyCmd()">📋 Copy</button>
+            <code id="docker-cmd">docker pull khadee/house-3d-cost-design-and-detection:latest && docker run -d -p 8501:8501 -p 5000:5000 khadee/house-3d-cost-design-and-detection:latest</code>
+        </div>
+        
+        <p style="color: #666; font-size: 0.9em;">After running, open <strong>http://localhost:8501</strong> in your browser</p>
+
+        <div class="tech-stack">
+            <span class="tech-badge">🐍 Python</span>
+            <span class="tech-badge">🎈 Streamlit</span>
+            <span class="tech-badge">🌶️ Flask</span>
+            <span class="tech-badge">🐳 Docker</span>
+            <span class="tech-badge">🤖 OpenCV</span>
+            <span class="tech-badge">📊 Open3D</span>
+        </div>
+
+        <footer>
+            <p>Made with ❤️ by Khadee | <a href="https://github.com/khadee" style="color: #667eea;">GitHub</a></p>
+        </footer>
+    </div>
+
+    <script>
+        function copyCmd() {
+            const cmd = document.getElementById('docker-cmd').textContent;
+            navigator.clipboard.writeText(cmd);
+            const btn = document.querySelector('.copy-btn');
+            btn.textContent = '✅ Copied!';
+            setTimeout(() => btn.textContent = '📋 Copy', 2000);
+        }
+    </script>
+</body>
+</html>
