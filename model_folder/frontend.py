@@ -1039,6 +1039,5 @@ def display_footer():
             """,
             unsafe_allow_html=True
         )
-
 # Call the footer function at the end of the file
 display_footer()
