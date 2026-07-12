@@ -1033,7 +1033,7 @@ def display_footer():
                     Turn your floorplans into intelligent 3D models with AI
                 </p>
                 <p style="color: #9E9E9E; font-size: 0.7em; margin-top: 15px;">
-                    © 2025 House Construction Cost Predictor | All Rights Reserved
+                    © 2026 House Construction Cost Predictor | All Rights Reserved
                 </p>
             </div>
             """,
