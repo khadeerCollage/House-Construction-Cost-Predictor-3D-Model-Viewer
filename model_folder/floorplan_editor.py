@@ -39,8 +39,8 @@ from floorplan_renderer.dxf_renderer import DXFRenderer
 from floorplan_renderer.pdf_renderer import PDFRenderer
 
 
-PPM_EDITOR = 40  # 40 pixels per meter for editor scale
-PAD_M = 2.0      # 2.0 meters margin for steps, dimensions, and annotations
+PPM_EDITOR = 50  # 50 pixels per meter — MATCHES SVGRenderer PPM exactly
+PAD_M = 3.0      # 3.0 meters margin — MATCHES SVGRenderer pad exactly
 
 
 class FloorPlanEditor:
@@ -527,114 +527,123 @@ class FloorPlanEditor:
                     })
 
         # -------------------------------------------------------------
-        # 8. Scale Block Badge (Top Right of Plot Border)
+        # 8. Title Block (Right side — matching SVGRenderer layout)
         # -------------------------------------------------------------
-        scale_box_w = 175
-        scale_box_h = 24
-        scale_box_left = max(plot_left + plot_w_px - scale_box_w, plot_left + 10)
-        scale_box_top = max(10.0, plot_top - 36)
+        # SVGRenderer places title block at x = plot_width*PPM + pad*PPM + 5px gap
+        title_x = to_cx(plan.plot_width) + 20   # right of plot + 20px gap
+        title_y = plot_top + 10
+        title_w = 5.0 * PPM_EDITOR - 30         # ~5m wide title area
+        title_h = min(plot_h_px - 20, 250)
 
+        # Outer title block border
         objects.append({
             "type": "rect",
-            "left": scale_box_left, "top": scale_box_top,
-            "width": scale_box_w, "height": scale_box_h,
-            "fill": "rgba(10, 35, 66, 0.85)", "stroke": "#00FFFF", "strokeWidth": 1.5,
-            "selectable": False, "evented": False
-        })
-        objects.append({
-            "type": "text",
-            "originX": "center", "originY": "center",
-            "left": scale_box_left + scale_box_w / 2, "top": scale_box_top + scale_box_h / 2,
-            "text": "SCALE: 1:50 | NBC 2016",
-            "fontSize": 9.5, "fontWeight": "bold", "fill": "#00FFFF",
-            "fontFamily": "Segoe UI, Arial, sans-serif",
+            "left": title_x, "top": title_y,
+            "width": title_w, "height": title_h,
+            "fill": "rgba(10, 35, 66, 0.90)", "stroke": "#00CCCC", "strokeWidth": 1.5,
             "selectable": False, "evented": False
         })
 
-        # -------------------------------------------------------------
-        # 9. Compass Rosette (Bottom Right)
-        # -------------------------------------------------------------
-        comp_x = canvas_w - 65
-        comp_y = canvas_h - 65
-        objects.append({
-            "type": "circle",
-            "originX": "center", "originY": "center",
-            "left": comp_x, "top": comp_y, "radius": 22,
-            "fill": "rgba(10, 35, 66, 0.75)", "stroke": "#00DDAA", "strokeWidth": 1.5,
-            "selectable": False, "evented": False
-        })
-        objects.append({
-            "type": "text",
-            "originX": "center", "originY": "center",
-            "left": comp_x, "top": comp_y - 4,
-            "text": "▲\nN",
-            "fontSize": 11, "fontWeight": "bold", "fill": "#00FFCC",
-            "textAlign": "center", "lineHeight": 0.9,
-            "selectable": False, "evented": False
-        })
-        objects.append({
-            "type": "text", "originX": "center", "originY": "center",
-            "left": comp_x - 30, "top": comp_y, "text": "W", "fontSize": 8, "fill": "#8EB8E5",
-            "selectable": False, "evented": False
-        })
-        objects.append({
-            "type": "text", "originX": "center", "originY": "center",
-            "left": comp_x + 30, "top": comp_y, "text": "E", "fontSize": 8, "fill": "#8EB8E5",
-            "selectable": False, "evented": False
-        })
-        objects.append({
-            "type": "text", "originX": "center", "originY": "center",
-            "left": comp_x, "top": comp_y + 30, "text": "S", "fontSize": 8, "fill": "#8EB8E5",
-            "selectable": False, "evented": False
-        })
+        # 5 rows inside title block
+        row_h = title_h / 5
+        cents = (plan.total_built_up_area * 10.764) / 435.6
+        tb_labels = [
+            f"PROJECT: {plan.project_name}",
+            f"TYPE: {plan.bhk_config}",
+            f"AREA: {plan.total_built_up_area:.1f}m² ({cents:.2f}C)",
+            f"QUALITY: {getattr(plan, 'quality_level', 'Standard')}",
+            f"VASTU: {plan.vastu_score:.0f}/100 | SCALE: 1:50",
+        ]
+        for idx, label_text in enumerate(reversed(tb_labels)):
+            row_y = title_y + (idx + 0.05) * row_h
+            # Row separator line
+            if idx > 0:
+                objects.append({
+                    "type": "line",
+                    "x1": title_x, "y1": row_y, "x2": title_x + title_w, "y2": row_y,
+                    "stroke": "#00CCCC", "strokeWidth": 0.8, "selectable": False, "evented": False
+                })
+            objects.append({
+                "type": "text",
+                "originX": "left", "originY": "top",
+                "left": title_x + 6, "top": row_y + 6,
+                "text": label_text,
+                "fontSize": 9, "fontWeight": "bold" if idx == 4 else "normal",
+                "fontFamily": "Segoe UI, Arial, sans-serif",
+                "fill": "#E0F0FF",
+                "selectable": False, "evented": False
+            })
+
+        # North compass rosette — positioned at top of title block area
+        comp_x = title_x + title_w / 2
+        comp_y = title_y + title_h + 50
+        if comp_y + 40 < canvas_h:
+            objects.append({
+                "type": "circle",
+                "originX": "center", "originY": "center",
+                "left": comp_x, "top": comp_y, "radius": 24,
+                "fill": "rgba(10, 35, 66, 0.75)", "stroke": "#00DDAA", "strokeWidth": 1.5,
+                "selectable": False, "evented": False
+            })
+            objects.append({
+                "type": "text",
+                "originX": "center", "originY": "center",
+                "left": comp_x, "top": comp_y - 4,
+                "text": "▲\nN",
+                "fontSize": 12, "fontWeight": "bold", "fill": "#00FFCC",
+                "textAlign": "center", "lineHeight": 0.9,
+                "selectable": False, "evented": False
+            })
+            for label, dx, dy in [("W", -32, 0), ("E", 32, 0), ("S", 0, 32)]:
+                objects.append({
+                    "type": "text", "originX": "center", "originY": "center",
+                    "left": comp_x + dx, "top": comp_y + dy, "text": label,
+                    "fontSize": 9, "fill": "#8EB8E5",
+                    "selectable": False, "evented": False
+                })
 
         # -------------------------------------------------------------
-        # 10. Exterior Dimension Lines & Tick Annotations
+        # 9. Exterior Dimension Lines & Tick Annotations
         # -------------------------------------------------------------
+        # Top dimension line (plot width in mm)
         dim_y = plot_top - 28
         objects.append({
             "type": "line",
             "x1": plot_left, "y1": dim_y, "x2": plot_left + plot_w_px, "y2": dim_y,
             "stroke": "#6B8DAF", "strokeWidth": 1.0, "selectable": False, "evented": False
         })
-        objects.append({
-            "type": "line",
-            "x1": plot_left - 5, "y1": dim_y + 5, "x2": plot_left + 5, "y2": dim_y - 5,
-            "stroke": "#6B8DAF", "strokeWidth": 1.5, "selectable": False, "evented": False
-        })
-        objects.append({
-            "type": "line",
-            "x1": plot_left + plot_w_px - 5, "y1": dim_y + 5, "x2": plot_left + plot_w_px + 5, "y2": dim_y - 5,
-            "stroke": "#6B8DAF", "strokeWidth": 1.5, "selectable": False, "evented": False
-        })
+        # Tick marks (45°)
+        for tick_x in [plot_left, plot_left + plot_w_px]:
+            objects.append({
+                "type": "line",
+                "x1": tick_x - 5, "y1": dim_y + 5, "x2": tick_x + 5, "y2": dim_y - 5,
+                "stroke": "#6B8DAF", "strokeWidth": 1.5, "selectable": False, "evented": False
+            })
         objects.append({
             "type": "text",
             "originX": "center", "originY": "center",
-            "left": plot_left + plot_w_px / 2, "top": dim_y - 10,
+            "left": plot_left + plot_w_px / 2, "top": dim_y - 12,
             "text": f"{int(round(plan.plot_width * 1000))}",
             "fontSize": 9, "fill": "#8EB8E5", "selectable": False, "evented": False
         })
 
-        dim_x = plot_left - 28
+        # Left dimension line (plot height in mm)
+        dim_x = plot_left - 32
         objects.append({
             "type": "line",
             "x1": dim_x, "y1": plot_top, "x2": dim_x, "y2": plot_top + plot_h_px,
             "stroke": "#6B8DAF", "strokeWidth": 1.0, "selectable": False, "evented": False
         })
-        objects.append({
-            "type": "line",
-            "x1": dim_x - 5, "y1": plot_top + 5, "x2": dim_x + 5, "y2": plot_top - 5,
-            "stroke": "#6B8DAF", "strokeWidth": 1.5, "selectable": False, "evented": False
-        })
-        objects.append({
-            "type": "line",
-            "x1": dim_x - 5, "y1": plot_top + plot_h_px + 5, "x2": dim_x + 5, "y2": plot_top + plot_h_px - 5,
-            "stroke": "#6B8DAF", "strokeWidth": 1.5, "selectable": False, "evented": False
-        })
+        for tick_y in [plot_top, plot_top + plot_h_px]:
+            objects.append({
+                "type": "line",
+                "x1": dim_x - 5, "y1": tick_y + 5, "x2": dim_x + 5, "y2": tick_y - 5,
+                "stroke": "#6B8DAF", "strokeWidth": 1.5, "selectable": False, "evented": False
+            })
         objects.append({
             "type": "text",
             "originX": "center", "originY": "center",
-            "left": dim_x - 14, "top": plot_top + plot_h_px / 2,
+            "left": dim_x - 16, "top": plot_top + plot_h_px / 2,
             "text": f"{int(round(plan.plot_height * 1000))}",
             "fontSize": 9, "fill": "#8EB8E5", "angle": -90, "selectable": False, "evented": False
         })
@@ -705,10 +714,12 @@ class FloorPlanEditor:
         working_plan: GeneratedFloorPlan = st.session_state['editor_working_plan']
 
         pad_m = PAD_M
-        canvas_w = int((working_plan.plot_width + pad_m * 2) * PPM_EDITOR)
+        # SVGRenderer uses: width_m = plot_width + pad*2 + 5.0 (title block area)
+        # We match those dimensions exactly so the editor looks identical to the static blueprint.
+        canvas_w = int((working_plan.plot_width + pad_m * 2 + 5.0) * PPM_EDITOR)
         canvas_h = int((working_plan.plot_height + pad_m * 2) * PPM_EDITOR)
-        canvas_w = max(600, min(1000, canvas_w))
-        canvas_h = max(450, min(800, canvas_h))
+        canvas_w = max(700, min(1400, canvas_w))
+        canvas_h = max(500, min(1000, canvas_h))
 
         st.markdown("### ✏️ Interactive Floor Plan Studio & Live Customizer")
         st.caption("Live CAD blueprint editing playground: Add components, delete components, increase/decrease meters, and watch all metrics sync in real-time.")
@@ -1079,11 +1090,13 @@ class FloorPlanEditor:
         active_mode = mode_map.get(draw_mode, "freedraw")
 
         # Initialize canvas JSON if not already stored
-        if 'editor_initial_json' not in st.session_state or st.session_state.get('editor_plan_id') != id(working_plan):
+        # Cache key includes canvas dimensions so any PPM/PAD change auto-busts the cache
+        cache_key = f"{id(working_plan)}_{canvas_w}_{canvas_h}"
+        if 'editor_initial_json' not in st.session_state or st.session_state.get('editor_plan_id') != cache_key:
             st.session_state['editor_initial_json'] = FloorPlanEditor.plan_to_fabric_json(
                 working_plan, canvas_w, canvas_h
             )
-            st.session_state['editor_plan_id'] = id(working_plan)
+            st.session_state['editor_plan_id'] = cache_key
 
         # -------------------------------------------------------------
         # Editor Canvas Layout: Left Canvas, Right Live-Sync HUD
@@ -1097,6 +1110,10 @@ class FloorPlanEditor:
                 """,
                 unsafe_allow_html=True
             )
+            # Pure Fabric.js rendering on dark navy background.
+            # plan_to_fabric_json uses PPM_EDITOR=50 and PAD_M=3.0, exactly matching
+            # the SVGRenderer constants, so rooms appear in the same positions as the
+            # static blueprint displayed above.
             canvas_result = st_canvas(
                 fill_color="rgba(0, 229, 255, 0.15)",
                 stroke_width=stroke_width,
