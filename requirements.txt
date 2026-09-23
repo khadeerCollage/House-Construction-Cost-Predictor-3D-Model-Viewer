@@ -22,6 +22,10 @@ scipy>=1.10.0
 joblib>=1.3.0
 scikit-learn>=1.3.0
 xgboost>=2.0.0
+transformers>=4.30.0
+ultralytics>=8.0.0
+torch>=2.0.0
+torchvision>=0.15.0
 
 # ----- Visualization -----
 plotly>=5.0.0
@@ -30,3 +34,10 @@ open3d>=0.17.0
 # ----- Utilities -----
 pyyaml>=6.0
 requests>=2.30.0
+
+# ----- Floor Plan Generation & CAD Export -----
+ezdxf>=1.0.0             # AutoCAD DXF export (pure Python)
+drawsvg>=2.0             # SVG vector rendering (pure Python)
+shapely>=2.0.0           # Computational geometry for wall polygons
+reportlab>=4.0           # PDF blueprint generation
+streamlit-drawable-canvas>=0.13.0 # Interactive 2D floor plan editor

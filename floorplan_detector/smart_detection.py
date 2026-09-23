@@ -226,7 +226,10 @@ class SmartFloorPlanDetector:
         # 3. Convert to SmartWall objects
         raw_walls = []
         for line in lines:
-            x1, y1, x2, y2 = line[0]
+            line_flat = np.array(line).flatten()
+            if len(line_flat) < 4:
+                continue
+            x1, y1, x2, y2 = line_flat[:4]
             wall = SmartWall(x1, y1, x2, y2)
             if wall.length >= self.min_wall_length:
                 raw_walls.append(wall)
@@ -595,7 +598,10 @@ class SmartFloorPlanDetector:
         # Count horizontal lines
         horizontal_lines = 0
         for line in lines:
-            x1, y1, x2, y2 = line[0]
+            line_flat = np.array(line).flatten()
+            if len(line_flat) < 4:
+                continue
+            x1, y1, x2, y2 = line_flat[:4]
             angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
             if abs(angle) < 20 or abs(angle) > 160:
                 horizontal_lines += 1

@@ -243,7 +243,7 @@ def try_start_backend_server():
         if platform.system() == "Windows":
             # Use subprocess.Popen to avoid blocking the Streamlit app
             process = subprocess.Popen(
-                ["python", app_path],
+                [sys.executable, app_path],
                 creationflags=subprocess.CREATE_NEW_CONSOLE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
@@ -254,7 +254,7 @@ def try_start_backend_server():
         else:
             # For other platforms like Linux or Mac
             process = subprocess.Popen(
-                ["python", app_path],
+                [sys.executable, app_path],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
@@ -262,6 +262,28 @@ def try_start_backend_server():
             return True, "Backend server start initiated"
     except Exception as e:
         return False, f"Failed to start backend server: {str(e)}"
+
+def display_footer():
+    """Display a beautiful footer with a made-with-love message"""
+    st.markdown("---")
+    footer_cols = st.columns([1, 3, 1])
+    with footer_cols[1]:
+        st.markdown(
+            """
+            <div style="text-align: center; padding: 10px;">
+                <p style="color: #5A5A5A; font-size: 0.9em; margin-bottom: 5px;">
+                    Made with ❤️ for architects and home builders
+                </p>
+                <p style="color: #757575; font-size: 0.8em; font-style: italic;">
+                    Turn your floorplans into intelligent 3D models with AI
+                </p>
+                <p style="color: #9E9E9E; font-size: 0.7em; margin-top: 15px;">
+                    © 2026 House Construction Cost Predictor | All Rights Reserved
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
 # Function to display project information in the sidebar instead of backend status
 def show_sidebar_info():
@@ -297,11 +319,28 @@ def show_sidebar_info():
             else:
                 st.sidebar.error(f"Couldn't start backend: {msg}")
 
-st.set_page_config(page_title="🏡 House Construction Cost Predictor & 3D Viewer")
+st.set_page_config(page_title="🏡 House Construction Cost Predictor & 3D Viewer", layout="wide", page_icon="🏡")
 st.title("🏡 House Construction Cost Predictor & 3D Model Viewer")
 
 # Show project info in sidebar instead of backend status
 show_sidebar_info()
+
+# Mode Switcher: Generative Design Studio vs Floorplan Analysis
+nav_mode = st.radio(
+    "Navigation Mode",
+    ["🏗️ Design Your Home (AI Floor Plan Studio)", "🔍 Analyze Existing Floor Plan Image"],
+    horizontal=True,
+    label_visibility="collapsed"
+)
+
+if nav_mode.startswith("🏗️"):
+    try:
+        from model_folder.design_ui import render_design_tab
+    except ImportError:
+        from design_ui import render_design_tab
+    render_design_tab()
+    display_footer()
+    st.stop()
 
 st.markdown("""
 ### Upload your floorplan image
@@ -367,7 +406,7 @@ if uploaded_file is not None:
                                 else:
                                     st.error(msg)
                         with col2:
-                            st.code("cd c:\\Users\\USER\\Desktop\\vit_project\\model_folder && python app.py")
+                            st.code(f"cd {parent_dir} && .\\.venv310\\Scripts\\activate.bat && python model_folder\\app.py")
                         
                         st.stop()
                     
@@ -418,7 +457,7 @@ if uploaded_file is not None:
                         
                         try:
                             # Fetch and display the image with improved error handling and larger size
-                            st.image(vis_url, caption="Wall and Room Detection Results", use_container_width=True, width=800)
+                            st.image(vis_url, caption="Wall and Room Detection Results", width="stretch")
                         except Exception as img_error:
                             st.warning(f"Could not load visualization image. Error: {img_error}")
                             
@@ -431,7 +470,7 @@ if uploaded_file is not None:
                                             img_tmp.write(vis_response.content)
                                             img_path = img_tmp.name
                                         
-                                        st.image(img_path, caption="Wall and Room Detection Results", use_container_width=True)
+                                        st.image(img_path, caption="Wall and Room Detection Results", width="stretch")
                                         try:
                                             os.unlink(img_path)
                                         except:
@@ -656,7 +695,7 @@ if uploaded_file is not None:
                             else:
                                 st.error(msg)
                     with col2:
-                        st.code("cd c:\\Users\\USER\\Desktop\\vit_project\\model_folder && python app.py")
+                        st.code(f"cd {parent_dir} && .\\.venv310\\Scripts\\activate.bat && python model_folder\\app.py")
                 
                 except Exception as e:
                     import traceback  # Import here as well for safety
@@ -689,7 +728,7 @@ if uploaded_file is not None:
                                 else:
                                     st.error(msg)
                         with col2:
-                            st.code("cd c:\\Users\\USER\\Desktop\\vit_project\\model_folder && python app.py")
+                            st.code(f"cd {parent_dir} && .\\.venv310\\Scripts\\activate.bat && python model_folder\\app.py")
                         
                         st.stop()
                     
@@ -1003,7 +1042,7 @@ if uploaded_file is not None:
                     st.error("3D model generation timed out. Try a smaller image.")
                 except requests.exceptions.ConnectionError:
                     st.error("Connection to backend was lost. Make sure the Flask server is still running.")
-                    st.info("To start the Flask server, open a terminal and run: `cd c:\\Users\\USER\\Desktop\\vit_project\\model_folder && python app.py`")
+                    st.info(f"To start the Flask server, open a terminal and run: `cd {parent_dir} && .\\.venv310\\Scripts\\activate.bat && python model_folder\\app.py`")
                 except Exception as e:
                     st.error(f"Unexpected error: {e}")
     

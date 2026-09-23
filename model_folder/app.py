@@ -711,6 +711,213 @@ def estimate_construction_cost():
             'traceback': traceback.format_exc()
         }), 500
 
+# =============================================================================
+# GENERATIVE AI FLOOR PLAN DESIGN ENDPOINTS (PHASE 1)
+# =============================================================================
+
+# Ensure root directory is on sys.path
+root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+
+try:
+    from floorplan_generator.family_analyzer import FamilyAnalyzer, FamilyProfile
+    from floorplan_generator.layout_engine import LayoutEngine
+    from floorplan_renderer.dxf_renderer import DXFRenderer
+    from floorplan_renderer.svg_renderer import SVGRenderer
+    from floorplan_renderer.pdf_renderer import PDFRenderer
+    from floorplan_renderer.png_renderer import PNGRenderer
+    from model_folder.cost_engine import CostEngine
+    GENERATOR_AVAILABLE = True
+except Exception as e:
+    print(f"Warning: floorplan_generator or renderer import failed in app.py: {e}")
+    GENERATOR_AVAILABLE = False
+
+
+@app.route('/generate-plan', methods=['POST'])
+def generate_floor_plan_endpoint():
+    """
+    Generate a professional residential floor plan from land dimensions,
+    family intent, and Vastu preferences.
+    """
+    if not GENERATOR_AVAILABLE:
+        return jsonify({'error': 'Generative floor plan engine is not available on this server.'}), 503
+
+    try:
+        data = request.get_json() or {}
+
+        # 1. Parse plot dimensions
+        plot_width = float(data.get('plot_width', 12.0))
+        plot_height = float(data.get('plot_height', 15.0))
+        orientation = str(data.get('orientation', 'N')).upper()
+
+        # 2. Parse family intent
+        adults = int(data.get('adults', 2))
+        children = int(data.get('children', 0))
+        elderly = int(data.get('elderly', 0))
+        guests = bool(data.get('guests_frequent', False))
+        needs_office = bool(data.get('needs_home_office', False))
+        needs_pooja = bool(data.get('needs_pooja_room', True))
+        needs_servant = bool(data.get('needs_servant_quarter', False))
+        needs_store = bool(data.get('needs_store_room', False))
+        bhk_override = data.get('bhk_override') or None
+
+        # 3. Engineering options
+        vastu_enabled = bool(data.get('vastu_enabled', True))
+        quality_level = str(data.get('quality_level', 'Standard'))
+        city_tier = str(data.get('city_tier', 'Tier-2 Urban'))
+        num_floors = int(data.get('num_floors', 1))
+        project_name = str(data.get('project_name', 'Custom Villa Blueprint'))
+
+        # Step A: Family intent analysis
+        profile = FamilyProfile(
+            adults=adults,
+            children=children,
+            elderly=elderly,
+            guests_frequent=guests,
+            needs_home_office=needs_office,
+            needs_pooja_room=needs_pooja,
+            needs_servant_quarter=needs_servant,
+            needs_store_room=needs_store,
+            bhk_override=bhk_override,
+        )
+        analyzer = FamilyAnalyzer()
+        analysis = analyzer.analyze(profile, plot_area=plot_width * plot_height)
+
+        # Step B: Core layout generation (V-HSP)
+        engine = LayoutEngine(
+            plot_width=plot_width,
+            plot_height=plot_height,
+            bhk_config=analysis.recommended_bhk,
+            vastu_enabled=vastu_enabled,
+            orientation=orientation,
+            quality_level=quality_level,
+            project_name=project_name,
+            family_description=profile.description,
+        )
+        plan = engine.generate()
+
+        # Step C: Render to all 4 professional CAD formats
+        plan_id = f"plan_{int(time.time())}_{np.random.randint(1000, 9999)}"
+        plan_dir = os.path.join(os.path.dirname(__file__), 'static', 'generated_plans', plan_id)
+        os.makedirs(plan_dir, exist_ok=True)
+
+        dxf_path = os.path.join(plan_dir, 'plan.dxf')
+        svg_path = os.path.join(plan_dir, 'plan.svg')
+        pdf_path = os.path.join(plan_dir, 'plan.pdf')
+        png_path = os.path.join(plan_dir, 'plan.png')
+        mask_path = os.path.join(plan_dir, 'wall_mask.png')
+
+        svg_r = SVGRenderer()
+        svg_r.render(plan, svg_path, mode='clean')
+        svg_content = svg_r.render_to_string(plan, mode='clean')
+
+        png_r = PNGRenderer()
+        png_r.render(plan, png_path)
+        mask = png_r.render_wall_mask(plan, ppm=50)
+        cv2.imwrite(mask_path, mask) if cv2 is not None else None
+
+        dxf_r = DXFRenderer()
+        dxf_r.render(plan, dxf_path)
+
+        pdf_r = PDFRenderer()
+        pdf_r.render(plan, pdf_path)
+
+        # Step D: Cost Estimation with Indian Market BOQ
+        cost_data = CostEngine.estimate_cost(
+            area_sqm=plan.total_carpet_area,
+            city_tier=city_tier,
+            quality_level=quality_level,
+            num_floors=num_floors
+        )
+
+        # Step E: Construct comprehensive response
+        rooms_data = [
+            {
+                'name': r.name,
+                'category': r.category,
+                'x': r.x,
+                'y': r.y,
+                'width': r.w,
+                'height': r.h,
+                'area': r.area,
+                'color': r.color
+            }
+            for r in plan.rooms
+        ]
+
+        return jsonify({
+            'success': True,
+            'plan_id': plan_id,
+            'project_name': project_name,
+            'bhk_config': plan.bhk_config,
+            'family_description': plan.family_description,
+            'reasoning': analysis.reasoning,
+            'plot_width': plan.plot_width,
+            'plot_height': plan.plot_height,
+            'orientation': plan.orientation,
+            'vastu_enabled': plan.vastu_enabled,
+            'vastu_score': plan.vastu_score,
+            'total_carpet_area': plan.total_carpet_area,
+            'total_carpet_area_sqft': round(plan.total_carpet_area * 10.764, 1),
+            'total_built_up_area': plan.total_built_up_area,
+            'rooms': rooms_data,
+            'room_count': len(plan.rooms),
+            'door_count': len(plan.doors),
+            'window_count': len(plan.windows),
+            'cost_estimation': cost_data,
+            'svg_content': svg_content,
+            'download_urls': {
+                'dxf': f'/download-plan/dxf/{plan_id}',
+                'svg': f'/download-plan/svg/{plan_id}',
+                'pdf': f'/download-plan/pdf/{plan_id}',
+                'png': f'/download-plan/png/{plan_id}',
+            }
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({
+            'error': f'Error generating floor plan: {str(e)}',
+            'traceback': traceback.format_exc()
+        }), 500
+
+
+@app.route('/download-plan/<fmt>/<plan_id>', methods=['GET'])
+def download_generated_plan(fmt, plan_id):
+    """Serve generated CAD and blueprint files for download."""
+    try:
+        fmt = fmt.lower()
+        if fmt not in {'dxf', 'svg', 'pdf', 'png'}:
+            return jsonify({'error': 'Invalid format requested'}), 400
+
+        filename = f"plan.{fmt}"
+        plan_dir = os.path.join(os.path.dirname(__file__), 'static', 'generated_plans', plan_id)
+        filepath = os.path.join(plan_dir, filename)
+
+        if not os.path.exists(filepath):
+            return jsonify({'error': f'Generated plan file not found for plan_id {plan_id}'}), 404
+
+        # Modern Flask supports download_name, fallback to attachment_filename for older Flask
+        download_filename = f"{plan_id}_{filename}"
+        try:
+            return send_from_directory(
+                plan_dir,
+                filename,
+                as_attachment=True,
+                download_name=download_filename
+            )
+        except TypeError:
+            return send_from_directory(
+                plan_dir,
+                filename,
+                as_attachment=True,
+                attachment_filename=download_filename
+            )
+    except Exception as e:
+        import traceback
+        return jsonify({'error': str(e), 'traceback': traceback.format_exc()}), 500
+
+
 @app.errorhandler(Exception)
 def handle_exception(e):
     import traceback
@@ -733,4 +940,4 @@ if __name__ == '__main__':
             print(f"WARNING: 2d-3d.py not found at {script_path} or {alt_path}")
     
     print("Starting Flask server on http://127.0.0.1:5000/")
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(host="127.0.0.1", port=5000, debug=True, use_reloader=False)

@@ -19,7 +19,9 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 
 # Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install PyTorch CPU first to save massive amounts of space and avoid timeouts
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir --default-timeout=1000 -r requirements.txt
 
 # Copy the entire project
 COPY . .
@@ -32,5 +34,5 @@ ENV PYTHONUNBUFFERED=1
 ENV STREAMLIT_SERVER_PORT=8501
 ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
 
-# Run the Streamlit app (Flask starts automatically in the app)
-CMD ["streamlit", "run", "model_folder/frontend.py", "--server.port=8501", "--server.address=0.0.0.0"]
+# Start both Flask backend and Streamlit frontend
+CMD python model_folder/app.py & streamlit run model_folder/frontend.py --server.port=8501 --server.address=0.0.0.0

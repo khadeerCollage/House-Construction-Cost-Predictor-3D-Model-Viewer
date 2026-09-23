@@ -209,6 +209,22 @@ Perfect for architects, builders, and homeowners!
 st.sidebar.markdown("---")
 st.sidebar.info("🚀 **Cloud Version** - No backend server needed!")
 
+# Mode Switcher: Generative Design Studio vs Floorplan Analysis
+nav_mode = st.radio(
+    "Navigation Mode",
+    ["🏗️ Design Your Home (AI Floor Plan Studio)", "🔍 Analyze Existing Floor Plan Image"],
+    horizontal=True,
+    label_visibility="collapsed"
+)
+
+if nav_mode.startswith("🏗️"):
+    try:
+        from model_folder.design_ui import render_design_tab
+    except ImportError:
+        from design_ui import render_design_tab
+    render_design_tab()
+    st.stop()
+
 # Main content
 st.markdown("""
 ### Upload your floorplan image

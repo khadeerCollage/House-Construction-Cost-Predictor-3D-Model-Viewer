@@ -317,10 +317,14 @@ class FloorPlanSymbolDetector:
             return False
         
         # Count horizontal lines
-        h_count = sum(1 for line in lines 
-                     if abs(np.degrees(np.arctan2(
-                         line[0][3] - line[0][1], 
-                         line[0][2] - line[0][0]))) < 20)
+        h_count = 0
+        for line in lines:
+            line_flat = np.array(line).flatten()
+            if len(line_flat) < 4:
+                continue
+            x1, y1, x2, y2 = line_flat[:4]
+            if abs(np.degrees(np.arctan2(y2 - y1, x2 - x1))) < 20:
+                h_count += 1
         
         return h_count >= 3
     

@@ -222,7 +222,10 @@ class WallDoorDetector:
         
         walls = []
         for line in lines:
-            x1, y1, x2, y2 = line[0]
+            line_flat = np.array(line).flatten()
+            if len(line_flat) < 4:
+                continue
+            x1, y1, x2, y2 = line_flat[:4]
             wall = Wall(x1, y1, x2, y2)
             
             # Only keep horizontal and vertical walls
@@ -785,7 +788,10 @@ class RoomAnalyzer:
         # Count horizontal lines
         h_count = 0
         for line in lines:
-            x1, y1, x2, y2 = line[0]
+            line_flat = np.array(line).flatten()
+            if len(line_flat) < 4:
+                continue
+            x1, y1, x2, y2 = line_flat[:4]
             angle = abs(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
             if angle < 20 or angle > 160:
                 h_count += 1

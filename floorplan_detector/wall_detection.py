@@ -106,7 +106,10 @@ class WallDetector:
         
         segments = []
         for line in lines:
-            x1, y1, x2, y2 = line[0]
+            line_flat = np.array(line).flatten()
+            if len(line_flat) < 4:
+                continue
+            x1, y1, x2, y2 = line_flat[:4]
             segment = WallSegment(x1, y1, x2, y2)
             segment.orientation = self._classify_orientation(segment.angle)
             segments.append(segment)
