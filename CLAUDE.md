@@ -68,13 +68,27 @@ floorplan_generator/          LIVE+WIP  generative engine (pure Python, metres, 
   vastu_analyzer.py post-hoc audit of a finished plan (padas, elements, certificate) (669)
   family_analyzer.py household -> recommended BHK                                  (303)
   land_units.py    cents/gaj/guntha/ground/ankanam conversions + plot solver       (184)
+  intent_engine.py IntentSolver (wish-aware re-plan), intent validation/description, zone/grid helpers (2026-10-11)
+  wish_parser.py   offline NLU: owners' own words → intents (Indian English, typos, Hindi/Malayalam/Tamil) (2026-10-12)
+  quantities.py    arrangement-dependent quantities (partitions, doors, glazing, plumbing MST) for edit pricing
+  site_feasibility.py what fits BEFORE Generate: BHK options + every site amenity judged with the planner itself
+                  + a comfort rule; drives the locked 🔒 toggles in the Design form (2026-10-12)
+  takeoff.py       QS material take-off measured from the plan (footings per grid column, beams under walls,
+                  slabs, net brickwork, plaster, tiles, paint, doors/windows, points, pipes) + STAGES (2026-10-12)
+  house_report.py  the 4 result tabs' analysis: room_schedule (inside sizes, ft-in, NBC 2016 Part 3 checks),
+                  vastu_ledger (exact split of vastu_score), vastu_checks, vastu_plan_svg, health_card
   structure.py     RCC column grid (bays 2.4-4.5 m on wall centrelines); used by engineering report + drafting
 floorplan_renderer/           LIVE  plan -> files. SVG(drawsvg) DXF(ezdxf) PDF(reportlab) PNG(matplotlib)
   drafting.py      build_drafting(plan): wall poche, column grid, Vastu-aware furniture, tiles, levels, door/window tags + schedule (SVG only so far)
 model_folder/
   frontend.py     Streamlit UI (nav radio: Design vs Analyze)                      (1082)
   design_ui.py    `render_design_tab()` — the whole Design tab, direct imports     (675, WIP)
-  floorplan_editor.py interactive editor (Fabric.js via streamlit-drawable-canvas) (2346, WIP)
+  house_report_ui.py the 4 result tabs under the blueprint (Room Schedule / Vastu Engineering / Cost & BOQ /
+                  Best House Recommendation); 'better design' = engine alternatives, applied via intent_studio.commit
+  floorplan_editor.py Fabric.js export (`plan_to_fabric_json`, `extract_edited_rooms`) + `render_editor_section`
+                  → Smart Re-Plan only (old Move/Add/Delete/Resize tabs + canvas drag/drop retired 2026-10-12)
+  intent_studio.py the editing section: tap-a-room house map, action buttons, own-words box, ideas, options,
+                  design & price history, commit/undo (2026-10-11/12)
   app.py          Flask API (11 routes)                                            (943)
   cost_engine.py  CostEngine — canonical INR cost + BOQ                            (200)
   train_cost_model.py, house_cost_model.pkl(3-feat), house_cost_model_v2.pkl(8-feat, 24 MB, untracked), *.csv
@@ -100,7 +114,12 @@ never imports the generator. `floor_plan_analyzer.py` imports `model_folder.vit_
 
 ### 4a. Generative studio (the active area) — engine rewritten 2026-10-10
 ```
-design_ui.render_design_tab()              (direct imports; NOT via Flask; UI widgets unchanged)
+design_ui.render_design_tab()              (direct imports; NOT via Flask)
+  site_feasibility.bhk_options(...) / check_site(...)  (st.cache_data, keyed on the form state + the module's
+     mtime) → BHK dropdown lists only BHKs that fit (✅ / ⚠️ small rooms; 🔒 caption 'needs about N cents');
+     amenity toggles disabled with reason + unlock hint; car/bike counts, garden %, pool sizes capped to what fits;
+     an amenity that fitted before a plot/BHK/floors change is switched off with a note; lift + staircase type
+     locked for a single storey (engine ignores both there); apply_fit(components, fit) → what the engine gets
   LandUnitsEngine.solve_parcel(...) -> plot W,H (m)        FamilyAnalyzer().analyze(profile, plot_area) -> bhk
   importlib.reload(space_program, site_planner, layout_solver, layout_engine)   # every Generate click
   LayoutEngine(..., family_profile=profile, has_lift, stair_type, num_floors, building_type, additional_components).generate()
@@ -108,7 +127,12 @@ design_ui.render_design_tab()              (direct imports; NOT via Flask; UI wi
                                      rooms (pooja/study/store/servant), quality scaling, StairDesign/LiftDesign
     2 site_planner.SitePlanner.plan_footprint()  bylaw setbacks, Vastu N/E ≥ S/W open space (only if house keeps
                                      its target area), coverage cap, footprint sized to need, anchored SW;
-                                     parking/garden/pool/terrace-stair reservations
+                                     parking/garden/pool/terrace-stair reservations; narrow plots that fit no
+                                     other bay get a parallel front bay at the corner keeping the best door
+                                     pada free, and `SitePlan.door_exclusion` keeps the main door off it
+                                     (solver penalty `entrance_blocked`)
+                                     car_parking `mode: "stilt"` (set by site_feasibility for multi-level
+                                     houses where an open bay would squeeze the rooms) forces the stilt floor
     3 layout_solver.BandSpineSolver.solve()  band-spine zoning (front / [private] / spine / rear bands, modes
                                      std|deep|corridor), randomised feasible construction + iterated local search;
                                      objective = Vastu (building mandala, role-aware, pada, Brahmasthan) +
@@ -117,12 +141,35 @@ design_ui.render_design_tab()              (direct imports; NOT via Flask; UI wi
        relaxation chain if no access-complete layout; legacy functional subdivision as last resort
     4 doors (attached→parent/dress, others→best circulation), arches (living↔dining, stairs, foyers),
       main door at best 32-pada on the living facade
-    5 SitePlanner.place_amenities()  Vastu-ranked, collision-free, clear entrance path, gates
+    5 SitePlanner.place_amenities()  Vastu-ranked, collision-free, clear entrance path, gates; two-wheelers fall back to parallel
+                                     parking two abreast (n/2 × 2.0 m by 1.5 m) for 1.65 m-deep small-plot front yards
     6 walls: 230 envelope / merged 115 partitions / 150 compound, openings cut for doors/arches/gates
     7 NBC windows (≥1/10 floor area, N/E preferred) · dimensions (3 tiers at plot edge) · audit_vastu() ·
       RERA carpet + plinth area · engineering report (columns, slab/beam, plumbing stacks, notes)
   CostEngine.estimate_for_plan(plan, city_tier, quality, floors)  -> plinth × floors + lift + site works
   renderers / VastuAnalyzer(plan) / FloorPlanEditor as before
+
+Intent editing loop (2026-10-11, UI reworked 2026-10-12) — the Design tab's "🧠 Smart Re-Plan" expander
+(model_folder/intent_studio.py; floorplan_editor.render_editor_section only calls it):
+  wishes = JSON dicts (zone | flip | swap | adjacent | lock | size | mirror) added by ① tapping a room on a 3×3
+  house map (laid out like the drawing, road at top) + ② an action button (move → Vastu-coloured zone grid,
+  swap/next-to → tap a 2nd room, other side/bigger/smaller/don't-move → one tap), by typed text
+  (wish_parser.understand → confident wishes added, unclear ones shown as "did you mean" buttons), or by
+  "💡 Ideas" (wish_parser.suggest_wishes). No canvas drag & drop (retired: hard for many owners).
+  → LayoutEngine(**plan.generation_params, design_intents=…, base_layout=plan.layout_state).generate_alternatives(3)
+  → IntentSolver (subclass of BandSpineSolver): objective = base − Σ wish penalties (W=40, graded) − λ·disruption
+    of unmentioned rooms − collateral taboos + anchor refund for rooms the user moved; seeds = base state, direct
+    edits, their neighbourhoods + fresh constructions; ILS with kicks (6000 evals ≈ 1.5–6 s)
+  → options: "Balanced — recommended" (cleanest within 6 pts of best), "Best Vastu", "Least change"/"Alternative";
+    each plan.edit_report = {intents[{text,satisfied,detail,blocked_by}], changes, warnings, satisfied/total}
+  → "Use this design" = intent_studio.commit(): re-renders SVG/DXF/PDF/PNG into a private temp dir, replaces
+    gen_* session keys (main blueprint above updates), pushes the old design to plan_history (Undo, last 10)
+    and appends to design_history ("📈 Your design & price history": one row per version with a 👁️ View
+    button → `_version_dialog` (st.dialog, large): that version's blueprint, Before → after vs the previous
+    version, room-by-room `version_changes`, and "Make this my design again" (`_restore` = commit + st.rerun,
+    because a button inside a dialog reruns only the dialog); single-series cost line ≥ 3 versions).
+  Option cards: label + why, wishes met/blocked_by, 💰 cost vs now with work-item reasons (CostEngine.layout_delta),
+  rooms moved, Vastu/NBC warnings.
 ```
 Flask `/generate-plan` now passes the same profile/multi-storey/amenity args and returns `setbacks`, `engineering`,
 `vastu_breakdown`, `design_notes`. Typical solve time 0.3–1.5 s (4BHK + everything ≈ 4 s).
@@ -163,13 +210,14 @@ Dimension-label strings are millimetres. Snap grid 0.05 m (solver) / 0.15 (legac
 `layout_engine.py` plain `@dataclass`es (use `field(default_factory=...)` for lists):
 | Class | Fields |
 |---|---|
-| `RoomRect` | name, category(str = `RoomCategory.value`), x, y (bottom-left), w, h, color(hex), area; props cx, cy, right, top |
+| `RoomRect` | name, category(str = `RoomCategory.value`), x, y (bottom-left), w, h, color(hex), area, role, **key** (space-program key, '' for amenities/legacy); props cx, cy, right, top |
 | `WallSegment` | x1,y1,x2,y2, thickness (0.23 ext / 0.115 int), is_external — **centrelines** |
 | `DoorPlacement` | x,y (low-coord corner of opening in generator; renderers treat as hinge), width, wall_side N/S/E/W, swing_direction, room_name, is_main_entrance |
 | `WindowPlacement` | x,y (centre), width, height, wall_side, room_name |
 | `StaircaseRect` | name, stair_type, x,y,w,h, direction="N", num_steps=15, tread .25, riser .175, has_landing, landing_depth 1.0 |
 | `DimLine` | x1,y1,x2,y2, offset, label(mm str), tier (generator emits 1 and 3 only) |
 | `GeneratedFloorPlan` | plot_width, plot_height, orientation, rooms, walls, doors, windows, staircases, dimensions, vastu_score, vastu_enabled, total_carpet_area, total_built_up_area, bhk_config, family_description, quality_level, project_name, has_lift, lift_capacity, building_type, num_floors, additional_components |
+| (intent fields) | **generation_params** (exact LayoutEngine kwargs → rebuilds the plan bit-for-bit), **layout_state** (`mode, bands, cells, flip, rooms{key: name,category,role,group,parent,band,kind,bands,cx,cy,w,h,area}, footprint, facing, vastu, relax_level`; empty for the legacy fallback ⇒ no Smart Re-Plan), **edit_report** |
 
 `wall_side` values are **plan-relative** (N = high y), not compass-relative. `GeneratedFloorPlan` has **no** `stair_type`
 field (renderers read it from `plan.staircases` by room name; `getattr(plan,'stair_type','dog_leg')` always falls back).
@@ -221,6 +269,11 @@ All renderers take a `GeneratedFloorPlan` and write a file (`render(plan, path)`
   smuggled via `strokeDashArray=[tag,0]` (rooms 1000+i, doors 2000+i, windows 3000+i, amenities 4000+i). "Apply Edits"
   deep-copies the plan, rebuilds walls/dims (calls private `LayoutEngine._generate_walls/_generate_dimensions`) and re-renders
   all four formats. No undo, no disk persistence.
+- **Smart Re-Plan (2026-10-12):** the whole editing section. The design-tab expander has `key="editor_expander"`
+  so it stays open across reruns. Session keys: `intent_stack, intent_options, intent_feedback, intent_sel,
+  intent_pending, plan_history (undo snapshots), design_history (versions), intent_base_plan_id, intent_flash`.
+  Note for any future canvas work: the installed streamlit-drawable-canvas has **no `drawing_mode="transform"`**
+  (selection is the toolbar's pencil toggle).
 - **Tests couple to editor output text:** labels must contain `m²` and `×`; `"SCALE: 1:50"` must exist; a compass `N`.
 
 ## 7. App layer
@@ -255,6 +308,11 @@ quality_level, num_floors, country, region)` adds `extras`, `building_cost`, `co
 → every region × Economy/Standard/Premium/Luxury. Helpers: `markets()`, `regions(c)`, `default_region(c)`, `format_money`,
 `resolve_location` (legacy Indian tier labels map to India regions "Other Tier-1 Metro" / "Other Tier-2 City (average)" / …).
 India Standard ₹2,000/sqft at Tier-2 avg (Mumbai ×1.55, Delhi ×1.30, Kochi ×1.25, Rural ×0.80). Design UI: "Country / Market" +
+**Edit pricing (2026-10-12):** `plan.layout_state['ref_quantities']` = quantities of the design the owner started from
+(carried through every re-plan). `estimate_for_plan` adds an extras line `CostEngine.LAYOUT_LINE` = Σ(Δqty × rate) for
+partitions/doors/glazing/plumbing (`LAYOUT_RATES_INDIA`, scaled to other markets by Standard rate per m², × quality,
+× floors; location index + soft costs applied as usual) and returns `layout_delta{items,total}`; unedited plans get no
+line, so their estimates are unchanged.
 "City / Region" dropdowns; the cost is re-priced on every rerun (no regenerate needed). Streamlit markdown/`st.table` treat `$…$`
 as LaTeX and leading `+ ` as bullets — escape `$` (`_md` in design_ui) and keep the `＋` step prefixes.
 ML model: `RandomForestRegressor(100, depth 12)` on `[Area_m2, Rooms, Bathrooms, Kitchens, Living_Rooms, City_Tier(0=T3,1=T2,2=T1),
@@ -332,7 +390,10 @@ the original list below describes the pre-upgrade engine.
 18. **[V] Test side-effects:** see §11. Detector has zero tests.
 
 ## 11. Tests
-**2026-10-10: 32/32 pass** (`python -m pytest tests -q`, ~90 s; test_12 = cost markets/regions bands). `test_engineering_upgrades.py` covers BHK fidelity, facing
+**2026-10-12: 56/56 pass** (+ `tests/test_house_report.py`, 6: ledger = score, inside sizes/NBC, Vastu checks + SVG, take-off thumb-rule bands, BOQ stages = construction cost, health card; + `tests/test_site_feasibility.py`, 6: 3-cent 2BHK = bikes not car on N/E/S/W, bigger plot
+unlocks the car, stilt parking for G+1, BHK options, garden % = real lawn, apply_fit). Before that 44/44 (`tests/test_intent_editing.py` now 12: + everyday-language parsing, edit pricing, parking
+on a 3-cent plot for N/E/S/W). **2026-10-11: 41/41 pass** (+ `tests/test_intent_editing.py`, 9 tests, ~25 s: parser, every intent type, refusals with
+reasons, blocked-by explanations, determinism, plan rebuild from generation_params). Earlier: **2026-10-10: 32/32 pass** (`python -m pytest tests -q`, ~90 s; test_12 = cost markets/regions bands). `test_engineering_upgrades.py` covers BHK fidelity, facing
 geometry, padas, score non-saturation, anchors/access/tiling for N/E/S/W, setbacks, lifestyle rooms, amenity zones,
 stairs, cost normalisation, cut openings, SVG orientation. `test_06` now collects editor texts recursively (room labels
 live in Fabric groups). Restore artifacts afterwards: `git checkout -- test_output/`.
@@ -364,8 +425,34 @@ respect Windows paths (`os.path.join`), CRLF repo.
 - **New site amenity:** category + Vastu row → reservation in `SitePlanner.plan_footprint` if it needs a deep strip →
   `put(...)` call in `place_amenities` (Vastu-ranked) → add to `SITE_CATEGORIES` (layout_engine) and the amenity sets in
   `svg_renderer.py`/`floorplan_editor.py` → `CostEngine.SITE_RATES` → tests.
+- **Result tabs (2026-10-12):** `st.tabs(..., key="report_tab", on_change="rerun")` — stateful, only the open tab
+  (`tN.open`) is computed. Everything is measured from the plan: `house_report.vastu_ledger` must keep reproducing
+  `plan.vastu_score` (same terms as `layout_engine.audit_vastu`: w·(s+50)/60 per placement + door pada, −8 per taboo /
+  Brahmasthan violation, −4 N+E<S+W) — change both together. NBC checks use INSIDE sizes (centre-line minus half
+  walls, as `_set_clear_areas`): habitable ≥ 9.5 m² (largest) / 7.5 m², width 2.4; kitchen 5.0/1.8; bath+WC 2.8/1.2;
+  passage width 1.0. `CostEngine.boq_for_plan(plan, est, quality)` prices `takeoff.material_takeoff` (India only;
+  other markets → available False) and shares `est['construction_cost']` over the stages by materials × (1 + STAGE_LABOUR)
+  — the total stays CostEngine's (no second cost formula). 'Better Vastu' / 'Best design' = `intent_studio.build_options
+  (plan, [], cost_params)` (IntentSolver alternatives with no wishes), scored by `health_card`, cached in
+  `st.session_state['report_alternatives']` by id(plan). Modules imported with `importlib.import_module` so edits reload.
+- **Site feasibility rule (2026-10-12):** an amenity that costs the house > 4 % (`LOSS`) is 'no' when the house left
+  falls below `COMFORT` 0.80 × comfortable footprint (Standard-quality program target × 1.12) or NBC min (a bedroom
+  would be dropped); 'tight' (offered with a warning) below `TIGHT` 0.92. Amenities are judged in planner priority
+  `AMENITIES` order, each on top of the ones before it that are on. New amenity → add it to `AMENITIES`, `CATEGORY`,
+  `LABEL`, `_cfg`, the 'why' dict in `_Checker.judge`, and an `_amenity_toggle` in design_ui. Rule of thumb it yields
+  (N, 1:1.33, 2+2 family): car with a 2BHK from ~3.25-3.5 cents, with a 3BHK from ~5 cents; pool from ~5.5-6 cents.
 - **New UI input:** add widget in `design_ui.py`, pass through `LayoutEngine(**kwargs)`, store on `GeneratedFloorPlan`, show in SVG title block
   (watch the title-block row count: SVG 6, PDF 6, PNG 5, editor 5), and mirror in Flask `/generate-plan` if the API should support it.
+- **New words for the wish box:** add phrases to `wish_parser._P` under the right tag (R: room, A: action,
+  D:/S:/P: direction, M: modifier, U: unsupported); multi-word phrases match longest-first, unknown words are
+  typo-repaired against the vocabulary (keep real building words in `_STOP` so they are never "corrected").
+  Add the sentence to `test_10_everyday_language`.
+- **New wish (intent) type:** add it to `INTENT_TYPES`, `normalise_intent`, `describe_intent`, `validate_intent`,
+  a penalty + `satisfied` branch in `IntentSolver._intent_eval` (keep unmet ≥ 0.5·W so search is pulled in), a seed
+  in `_intent_seeds` if a direct state edit exists, a frame rule in `wish_parser.understand_clause`, a UI action in
+  `intent_studio.ACTIONS`, and a test. Rooms named by a wish go in `self.involved` (exempt from disruption,
+  anchor increase refunded) — except lock/size (they must stay put) and flip (only the attached room).
+  Plain `generate()` must stay byte-identical: intents only act through `_make_solver` / `apply_size_intents`.
 - **Cost change:** edit only `CostEngine`. New country/city = add an entry to `MARKETS` (rates, regions, materials ×5 for the
   UI's metric row, site, soft, breakdown summing to 100) — the dropdowns, matrix and test_12 pick it up automatically; add its
   band to test_12. Keep quality keys `QUALITY_KEYS` (UI labels are normalised by `normalize_quality`).

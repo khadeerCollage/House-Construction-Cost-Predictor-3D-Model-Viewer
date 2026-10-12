@@ -762,10 +762,16 @@ class SVGRenderer:
                                         stroke='#94A3B8', stroke_width=1.5, stroke_dasharray='5,3'))
                 num_divs = min(slots, 6)
                 if num_divs > 1:
-                    sw = rw / num_divs
+                    # bays run along the side whose share per bike is nearest a bike's width
+                    # (perpendicular stalls 0.9 m; parallel-parked scooters 0.75 m)
+                    split_x = abs(r.w / num_divs - 0.8) <= abs(r.h / num_divs - 0.8)
                     for i in range(1, num_divs):
-                        bx = rx + i * sw
-                        d.append(draw.Line(bx, ry, bx, ry + rh, stroke='#94A3B8', stroke_width=0.8, stroke_dasharray='3,3'))
+                        if split_x:
+                            bx = rx + i * rw / num_divs
+                            d.append(draw.Line(bx, ry, bx, ry + rh, stroke='#94A3B8', stroke_width=0.8, stroke_dasharray='3,3'))
+                        else:
+                            by = ry + i * rh / num_divs
+                            d.append(draw.Line(rx, by, rx + rw, by, stroke='#94A3B8', stroke_width=0.8, stroke_dasharray='3,3'))
 
                 d.append(draw.Text("🏍️ BIKE PARKING", 9, cx, cy - 4, fill='#F1F5F9', text_anchor='middle', font_weight='bold'))
                 d.append(draw.Text(f"{slots} Bays ({r.w:.1f}×{r.h:.1f}m)", 7.5, cx, cy + 10, fill='#94A3B8', text_anchor='middle'))

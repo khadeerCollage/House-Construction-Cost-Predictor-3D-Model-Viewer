@@ -23,12 +23,16 @@ if root_dir not in sys.path:
 import importlib as _importlib
 for _name in ("floorplan_generator.room_specs", "floorplan_generator.vastu_engine",
               "floorplan_generator.family_analyzer", "floorplan_generator.space_program",
-              "floorplan_generator.site_planner", "floorplan_generator.layout_solver",
+              "floorplan_generator.site_planner", "floorplan_generator.site_feasibility",
+              "floorplan_generator.layout_solver", "floorplan_generator.quantities", "floorplan_generator.intent_engine",
+              "floorplan_generator.wish_parser",
               "floorplan_generator.layout_engine", "floorplan_generator.vastu_analyzer",
+              "floorplan_generator.takeoff", "floorplan_generator.house_report",
               "floorplan_renderer._common", "floorplan_renderer.svg_renderer",
               "floorplan_renderer.dxf_renderer", "floorplan_renderer.pdf_renderer",
               "floorplan_renderer.png_renderer", "model_folder.cost_engine",
-              "model_folder.floorplan_editor"):
+              "model_folder.intent_studio", "model_folder.floorplan_editor",
+              "model_folder.house_report_ui"):
     if _name in sys.modules:
         _importlib.reload(sys.modules[_name])
 
@@ -42,6 +46,88 @@ from model_folder.cost_engine import CostEngine
 from floorplan_generator.vastu_analyzer import VastuAnalyzer
 from model_folder.floorplan_editor import FloorPlanEditor
 from floorplan_generator.land_units import LandUnitsEngine, LandParcel
+
+
+_SITE_REQUESTS = [  # (additional_components key, plan room category, label)
+    ("car_parking", "PARKING", "🚗 Car parking"), ("bike_parking", "BIKE_PARKING", "🏍️ Two-wheeler parking"),
+    ("garden", "GARDEN", "🌿 Garden"), ("swimming_pool", "POOL", "🏊 Swimming pool"),
+    ("water_tank", "WATER_TANK", "💧 Water sump"), ("generator_room", "GENERATOR", "⚡ Generator"),
+    ("security_cabin", "SECURITY", "🛡️ Security cabin"),
+]
+
+
+def _site_request_status(plan):
+    """(not fitted, info) messages for amenities the owner switched on, with the planner's reason."""
+    comps = getattr(plan, "additional_components", None) or {}
+    placed = {r.category for r in plan.rooms}
+    notes = getattr(plan, "design_notes", None) or []
+    missing, info = [], []
+    for key, cat, label in _SITE_REQUESTS:
+        cfg = comps.get(key) or {}
+        if not cfg.get("enabled") or cat in placed:
+            continue
+        word = {"car_parking": "Car parking", "bike_parking": "Two-wheeler", "garden": "Garden",
+                "swimming_pool": "Swimming pool", "water_tank": "sump", "generator_room": "enerator",
+                "security_cabin": "Security cabin"}[key]
+        reason = next((n for n in notes if word in n), "")
+        if key == "car_parking" and "stilt" in reason:
+            info.append(f"{label}: {reason}")
+        else:
+            missing.append(f"{label} — {reason or 'no open space was left on this plot.'}")
+    return missing, info
+
+
+def _checker_version() -> float:
+    """Part of the cache key, so an edited site_feasibility.py is not answered from the cache."""
+    import floorplan_generator.site_feasibility as _sf
+    return os.path.getmtime(_sf.__file__)
+
+
+@st.cache_data(show_spinner=False, max_entries=256)
+def _bhk_fit(plot_w, plot_h, facing, family_kw, building_type, floors, vastu, version=0.0):
+    """Which BHK sizes fit the bare plot (cached: the form reruns on every click)."""
+    from floorplan_generator.site_feasibility import bhk_options
+    return bhk_options(plot_w, plot_h, facing, FamilyProfile(**family_kw), building_type, floors, vastu)
+
+
+@st.cache_data(show_spinner=False, max_entries=256)
+def _site_fit(plot_w, plot_h, facing, bhk, family_kw, building_type, floors, quality, vastu,
+              has_lift, lift_capacity, stair_code, components, version=0.0):
+    """Which site amenities fit with the choices made so far."""
+    from floorplan_generator.site_feasibility import check_site
+    return check_site(plot_w, plot_h, facing, bhk, FamilyProfile(**family_kw), building_type, floors,
+                      quality, vastu, has_lift, lift_capacity, stair_code, components)
+
+
+def _amenity_toggle(label, key, fit, help=None, show_ok=False) -> bool:
+    """A site-amenity switch, locked with the reason when the plot cannot take it."""
+    ss = st.session_state
+    ss.setdefault(key, False)
+    switched_off = fit.status == "no" and bool(ss[key])
+    if switched_off:
+        ss[key] = False             # it fitted before the owner changed the plot / BHK
+    on = st.toggle(label, key=key, disabled=fit.status == "no", help=help)
+    if fit.status == "no":
+        st.caption(f"🔒 **Won't fit here** — {fit.reason}." + (f"  \n💡 {fit.unlock}" if fit.unlock else "")
+                   + ("  \n↩️ Switched off after your last change." if switched_off else ""))
+    elif fit.status == "tight":
+        st.caption(f"⚠️ {fit.reason[0].upper()}{fit.reason[1:]}.")
+    elif on and show_ok:
+        st.caption(f"✅ {fit.reason[0].upper()}{fit.reason[1:]}.")
+    return on
+
+
+def _count_input(label, key, lo, top, step, default, unit) -> int:
+    """Number of cars / bikes, capped at what fits; a plain note when only the minimum fits."""
+    ss = st.session_state
+    if top <= lo:
+        st.caption(f"Room for {lo} {unit}{'s' if lo > 1 else ''} on this plot.")
+        return lo
+    ss.setdefault(key, max(lo, min(default, top)))
+    if int(ss[key]) > top:
+        ss[key] = top
+    return int(st.number_input(label, min_value=lo, max_value=top, step=step, key=key,
+                               help=f"Up to {top} {unit}s fit on this plot."))
 
 
 def render_design_tab():
@@ -168,13 +254,43 @@ def render_design_tab():
         store = st.checkbox("📦 Dedicated Store Room", value=False)
         guests = st.checkbox("🛏️ Frequent Guests", value=False)
 
+    family_kw = dict(adults=int(adults), children=int(children), elderly=int(elderly),
+                     guests_frequent=bool(guests), needs_home_office=bool(office),
+                     needs_pooja_room=bool(pooja), needs_servant_quarter=bool(servant),
+                     needs_store_room=bool(store))
+
     with col_eng:
         st.markdown("### ⚙️ 3. Engineering & Vastu")
         vastu_on = st.toggle("🕉️ Vastu Shastra Compliance", value=True, help="Places rooms according to the ancient 3x3 Vastu Purusha Mandala")
-        
-        bhk_options = ["Auto-Detect (Recommended)", "1BHK", "2BHK", "3BHK", "4BHK"]
-        bhk_choice = st.selectbox("BHK Configuration", options=bhk_options, index=0)
-        bhk_override = None if bhk_choice.startswith("Auto") else bhk_choice
+
+        # BHK choices follow the plot. Building type / floors are chosen further down, so their
+        # values for this rerun are read from session state (Streamlit updates it before the rerun).
+        _btype_now = st.session_state.get("bldg_type", "Independent House / Villa")
+        _floors_now = int(st.session_state.get("num_floors", 1) or 1)
+        bhk_fit = _bhk_fit(round(plot_w, 3), round(plot_h, 3), orient_code, family_kw, _btype_now,
+                           _floors_now, vastu_on, _checker_version())
+        fitting = [b for b, f in bhk_fit.items() if f.status != "no"] or ["1BHK"]
+        auto_raw = FamilyAnalyzer().analyze(FamilyProfile(**family_kw), plot_area=plot_area_sqm).recommended_bhk
+        auto_bhk = auto_raw if auto_raw in fitting else max([b for b in fitting if b <= auto_raw] or fitting[:1])
+        bhk_opts = ["Auto"] + fitting
+        if st.session_state.get("bhk_choice") not in bhk_opts:
+            st.session_state["bhk_choice"] = "Auto"
+
+        def _bhk_label(opt):
+            if opt == "Auto":
+                return f"Auto-Detect → {auto_bhk} (Recommended)"
+            return f"{opt}  ·  " + ("✅ fits well" if bhk_fit[opt].status == "ok" else "⚠️ small rooms on this plot")
+
+        bhk_choice = st.selectbox("BHK Configuration", options=bhk_opts, key="bhk_choice", format_func=_bhk_label,
+                                  help="Only the BHK sizes that fit your plot are offered.")
+        no_fit = [b for b, f in bhk_fit.items() if f.status == "no"]
+        if no_fit:
+            st.caption("🔒 Too big for this plot: " + " · ".join(
+                f"{b}" + (f" (needs about {bhk_fit[b].unlock.split('about ')[1].rstrip('.')})"
+                          if "about " in bhk_fit[b].unlock else "") for b in no_fit))
+        effective_bhk = auto_bhk if bhk_choice == "Auto" else bhk_choice
+        # Auto-detect may want more bedrooms than the plot holds — pin the largest that fits
+        bhk_override = None if bhk_choice == "Auto" and auto_bhk == auto_raw else effective_bhk
 
         quality = st.selectbox("Construction Quality", options=["Economy", "Standard", "Premium", "Luxury"], index=1)
         country = st.selectbox(
@@ -188,16 +304,26 @@ def render_design_tab():
         bldg_type = st.selectbox(
             "🏢 Building Type",
             ["Independent House / Villa", "Apartment / Multi-Storey Building", "Duplex Home"],
-            index=0,
+            index=0, key="bldg_type",
             help="Select Independent House or Multi-Storey Apartment"
         )
 
         max_floors = 10 if "Apartment" in bldg_type else 5
-        floors = st.number_input("Number of Floors", min_value=1, max_value=max_floors, value=1, step=1)
+        if int(st.session_state.get("num_floors", 1) or 1) > max_floors:
+            st.session_state["num_floors"] = max_floors
+        st.session_state.setdefault("num_floors", 1)
+        floors = st.number_input("Number of Floors", min_value=1, max_value=max_floors, step=1,
+                                 key="num_floors")
+        has_upper = floors > 1 or "Apartment" in bldg_type or "Duplex" in bldg_type
 
         # Lift/Elevator toggle — intelligent auto-enable for 4+ floors or Apartments
         is_mandated_lift = (floors >= 4) or ("Apartment" in bldg_type)
-        if is_mandated_lift:
+        if not has_upper:
+            st.toggle("🛗 Lift / Elevator Shaft", value=False, disabled=True, key="lift_locked",
+                      help="A single-storey house has no upper level for a lift to serve.")
+            st.caption("🔒 A lift needs 2 or more floors.")
+            has_lift = False
+        elif is_mandated_lift:
             st.info("🛗 **Lift Mandated / Auto-Enabled** (Required per NBC 2016 for 4+ storeys or multi-family apartments).")
             has_lift = st.toggle(
                 "🛗 Lift / Elevator Shaft",
@@ -239,60 +365,115 @@ def render_design_tab():
             "Spiral / Circular — Compact Architectural": "spiral",
             "Crossing / Zigzag — Modern Split-Level": "zigzag",
         }
-        stair_type = st.selectbox(
-            "🪜 Staircase Type",
-            stair_options,
-            index=0,
-            help="Dog-leg fits in compact plots. Open Well needs larger footprint."
-        )
-        stair_code = stair_map.get(stair_type, "dog_leg")
+        if not has_upper:
+            st.selectbox("🪜 Staircase Type", ["Outside straight stair to the terrace"], disabled=True,
+                         key="stair_locked")
+            st.caption("Single storey: a straight stair outside the house leads to the terrace. "
+                       "Add a floor to choose an inside staircase.")
+            stair_code = "dog_leg"      # unused by the engine for a single storey
+        else:
+            stair_type = st.selectbox(
+                "🪜 Staircase Type",
+                stair_options,
+                index=0,
+                help="Dog-leg fits in compact plots. Open Well needs larger footprint."
+            )
+            stair_code = stair_map.get(stair_type, "dog_leg")
 
     # ---------------------------------------------------------
-    # Additional Components & Site Amenities
+    # What fits on this plot — every site amenity is checked against the plot, BHK and
+    # building chosen above (and the amenities before it), using the generator's own site planner
     # ---------------------------------------------------------
-    st.markdown("""
+    _independent = "Independent" in bldg_type
+    ss = st.session_state
+    comps_now = {
+        'car_parking': {'enabled': bool(ss.get("amen_car")),
+                        'slots': int(ss.get("amen_car_slots", 1 if _independent else 3) or 1)},
+        'bike_parking': {'enabled': bool(ss.get("amen_bike")),
+                         'slots': int(ss.get("amen_bike_slots", 2 if _independent else 6) or 2)},
+        'garden': {'enabled': bool(ss.get("amen_garden")), 'pct': int(ss.get("amen_garden_pct", 10) or 10)},
+        'swimming_pool': {'enabled': bool(ss.get("amen_pool")), 'size': ss.get("amen_pool_size", "")},
+        'water_tank': {'enabled': bool(ss.get("amen_sump"))},
+        'generator_room': {'enabled': bool(ss.get("amen_genset"))},
+        'security_cabin': {'enabled': bool(ss.get("amen_security"))},
+    }
+    site_fit = _site_fit(round(plot_w, 3), round(plot_h, 3), orient_code, effective_bhk, family_kw, bldg_type,
+                         int(floors), quality, vastu_on, has_lift, lift_capacity, stair_code, comps_now, _checker_version())
+
+    if site_fit.lifestyle_dropped:
+        with col_family:
+            st.warning("🔒 Not enough room for: **" + ", ".join(site_fit.lifestyle_dropped) +
+                       f"** — it will be left out of the {effective_bhk} on this plot.")
+
+    st.markdown(f"""
     <div style="background: linear-gradient(135deg, #1E293B 0%, #0F172A 100%);
                 padding: 18px 24px; border-radius: 10px; border: 1px solid #38BDF8;
-                margin-top: 20px; margin-bottom: 20px;">
+                margin-top: 20px; margin-bottom: 12px;">
         <h4 style="color: #38BDF8; margin: 0 0 6px 0;"> Additional Components & Site Amenities</h4>
         <p style="color: #94A3B8; font-size: 13px; margin: 0;">
-            Customize exterior amenities, parking provisions, and utility rooms tailored for villas, multi-storey rentals, and apartments.
+            Checked against your {plot_cents:.2f}-cent plot and {effective_bhk}: anything that will not fit is
+            locked 🔒 with the reason and what would make it possible.
         </p>
     </div>
     """, unsafe_allow_html=True)
 
+    _house = site_fit.house_m2
+    _ratio = _house / max(site_fit.comfy_m2, 1e-6)
+    _feel = ("comfortable rooms" if _ratio >= 0.92 else
+             "rooms a little compact" if _ratio >= 0.80 else "small rooms")
+    st.markdown(f"🏠 **Your {effective_bhk} gets about {_house:.0f} m² ({_house * 10.764:.0f} sq ft) per floor** "
+                f"— {_feel}.")
+    if any(f.status == "no" for f in site_fit.amenities.values()):
+        st.info("🔒 " + site_fit.summary())
+
     ac_col1, ac_col2, ac_col3 = st.columns(3)
 
     with ac_col1:
-        has_car_parking = st.toggle("🚗 Car Parking Bay", value=False)
-        if has_car_parking:
-            car_slots = st.number_input("Car Slots", min_value=1, max_value=8, value=1 if "Independent" in bldg_type else 3)
-        else:
-            car_slots = 0
+        f = site_fit.amenities["car_parking"]
+        has_car_parking = _amenity_toggle("🚗 Car Parking Bay", "amen_car", f, show_ok=True)
+        car_slots = _count_input("Car Slots", "amen_car_slots", 1, f.max_value or 1, 1,
+                                 1 if _independent else 3, "car") if has_car_parking else 0
 
-        has_bike_parking = st.toggle("🏍️ Two-Wheeler Parking", value=False)
-        if has_bike_parking:
-            bike_slots = st.number_input("Bike Slots", min_value=2, max_value=20, value=2 if "Independent" in bldg_type else 6, step=2)
-        else:
-            bike_slots = 0
+        f = site_fit.amenities["bike_parking"]
+        has_bike_parking = _amenity_toggle("🏍️ Two-Wheeler Parking", "amen_bike", f)
+        bike_slots = _count_input("Bike Slots", "amen_bike_slots", 2, f.max_value or 2, 2,
+                                  2 if _independent else 6, "two-wheeler") if has_bike_parking else 0
 
     with ac_col2:
-        has_garden = st.toggle("🌿 Landscaped Garden / Lawn", value=False)
+        f = site_fit.amenities["garden"]
+        has_garden = _amenity_toggle("🌿 Landscaped Garden / Lawn", "amen_garden", f)
+        garden_pct = 0
         if has_garden:
-            garden_pct = st.slider("Garden Size (% of Plot)", min_value=5, max_value=25, value=10, step=5)
-        else:
-            garden_pct = 0
+            top = f.max_value or 5
+            if top <= 5:
+                st.caption(f"Room for a small garden (about {f.amount_m2:.0f} m²).")
+                garden_pct = 5
+            else:
+                if int(ss.get("amen_garden_pct", 10) or 10) > top:
+                    ss["amen_garden_pct"] = top
+                ss.setdefault("amen_garden_pct", min(10, top))
+                garden_pct = st.slider("Garden Size (% of Plot)", min_value=5, max_value=top, step=5,
+                                       key="amen_garden_pct", help=f"Up to {top}% fits on this plot.")
 
-        has_pool = st.toggle("🏊 Swimming Pool", value=False)
-        if has_pool:
-            pool_size = st.selectbox("Pool Dimension", ["Small (3m × 6m)", "Medium (4m × 8m)", "Large (5m × 10m)"])
-        else:
-            pool_size = ""
+        f = site_fit.amenities["swimming_pool"]
+        has_pool = _amenity_toggle("🏊 Swimming Pool", "amen_pool", f)
+        pool_size = ""
+        if has_pool and f.choices:
+            if ss.get("amen_pool_size") not in f.choices:
+                ss["amen_pool_size"] = f.choices[0]
+            pool_size = st.selectbox("Pool Dimension", f.choices, key="amen_pool_size")
+            if len(f.choices) < 3:
+                st.caption("Larger pools do not fit on this plot.")
 
     with ac_col3:
-        has_sump = st.toggle("💧 Underground Water Sump (NE)", value=False, help="Underground water reservoir placed in Ishan / NE zone per Vastu")
-        has_genset = st.toggle("⚡ Backup Generator / Transformer", value=False, help="Acoustic generator room in Agni/Nairutya per engineering codes")
-        has_security = st.toggle("🛡️ Security / Watchman Cabin", value=False, help="Gatehouse located at the plot entrance boundary")
+        has_sump = _amenity_toggle("💧 Underground Water Sump (NE)", "amen_sump", site_fit.amenities["water_tank"],
+                                   help="Underground water reservoir placed in Ishan / NE zone per Vastu")
+        has_genset = _amenity_toggle("⚡ Backup Generator / Transformer", "amen_genset",
+                                     site_fit.amenities["generator_room"],
+                                     help="Acoustic generator room in Agni/Nairutya per engineering codes")
+        has_security = _amenity_toggle("🛡️ Security / Watchman Cabin", "amen_security",
+                                       site_fit.amenities["security_cabin"],
+                                       help="Gatehouse located at the plot entrance boundary")
 
     additional_components = {
         'car_parking': {'enabled': has_car_parking, 'slots': car_slots if has_car_parking else 0},
@@ -303,6 +484,9 @@ def render_design_tab():
         'generator_room': {'enabled': has_genset},
         'security_cabin': {'enabled': has_security},
     }
+    # What the engine gets: the same choices plus the checker's hints (e.g. stilt parking)
+    from floorplan_generator.site_feasibility import apply_fit
+    additional_components = apply_fit(additional_components, site_fit)
 
     st.write("---")
 
@@ -341,9 +525,12 @@ def render_design_tab():
                 import floorplan_generator.space_program
                 import floorplan_generator.site_planner
                 import floorplan_generator.layout_solver
+                import floorplan_generator.quantities
+                import floorplan_generator.intent_engine
                 import floorplan_generator.layout_engine
                 for _mod in (floorplan_generator.space_program, floorplan_generator.site_planner,
-                             floorplan_generator.layout_solver, floorplan_generator.layout_engine):
+                             floorplan_generator.layout_solver, floorplan_generator.quantities,
+                             floorplan_generator.intent_engine, floorplan_generator.layout_engine):
                     importlib.reload(_mod)
                 from floorplan_generator.layout_engine import LayoutEngine, GeneratedFloorPlan
 
@@ -481,6 +668,14 @@ def render_design_tab():
         
         m4.metric("Est. Total Cost", cost_data['display']['total_compact'], cost_data['display']['rate'])
 
+        # Amenities the owner asked for but the plot could not take — say so instead of silently dropping them
+        _missing, _info = _site_request_status(plan)
+        if _missing:
+            st.warning("**Requested but not fitted on this plot:**\n\n" + "\n".join(f"- {m}" for m in _missing)
+                       + "\n\nTry a bigger plot, fewer rooms, or a second floor.")
+        for _m in _info:
+            st.info(_m)
+
         # Style View Selector
         style_col1, style_col2 = st.columns([3, 1])
         with style_col2:
@@ -505,7 +700,9 @@ def render_design_tab():
         # ---------------------------------------------------------
         # Interactive Editor Section
         # ---------------------------------------------------------
-        with st.expander("✏️ Interactive Floor Plan Studio & Live Customizer — Add Doors, Flat Steps, Adjust Meters & Edit Blueprint", expanded=False):
+        # keyed so it stays open across reruns (banners above come and go and would otherwise reset it)
+        with st.expander("🧠 Smart Re-Plan — change your house by telling us what you want",
+                         expanded=False, key="editor_expander"):
             FloorPlanEditor.render_editor_section(
                 plan,
                 cost_params={"city_tier": city_tier, "quality": quality, "floors": _plan_floors,
@@ -562,168 +759,25 @@ def render_design_tab():
         # ---------------------------------------------------------
         # Room Schedule, Vastu Breakdown, Cost BOQ & House Recommendations
         # ---------------------------------------------------------
+        # import_module (not `from model_folder import …`) so an edited module is re-imported on rerun
+        _report = _importlib.import_module("model_folder.house_report_ui")
+        _cost_params = {"city_tier": city_tier, "quality": quality, "floors": _plan_floors, "country": country}
+        # stateful tabs: the open tab survives button reruns, and hidden tabs are not computed
         t1, t2, t3, t4 = st.tabs([
-            "📊 Room Schedule & Dimensions",
-            "🕉️ Ultra-Premium Vastu Audit",
+            "📊 Room Schedule",
+            "🕉️ Vastu Engineering",
             "💰 Cost & Material BOQ",
-            "🏡 Best House Recommendations"
-        ])
-
-        with t1:
-            st.markdown("##### Room Schedule (NBC 2016 Compliant)")
-            room_rows = []
-            for r in plan.rooms:
-                w_ft = r.w * 3.28084
-                h_ft = r.h * 3.28084
-                sqft = r.area * 10.764
-                room_rows.append({
-                    "Room Name": r.name,
-                    "Category": r.category,
-                    "Width (m)": f"{r.w:.2f} m",
-                    "Length (m)": f"{r.h:.2f} m",
-                    "Dimensions (ft)": f"{w_ft:.1f}' × {h_ft:.1f}'",
-                    "Carpet Area (m²)": f"{r.area:.2f} m²",
-                    "Area (sq ft)": f"{sqft:.0f} sq ft",
-                })
-            st.table(room_rows)
-
-        with t2:
-            st.markdown("##### 🕉️ Vastu Shastra Compliance & Planetary Energy Audit")
-            analyzer = VastuAnalyzer(plan)
-            
-            # Overall score & progress bar
-            v_score = plan.vastu_score
-            rec = analyzer.get_house_recommendation()
-            st.progress(v_score / 100.0, text=f"Overall Vastu Harmony Score: {v_score:.0f}% — Grade: {rec['vastu_rating_grade']}")
-            
-            # Mandala Diagram & 32-Pada Entrance
-            v_col1, v_col2 = st.columns([1.1, 1], gap="medium")
-            
-            with v_col1:
-                st.markdown("###### 🌌 Vastu Purusha Mandala (9 Planetary Zones):")
-                st.markdown(analyzer.render_mandala_svg(), unsafe_allow_html=True)
-                st.caption("Energy vectors: Pranic inflow originates from Ishan (NE) and anchors heavily in Nairutya (SW).")
-
-            with v_col2:
-                st.markdown("###### 🚪 32-Pada Main Entrance Gate Audit:")
-                entrance = analyzer.audit_entrance()
-                
-                e_box_color = "#059669" if entrance["rating"] in ("SUPER_AUSPICIOUS", "AUSPICIOUS") else "#D97706" if entrance["rating"] == "NEUTRAL" else "#DC2626"
-                st.markdown(f"""
-                <div style="background: #0F172A; border-left: 5px solid {e_box_color}; padding: 12px; border-radius: 6px; margin-bottom: 12px;">
-                    <div style="font-size: 14px; font-weight: bold; color: #F8FAFC;">Gate {entrance['pada_id']}: {entrance['deity']} ({entrance['direction']} Face)</div>
-                    <div style="font-size: 12px; color: #38BDF8;">Auspiciousness: <b>{entrance['rating']}</b> ({entrance['score']:+d}/10)</div>
-                    <div style="font-size: 12px; color: #CBD5E1; margin-top: 4px;">{entrance['effect']}</div>
-                    {f'<div style="font-size: 11px; color: #F87171; margin-top: 4px;"><b>Remedy:</b> {entrance["remedy"]}</div>' if entrance['remedy'] else ''}
-                </div>
-                """, unsafe_allow_html=True)
-
-                st.markdown("###### 🌐 Pancha Bhoota (5 Elements) Elemental Balance:")
-                balance = analyzer.get_elemental_balance()
-                b_cols = st.columns(len(balance))
-                for idx, (elem_name, b_info) in enumerate(balance.items()):
-                    b_cols[idx].metric(elem_name.split()[0], f"{b_info['percentage']:.0f}%", b_info['health'])
-
-                st.write("")
-                # Certificate Download
-                cert_text = analyzer.generate_certificate_text()
-                st.download_button(
-                    label="📜 Download Vastu Compliance Audit Certificate (.txt)",
-                    data=cert_text,
-                    file_name=f"{plan.bhk_config}_Vastu_Audit_Certificate.txt",
-                    mime="text/plain",
-                    use_container_width=True
-                )
-
-            st.write("---")
-            st.markdown("##### 🧭 Zone-by-Zone Elemental & Room Placement Matrix")
-            zone_data = analyzer.get_zone_analysis()
-            zone_table_rows = []
-            for zd in zone_data:
-                status_icon = "🟢" if zd['status'] == "OPTIMAL" else "🟡" if zd['status'] == "GOOD" else "🟠" if zd['status'] == "ACCEPTABLE" else "🔴"
-                zone_table_rows.append({
-                    "Zone": zd["zone_name"],
-                    "Element": zd["element"],
-                    "Deity": zd["deity"],
-                    "Occupying Room(s)": ", ".join(zd["rooms"]),
-                    "Score": f"{zd['score']:+d}/10",
-                    "Status": f"{status_icon} {zd['status']}",
-                    "Observation": zd["observation"]
-                })
-            st.table(zone_table_rows)
-
-            # Defect & Non-demolition remedies
-            defects = analyzer.get_defects_and_remedies()
-            if defects:
-                st.markdown("##### 🛡️ Detected Energetic Anomalies & Non-Demolition Remedies (Parihara)")
-                for d in defects:
-                    sev_color = "#DC2626" if d['severity'] == "CRITICAL" else "#EA580C" if d['severity'] == "HIGH" else "#D97706"
-                    st.markdown(f"""
-                    <div style="background: #1E293B; border-left: 4px solid {sev_color}; padding: 10px 14px; border-radius: 6px; margin-bottom: 8px;">
-                        <span style="font-weight: bold; color: #F8FAFC;">{d['defect']}</span> 
-                        <span style="color: {sev_color}; font-size: 11px; font-weight: bold;">[{d['severity']}]</span><br>
-                        <span style="color: #94A3B8; font-size: 12px;"><b>Impact:</b> {d['impact']}</span><br>
-                        <span style="color: #38BDF8; font-size: 12px;"><b>Vedic Remedy:</b> {d['remedy']}</span>
-                    </div>
-                    """, unsafe_allow_html=True)
-            else:
-                st.success("✅ **Zero Vastu defects detected!** All primary rooms and circulation paths align flawlessly with canonical guidelines.")
-
-        with t3:
-            st.markdown("##### Construction Cost Estimate & Bill of Quantities (BOQ)")
-            _money = lambda v, c=False: CostEngine.format_money(v, cost_data['country'], compact=c)  # noqa: E731
-            disp = cost_data['display']
-            _md = lambda s: s.replace("$", r"\$")  # noqa: E731 — '$…$' would render as LaTeX
-            st.markdown(_md(
-                f"**Total Project Cost (excl. land):** {disp['total']} (*{disp['total_compact']}*) at "
-                f"**{disp['rate']}** — {cost_data['region']}, {cost_data['country']} · "
-                f"{cost_data['currency']} · Construction (hard) cost {disp['construction']}"))
-
-            calc_col, split_col = st.columns([3, 2])
-            with calc_col:
-                st.markdown("###### 🧮 How this number is calculated")
-                st.table([{"Step": s["step"], "Basis": _md(s["basis"]), "Value": _md(s["value"])}
-                          for s in cost_data['calculation']])
-            with split_col:
-                st.markdown("###### 📊 Cost Breakdown")
-                _tot = max(1.0, cost_data['total_cost'])
-                st.table([{"Item": k, "Amount": _md(_money(v)), "Share": f"{100 * v / _tot:.1f}%"}
-                          for k, v in cost_data['cost_breakdown'].items()])
-
-            st.markdown(f"###### 🌍 Location × Quality Cost Matrix — this house across {cost_data['country']}")
-            _matrix = CostEngine.region_matrix_for_plan(plan, cost_data['country'], _plan_floors)
-            _q_cols = ["Economy", "Standard", "Premium", "Luxury"]
-            st.dataframe(
-                [{"City / Region": ("▶ " if r["region"] == cost_data['region'] else "") + r["region"],
-                  "Index": f"×{r['index']:.2f}", **{q: _money(r[q], True) for q in _q_cols}}
-                 for r in _matrix],
-                use_container_width=True, hide_index=True, height=min(420, 38 + 35 * len(_matrix)))
-
-            st.markdown("###### 🧱 Estimated Structural Materials Required:")
-            materials = cost_data['materials']
-            mat_cols = st.columns(len(materials) or 1)
-            for _col, (_k, _info) in zip(mat_cols, materials.items()):
-                _col.metric(_info.get('label', _k), f"{_info.get('quantity', 0):,} {_info.get('unit', '')}",
-                            _money(_info.get('cost', 0)))
-
-            st.write("")
-            for _note in cost_data.get('notes', []):
-                st.caption(_note)
-
-        with t4:
-            st.markdown("##### 🏡 AI Architect — Best House Archetype & Layout Recommendations")
-            rec = analyzer.get_house_recommendation()
-            
-            st.info(f"🏆 **Recommended House Archetype:** **{rec['house_archetype']}**\n\n{rec['summary']}")
-            
-            r_col1, r_col2 = st.columns(2)
-            with r_col1:
-                st.markdown("###### 📐 Land & Geometry Assessment:")
-                st.markdown(f"- **Plot Aspect Ratio:** `{plan.plot_width:.1f}m (W) × {plan.plot_height:.1f}m (L)` (Ratio: {plan.plot_width/max(0.1, plan.plot_height):.2f})")
-                st.markdown(f"- **Geometry Classification:** {rec['plot_shape_evaluation']}")
-                st.markdown(f"- **Cardinal Alignment:** Road frontage facing **{plan.orientation}**.")
-            
-            with r_col2:
-                st.markdown("###### 🎯 Targeted Optimization Suggestions:")
-                for swap in rec['room_swap_recommendations']:
-                    st.markdown(f"- {swap}")
+            "🏡 Best House Recommendation"
+        ], key="report_tab", on_change="rerun")
+        if t1.open:
+            with t1:
+                _report.render_room_schedule(plan)
+        if t2.open:
+            with t2:
+                _report.render_vastu(plan, _cost_params)
+        if t3.open:
+            with t3:
+                _report.render_cost(plan, cost_data, _cost_params, quality, _plan_floors)
+        if t4.open:
+            with t4:
+                _report.render_recommendations(plan, cost_data, _cost_params, quality)

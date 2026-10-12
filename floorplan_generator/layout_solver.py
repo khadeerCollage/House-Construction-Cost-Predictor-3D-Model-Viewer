@@ -181,6 +181,8 @@ class BandSpineSolver:
         self._bw_cache: Dict = {}
         self._gw_cache: Dict = {}
         self._door_cache: Dict = {}
+        # x-range of the road facade the main door must avoid (e.g. a corner car bay in front of it)
+        self.door_exclusion: Optional[Tuple[float, float]] = None
 
     # ------------------------------------------------------------- modes
     def candidate_modes(self) -> List[str]:
@@ -821,6 +823,19 @@ class BandSpineSolver:
         dw = 1.0
         lo = living.x + 0.45
         hi = living.right - 0.45 - dw
+        if self.door_exclusion:
+            ex0, ex1 = self.door_exclusion
+            ok = [x for x in (lo + 0.1 * i for i in range(int(max(0.0, hi - lo) / 0.1) + 1))
+                  if x >= ex1 or x + dw <= ex0]
+            if ok:
+                best = None
+                for x in ok:
+                    pada = pada_for_point(x + dw / 2, living.top, (self.fx, self.fy, self.fw, self.fd), self.facing)
+                    key = (pada.score if self.vastu_enabled else 0) - 0.05 * abs(x + dw / 2 - living.cx)
+                    if best is None or key > best[0]:
+                        best = (key, x, pada.score)
+                return _snap(best[1]), _snap(best[1]) + dw, best[2]
+            # living has no facade clear of the bay: normal choice, penalised in score()
         if hi < lo:
             c = living.cx - dw / 2
             pada = pada_for_point(c + dw / 2, living.top, (self.fx, self.fy, self.fw, self.fd), self.facing)
@@ -834,6 +849,23 @@ class BandSpineSolver:
                 best = (key, x, pada.score)
             x += 0.1
         return _snap(best[1]), _snap(best[1]) + dw, best[2]
+
+    @staticmethod
+    def anchor_penalty(key: str, z: str) -> Optional[float]:
+        """Classical anchors: master → SW, kitchen → SE (Agni), pooja → NE (Ishan); None = no anchor rule."""
+        if key == "MASTER_BEDROOM":
+            return 0 if z == "SW" else (5 if z in ("S", "W") else 14)
+        if key == "KITCHEN":
+            return 0 if z == "SE" else (3 if z in ("NW", "E") else 9)
+        if key == "POOJA":
+            return 0 if z == "NE" else (3 if z in ("E", "N") else 9)
+        if key in ("ELDER_BEDROOM", "CHILD_BEDROOM", "GUEST_BEDROOM") and z in ("NE", "SE"):
+            return 6
+        if key == "STAIRS" and z in ("NE", "N", "E", "CENTER"):
+            return 6
+        if key == "BATHROOM" and z == "SW":
+            return 4
+        return None
 
     def score(self, rooms: List[Placed]) -> Tuple[float, float, Tuple[float, float], Dict[str, float]]:
         pen: Dict[str, float] = {}
@@ -963,6 +995,8 @@ class BandSpineSolver:
         if living is not None:
             d0, d1, pada_score = self.best_door(living)
             door = (d0, d1)
+            if self.door_exclusion and d1 > self.door_exclusion[0] and d0 < self.door_exclusion[1]:
+                add("entrance_blocked", 40)     # the car bay would block the way to the main door
         placements, weights = [], []
         for r in rooms:
             key = self._vastu_key(r)
@@ -979,22 +1013,12 @@ class BandSpineSolver:
                     "BATHROOM", "KITCHEN", "STAIRS", "LIFT", "STORE", "UTILITY"):
                 brahma_hit += 1
         if self.vastu_enabled:
-            # Classical anchors: master → SW, kitchen → SE (Agni), pooja → NE (Ishan)
             for (key, z) in placements:
                 if self.engine.is_taboo(key, z):
                     add("taboo", 12)
-                if key == "MASTER_BEDROOM":
-                    add("anchor", 0 if z == "SW" else (5 if z in ("S", "W") else 14))
-                elif key == "KITCHEN":
-                    add("anchor", 0 if z == "SE" else (3 if z in ("NW", "E") else 9))
-                elif key == "POOJA":
-                    add("anchor", 0 if z == "NE" else (3 if z in ("E", "N") else 9))
-                elif key in ("ELDER_BEDROOM", "CHILD_BEDROOM", "GUEST_BEDROOM") and z in ("NE", "SE"):
-                    add("anchor", 6)
-                elif key == "STAIRS" and z in ("NE", "N", "E", "CENTER"):
-                    add("anchor", 6)
-                elif key == "BATHROOM" and z == "SW":
-                    add("anchor", 4)
+                a = self.anchor_penalty(key, z)
+                if a is not None:
+                    add("anchor", a)
         vastu = self.engine.compute_plan_score(placements, weights, extra_scores=[(pada_score, 3.0)])
         vastu = max(0.0, vastu - 8 * brahma_hit)
 

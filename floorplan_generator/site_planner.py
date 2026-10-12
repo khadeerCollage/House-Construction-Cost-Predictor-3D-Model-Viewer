@@ -98,6 +98,8 @@ class SitePlan:
     items: List[SiteItem] = field(default_factory=list)
     gates: List[Tuple[float, float]] = field(default_factory=list)  # x-ranges on the top edge
     coverage: float = 0.0
+    # x-range of the road facade the main door must keep clear of (a corner car bay sits in front of it)
+    door_exclusion: Optional[Tuple[float, float]] = None
 
 
 class SitePlanner:
@@ -215,7 +217,15 @@ class SitePlanner:
 
         # Car parking reservation
         car_mode = None
+        door_exclusion = None
         car_cfg = self._enabled("car_parking")
+        if car_cfg and car_cfg.get("mode") == "stilt" and self.multi_level:
+            # site_feasibility found an open bay would squeeze the rooms below a comfortable size
+            car_mode = "stilt"
+            n_cars = max(1, int(car_cfg.get("slots", 1) or 1))
+            notes.append(f"Car parking ({n_cars} bay{'s' if n_cars > 1 else ''}) on a stilt floor below the "
+                         "building: an open bay would make every room smaller than comfortable.")
+            car_cfg = {}
         if car_cfg:
             slots = max(1, int(car_cfg.get("slots", 1) or 1))
             path_w = 1.9                      # entrance path to the main door
@@ -257,6 +267,21 @@ class SitePlanner:
                         score *= 1.04   # gate-side parking is the convenient default
                     if chosen is None or score > chosen[2]:
                         chosen = (mode, cand, score)
+            if not chosen and slots * 5.5 + path_w <= self.W - 0.4:
+                # Narrow plot: park parallel to the road at the vehicle-friendly front corner
+                # (NW / SE) and keep the main door on the rest of the facade, instead of dropping
+                # the car the owner asked for.
+                cand = dict(sb)
+                cand["top"] = max(cand["top"], 3.3)
+                if feasible(cand):
+                    chosen = ("front_parallel", cand, 0.0)
+                    bay = slots * 5.5
+                    if self._car_corner_side(bay, self._available(cand)) == "left":
+                        door_exclusion = (0.0, MARGIN_PLOT + bay + 0.45)
+                    else:
+                        door_exclusion = (self.W - MARGIN_PLOT - bay - 0.45, self.W)
+                    notes.append(f"Narrow frontage: car parked parallel to the road in the front yard "
+                                 f"({slots * 5.5:.1f} × 2.6 m bay); the main door is kept clear of it.")
             if chosen:
                 car_mode, sb = chosen[0], chosen[1]
             elif self.multi_level:
@@ -275,7 +300,7 @@ class SitePlanner:
             placed = False
             for c in ("N", "E"):
                 side = self.side_of[c]
-                if side == "top" and car_mode == "front":
+                if side == "top" and car_mode in ("front", "front_parallel"):
                     continue
                 cand = dict(sb)
                 cand[side] = max(cand[side], need)
@@ -352,7 +377,40 @@ class SitePlanner:
 
         return SitePlan(plot_w=self.W, plot_h=self.H, facing=self.facing, setbacks=final_sb,
                         footprint=(fx, fy, fw, fd), car_mode=car_mode, ext_stair_side=ext_side,
-                        notes=notes, coverage=coverage)
+                        notes=notes, coverage=coverage, door_exclusion=door_exclusion)
+
+    def _car_corner_side(self, bay: float, facade: Rect) -> str:
+        """
+        Front corner (plan 'left' / 'right') for a parallel car bay. The bay blocks that end of
+        the facade for the main door, so with Vastu on the side is chosen to keep the most
+        auspicious entrance pada free (entrance weight 3) while preferring a vehicle zone
+        (NW/SE, weight 0.75); without Vastu, the NW/SE corner.
+        """
+        from floorplan_generator.vastu_engine import VastuEngine, pada_for_point
+        corner = "NW" if "NW" in self._front_corners() else "SE"
+        default = "left" if corner == self._front_corners()[0] else "right"
+        if not self.vastu:
+            return default
+        fx, fy, fw, fd = facade
+        plot_eng = VastuEngine.for_facing(self.W, self.H, self.facing)
+        best = None
+        for side in ("left", "right"):
+            ex = (0.0, MARGIN_PLOT + bay + 0.45) if side == "left" else (self.W - MARGIN_PLOT - bay - 0.45, self.W)
+            door = None
+            x = fx + 0.45
+            while x <= fx + fw - 1.45 + 1e-6:
+                if x >= ex[1] or x + 1.0 <= ex[0]:
+                    sc = pada_for_point(x + 0.5, fy + fd, facade, self.facing).score
+                    door = sc if door is None else max(door, sc)
+                x += 0.1
+            if door is None:
+                continue
+            cx = MARGIN_PLOT + bay / 2 if side == "left" else self.W - MARGIN_PLOT - bay / 2
+            car = plot_eng.get_room_score("PARKING", plot_eng.get_zone_for_position(cx, self.H - 1.5).value)
+            val = 3.0 * door + 0.75 * car + (0.1 if side == default else 0.0)
+            if best is None or val > best[0]:
+                best = (val, side)
+        return best[1] if best else default
 
     def _open_area_ne(self, sb: Dict[str, float]) -> float:
         area = 0.0
@@ -560,7 +618,13 @@ class SitePlanner:
                 per_row = max(1, math.ceil(n / 2))
                 if not put("bike", f"Bike Parking ({n} Bikes)", "BIKE_PARKING", per_row * 0.9, 4.0,
                            ["top", "left", "right", "bottom"], front_corner, "#475569", min_score=-25):
-                    notes.append("Two-wheeler parking skipped: no open strip ≥ 2.0 m deep.")
+                    # Shallow front yard (small plots): scooters parked parallel to the wall,
+                    # two abreast (0.75 m each), 2.0 m long
+                    rows = 2 if n > 1 else 1
+                    if not put("bike", f"Bike Parking ({n} Bikes, parallel)", "BIKE_PARKING",
+                               math.ceil(n / rows) * 2.0, rows * 0.75,
+                               ["top", "left", "right", "bottom"], front_corner, "#475569", min_score=-25):
+                        notes.append("Two-wheeler parking skipped: no open strip ≥ 1.5 m deep.")
 
         # 5. Underground sump in Ishan (NE)
         if self._enabled("water_tank"):

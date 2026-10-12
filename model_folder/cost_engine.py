@@ -737,6 +737,42 @@ class CostEngine:
             extras["Lift Installation"] = R["LIFT_BASE"] + R["LIFT_PER_STOP"] * max(0, floors - 2)
         return area, kitchens, baths, bedrooms, extras
 
+    # Arrangement-dependent work items, indicative 2026 India rates (₹, Standard quality,
+    # Tier-2 average). Other markets scale by their Standard rate per m² relative to India's.
+    LAYOUT_RATES_INDIA = {
+        "partition_m": ("Internal partition walls", "m", 3900.0),   # 115 mm brick, plaster both faces, 3.0 m high
+        "doors": ("Internal doors", "nos", 14000.0),                 # frame, flush shutter, hardware, paint
+        "glazing_m2": ("Windows & ventilators", "m²", 6500.0),       # UPVC sliding with MS grille
+        "plumbing_m": ("Plumbing & drainage runs", "m", 1100.0),     # CPVC supply + PVC drain, fittings, chasing
+    }
+    LAYOUT_LINE = "Layout changes vs original design"
+
+    @classmethod
+    def layout_delta(cls, quantities: Dict[str, float], reference: Dict[str, float],
+                     country: Optional[str] = None, quality_level: str = "Standard (Medium)") -> Dict[str, Any]:
+        """
+        Cost of the arrangement-dependent work that differs from `reference` (before the
+        location index and soft costs, which the estimate applies). Items carry quantity
+        deltas so the UI can say *why* an edited design costs more or less.
+        """
+        country = cls.normalize_country(country)
+        m = MARKETS[country]
+        india = MARKETS["India"]
+        std = "Standard (Medium)"
+        per_m2 = lambda mk: mk["rates"][std] * (SQFT_PER_M2 if mk["unit"] == "sqft" else 1.0)
+        scale = per_m2(m) / per_m2(india)
+        qf = m["rates"][cls.normalize_quality(quality_level)] / m["rates"][std]
+        items, total = [], 0.0
+        for key, (label, unit, rate) in cls.LAYOUT_RATES_INDIA.items():
+            dq = float(quantities.get(key, 0.0)) - float(reference.get(key, 0.0))
+            if abs(dq) < 0.05:
+                continue
+            r = rate * scale * qf
+            items.append({"key": key, "label": label, "unit": unit, "delta_qty": round(dq, 2),
+                          "rate": round(r, 2), "amount": round(dq * r, 2)})
+            total += dq * r
+        return {"items": items, "total": round(total, 2), "country": country}
+
     @classmethod
     def estimate_for_plan(cls, plan, city_tier: str = "Tier-2 (Urban)",
                           quality_level: str = "Standard (Medium)",
@@ -750,12 +786,175 @@ class CostEngine:
         country, region = cls.resolve_location(country, region, city_tier)
         floors = max(1, int(num_floors or getattr(plan, "num_floors", 1) or 1))
         area, kitchens, baths, bedrooms, extras_raw = cls._plan_inputs(plan, country, floors)
+        # An owner-edited design: price the partitions / doors / glazing / plumbing that differ
+        # from the design it started from (unedited plans have no difference → no line)
+        layout = None
+        ref = (getattr(plan, "layout_state", None) or {}).get("ref_quantities")
+        if ref:
+            from floorplan_generator.quantities import layout_quantities
+            layout = cls.layout_delta(layout_quantities(plan), ref, country, quality_level)
+            if abs(layout["total"]) >= 1.0:
+                extras_raw[cls.LAYOUT_LINE] = layout["total"] * floors
         est = cls.estimate_cost(area_sqm=area, bedrooms=bedrooms, bathrooms=baths, kitchens=kitchens,
                                 living_rooms=1, quality_level=quality_level, num_floors=floors,
                                 country=country, region=region, _extras_raw=extras_raw)
         mult = est["region_multiplier"]
         est["extras"] = {k: round(v * mult, 2) for k, v in extras_raw.items()}
+        if layout is not None:
+            for it in layout["items"]:
+                it["amount"] = round(it["amount"] * mult * floors, 2)
+            layout["total"] = round(layout["total"] * mult * floors, 2)
+            est["layout_delta"] = layout
         return est
+
+    # ---------------------------------------------------------------- drawing BOQ
+    # Supply rates (material + fixtures, no labour), India 2026, Tier-2 average, by quality grade
+    FINISH_RATES_INDIA = {
+        #                      Economy  Standard  Premium  Luxury
+        "floor_tile_m2":      (450,     750,      1600,    3500),
+        "wet_tile_m2":        (400,     600,      1100,    2500),
+        "waterproofing_m2":   (120,     180,      260,     380),
+        "main_door":          (18000,   35000,    70000,   150000),
+        "room_door":          (7000,    11000,    20000,   40000),
+        "toilet_door":        (5000,    7500,     12000,   25000),
+        "window_m2":          (2800,    4500,     7500,    14000),
+        "paint_in_m2":        (45,      70,       110,     180),
+        "paint_out_m2":       (40,      60,       95,      150),
+        "sanitary_set":       (15000,   28000,    60000,   150000),
+        "sink_set":           (4000,    7000,     15000,   35000),
+        "electrical_point":   (650,     900,      1400,    2600),
+        "pipe_m":             (250,     350,      500,     800),
+        "excavation_m3":      (350,     350,      350,     350),
+        "filling_m3":         (600,     600,      600,     600),
+    }
+    BOQ_ITEM_RATE = {   # take-off item → supply rate key
+        "Excavation for footings": "excavation_m3", "Plinth filling (earth / murram)": "filling_m3",
+        "Vitrified floor tiles": "floor_tile_m2", "Anti-skid tiles (toilets, utility)": "wet_tile_m2",
+        "Wall dado tiles": "wet_tile_m2", "Toilet waterproofing": "waterproofing_m2",
+        "Terrace waterproofing": "waterproofing_m2", "Main door (frame + shutter)": "main_door",
+        "Room doors": "room_door", "Toilet doors (WPC / FRP)": "toilet_door", "Windows & ventilators": "window_m2",
+        "Inside: putty, primer, 2 coats emulsion": "paint_in_m2",
+        "Outside: primer + 2 coats weatherproof paint": "paint_out_m2",
+        "Toilet sanitary sets": "sanitary_set", "Kitchen sink sets": "sink_set",
+        "Electrical points (conduit + wiring)": "electrical_point", "Water supply & drainage pipes": "pipe_m",
+    }
+    # Labour / material ratio by stage (CPWD analysis of rates, typical Indian site practice)
+    STAGE_LABOUR = {"foundation": 0.70, "plinth": 0.60, "frame": 0.60, "masonry": 0.80, "rough_in": 0.80,
+                    "plaster": 2.00, "flooring": 0.60, "openings": 0.15, "finishing": 0.80}
+    STAGE_WEEKS = {"foundation": 0.12, "plinth": 0.05, "frame": 0.22, "masonry": 0.14, "rough_in": 0.05,
+                   "plaster": 0.12, "flooring": 0.10, "openings": 0.05, "finishing": 0.15}
+
+    @classmethod
+    def boq_for_plan(cls, plan, est: Dict[str, Any], quality_level: str = "Standard (Medium)",
+                     design_floors: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Bill of quantities measured from the drawing (floorplan_generator.takeoff), priced at
+        local material rates, and split into construction stages. The stage amounts are the
+        project's own construction cost (`est`, from estimate_for_plan) shared out in proportion
+        to each stage's materials + its typical labour — one cost formula, not two.
+        """
+        country = est.get("country", "India")
+        if country != "India":
+            return {"available": False,
+                    "reason": "Measured take-off covers India's RCC-frame + brick construction; "
+                              f"{country} uses {MARKETS[country]['system'].lower()}, priced by area here."}
+        from floorplan_generator.takeoff import material_takeoff, STAGES
+        per_floor_sqft = (getattr(plan, "total_built_up_area", 0) or 0) * SQFT_PER_M2
+        floors = max(1, int(round(est.get("area_sqft", 0) / per_floor_sqft))) if per_floor_sqft else \
+            max(1, int(getattr(plan, "num_floors", 1) or 1))          # the floors this estimate priced
+        to = material_takeoff(plan, floors=floors, design_floors=design_floors)
+        m = MARKETS["India"]
+        mult = est.get("region_multiplier", 1.0)
+        mat_index = 1 + 0.5 * (mult - 1)
+        quality = cls.normalize_quality(quality_level)
+        qi = QUALITY_KEYS.index(quality)
+        base = {k: price * mat_index for k, _, _, _, price, _ in m["materials"]}
+        sand_cft, agg_cft = base["Sand"], base["Aggregate"]
+
+        def basic_cost(line):
+            return (line["cement_bags"] * base["Cement"] + line["steel_kg"] * base["Steel"]
+                    + line["bricks"] * base["Bricks"] + line["sand_m3"] * 35.3147 * sand_cft
+                    + line["aggregate_m3"] * 35.3147 * agg_cft)
+
+        lines = []
+        for l in to["lines"]:
+            key = cls.BOQ_ITEM_RATE.get(l["item"])
+            rate = cls.FINISH_RATES_INDIA[key][qi] * mat_index if key else 0.0
+            amount = basic_cost(l) + l["qty"] * rate
+            lines.append(dict(l, rate=round(rate, 2), amount=round(amount, 2)))
+
+        site_lines = [l for l in lines if l["group"] == "Site works"]
+        bld_lines = [l for l in lines if l["group"] != "Site works"]
+        breakdown = est.get("cost_breakdown", {})
+        site_cost = breakdown.get("Site Works & Amenities", 0.0)
+        lift_cost = breakdown.get("Lift & Elevator", 0.0)
+        building = max(0.0, est.get("construction_cost", 0.0) - site_cost - lift_cost)
+        materials_total = sum(l["amount"] for l in bld_lines)
+
+        # stage weights = materials × (1 + labour); scaled so the stages add up to the building cost
+        raw = {k: 0.0 for k, _, _ in STAGES}
+        mats = {k: {"cement_bags": 0.0, "steel_kg": 0.0, "bricks": 0.0, "materials": 0.0} for k, _, _ in STAGES}
+        for l in bld_lines:
+            raw[l["stage"]] += l["amount"] * (1 + cls.STAGE_LABOUR[l["stage"]])
+            for k in ("cement_bags", "steel_kg", "bricks"):
+                mats[l["stage"]][k] += l[k]
+            mats[l["stage"]]["materials"] += l["amount"]
+        scale = building / max(1.0, sum(raw.values()))
+        sqft = to["basis"]["built_up_sqft"]
+        weeks_total = round(16 + 0.011 * sqft + 6 * (floors - 1))
+        stages, cum, week = [], 0.0, 0.0
+        for key, label, what in STAGES:
+            amt = raw[key] * scale
+            cum += amt
+            w = max(1.0, cls.STAGE_WEEKS[key] * weeks_total)
+            stages.append({"key": key, "label": label, "what": what, "amount": round(amt, 2),
+                           "materials": round(mats[key]["materials"], 2),
+                           "pct": round(100 * amt / max(1.0, building + site_cost + lift_cost), 1),
+                           "cumulative": round(cum, 2), "start_week": round(week), "weeks": round(w),
+                           "cement_bags": round(mats[key]["cement_bags"]), "steel_kg": round(mats[key]["steel_kg"]),
+                           "bricks": round(mats[key]["bricks"])})
+            week += w
+        if site_cost or lift_cost:
+            cum += site_cost + lift_cost
+            stages.append({"key": "site", "label": "Site works & amenities" + (" + lift" if lift_cost else ""),
+                           "what": "Compound wall, gate, parking, garden, sump …" + (", lift" if lift_cost else ""),
+                           "amount": round(site_cost + lift_cost, 2),
+                           "materials": round(sum(l["amount"] for l in site_lines), 2),
+                           "pct": round(100 * (site_cost + lift_cost) / max(1.0, building + site_cost + lift_cost), 1),
+                           "cumulative": round(cum, 2), "start_week": round(week - stages[-1]["weeks"]),
+                           "weeks": stages[-1]["weeks"],
+                           "cement_bags": round(sum(l["cement_bags"] for l in site_lines)), "steel_kg": 0,
+                           "bricks": round(sum(l["bricks"] for l in site_lines))})
+
+        t = to["totals"]
+        thumb = {k: v.get("quantity", 0) for k, v in (est.get("materials") or {}).items()}
+        key_materials = [
+            ("Cement", "Cement (OPC 53, 50 kg)", t["cement_bags"], "bags", base["Cement"]),
+            ("Steel", "TMT steel (Fe 500D)", t["steel_kg"], "kg", base["Steel"]),
+            ("Bricks", "Clay bricks", t["bricks"], "nos", base["Bricks"]),
+            ("Sand", "M-sand / river sand", t["sand_cft"], "cft", sand_cft),
+            ("Aggregate", "Aggregate (20/40 mm)", t["aggregate_cft"], "cft", agg_cft),
+        ]
+        return {
+            "available": True,
+            "lines": lines,
+            "materials": [{"key": k, "label": lab, "qty": round(q), "unit": u, "rate": round(r, 2),
+                           "amount": round(q * r, 2), "per_sqft": round(q / max(1, sqft), 2),
+                           "thumb_qty": thumb.get(k)} for k, lab, q, u, r in key_materials],
+            "finishes": {"floor_tiles_m2": t["floor_tiles_m2"], "paint_litres": t["paint_litres"],
+                         "putty_kg": t["putty_kg"], "concrete_m3": t["concrete_m3"],
+                         "brickwork_m3": t["brickwork_m3"]},
+            "groups": {g: round(sum(l["amount"] for l in bld_lines if l["group"] == g), 2)
+                       for g in dict.fromkeys(l["group"] for l in bld_lines)},
+            "stages": stages,
+            "materials_total": round(materials_total, 2),
+            "labour_total": round(max(0.0, building - materials_total), 2),
+            "building_cost": round(building, 2),
+            "site_cost": round(site_cost + lift_cost, 2),
+            "weeks": int(round(week)),
+            "basis": to["basis"],
+            "country": country,
+        }
 
     @classmethod
     def region_matrix(cls, area_sqm: float, country: str, num_floors: int = 1,

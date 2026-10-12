@@ -51,6 +51,7 @@ class RoomRect:
     color: str           # hex color code for visualization
     area: float = 0.0    # carpet area in m² (computed)
     role: str = ""       # Vastu role (MASTER_BEDROOM, CHILD_BEDROOM, …) when known
+    key: str = ""        # stable space-program key ('bed1', 'kitchen', …) for intent editing
 
     def __post_init__(self):
         if self.area == 0.0:
@@ -226,6 +227,10 @@ class GeneratedFloorPlan:
     design_notes: List[str] = field(default_factory=list)
     engineering: Dict = field(default_factory=dict)
     vastu_breakdown: Dict = field(default_factory=dict)
+    # ── Intent editing (see intent_engine.py) ──────────────────────────────
+    generation_params: Dict = field(default_factory=dict)   # LayoutEngine kwargs that rebuild this plan
+    layout_state: Dict = field(default_factory=dict)        # solver arrangement + room centroids by key
+    edit_report: Dict = field(default_factory=dict)         # how an intent re-plan met the user's wishes
 
 
 # =============================================================================
@@ -348,6 +353,8 @@ class LayoutEngine:
         building_type: str = "Independent House",
         additional_components: Optional[Dict] = None,
         family_profile=None,
+        design_intents: Optional[List[Dict]] = None,
+        base_layout: Optional[Dict] = None,
         **kwargs,
     ):
         """
@@ -369,6 +376,9 @@ class LayoutEngine:
             building_type: 'Independent House', 'Apartment', or 'Duplex'.
             additional_components: Site amenities dict (parking, garden, pool, ...).
             family_profile: Optional FamilyProfile — drives bedroom roles and lifestyle rooms.
+            design_intents: Optional user wishes for an edit re-plan (intent_engine dicts, e.g.
+                            {"type": "zone", "room": "kitchen", "zones": ["NW"]}).
+            base_layout: The `layout_state` of the plan being edited — the re-plan stays close to it.
         """
         self.plot_width = max(plot_width, 4.0)
         self.plot_height = max(plot_height, 4.0)
@@ -390,6 +400,17 @@ class LayoutEngine:
         self.additional_components = additional_components or {}
         self.family_profile = family_profile
         self.custom_rooms = custom_rooms
+        self.design_intents = list(design_intents or [])
+        self.base_layout = base_layout or {}
+        # Everything needed to rebuild this exact plan (the intent editor re-runs the pipeline)
+        self.generation_params = dict(
+            plot_width=plot_width, plot_height=plot_height, bhk_config=bhk_config,
+            vastu_enabled=vastu_enabled, orientation=orientation, quality_level=quality_level,
+            project_name=project_name, family_description=family_description,
+            custom_rooms=custom_rooms, has_lift=has_lift, lift_capacity=lift_capacity,
+            stair_type=stair_type, num_floors=num_floors, building_type=building_type,
+            additional_components=self.additional_components, family_profile=family_profile,
+        )
 
         self.wall = WallThickness()
         self.north_edge = north_edge_for_facing(self.orientation)
@@ -412,21 +433,50 @@ class LayoutEngine:
 
     def generate(self) -> GeneratedFloorPlan:
         """Execute the full pipeline and return a complete floor plan."""
+        ctx = self._solve_stage()
+        return self._assemble(ctx, ctx["result"])
+
+    def generate_alternatives(self, k: int = 3) -> List[GeneratedFloorPlan]:
+        """
+        Intent editing: run the pipeline once with `design_intents`, then build the
+        k best *distinct* layouts the intent solver found (balanced, best Vastu,
+        least change). Each plan carries an `edit_report` explaining how it met the
+        user's wishes and what else had to move.
+        """
+        import copy as _copy
+        ctx = self._solve_stage(alternatives=k)
+        solver = ctx["solver"]
+        options = ctx["alternatives"] or ([(ctx["result"], "Re-planned layout")] if ctx["result"] else [])
+        if not options:
+            plan = self._assemble(ctx, None)
+            plan.edit_report = {"label": "Fallback layout", "intents": [], "satisfied": 0, "total": 0,
+                                "changes": [], "solver_vastu": None, "base_vastu": None, "mode": None,
+                                "warnings": ["No band layout could be found for these wishes on this footprint."]}
+            return [plan]
+        plans = []
+        for res, label in options[:max(1, k)]:
+            c = dict(ctx)
+            for part in ("program", "planner", "site"):
+                c[part] = _copy.deepcopy(ctx[part])       # amenity placement mutates the site
+            plan = self._assemble(c, res)
+            report = solver.report(res) if hasattr(solver, "report") else {}
+            report["label"] = label
+            plan.edit_report = report
+            plans.append(plan)
+        return plans
+
+    def _make_solver(self, program, footprint, seed: int):
+        from floorplan_generator.layout_solver import BandSpineSolver
+        if self.design_intents or self.base_layout:
+            from floorplan_generator.intent_engine import IntentSolver
+            return IntentSolver(program, footprint, self.orientation, self.vastu_enabled, seed=seed,
+                                intents=self.design_intents, base=self.base_layout)
+        return BandSpineSolver(program, footprint, self.orientation, self.vastu_enabled, seed=seed)
+
+    def _solve_stage(self, alternatives: int = 0) -> Dict:
+        """Stages 1-3: space program, site plan and the zoning solve (with relaxation)."""
         from floorplan_generator.space_program import build_program, trim_program
         from floorplan_generator.site_planner import SitePlanner
-        from floorplan_generator.layout_solver import BandSpineSolver
-
-        plan = GeneratedFloorPlan(
-            plot_width=self.plot_width, plot_height=self.plot_height,
-            orientation=self.orientation, vastu_enabled=self.vastu_enabled,
-            bhk_config=self.bhk_name, family_description=self.family_description,
-            quality_level=self.quality_level, project_name=self.project_name,
-            has_lift=self.has_lift, lift_capacity=self.lift_capacity,
-            building_type=self.building_type, num_floors=self.num_floors,
-            additional_components=self.additional_components,
-            north_edge=self.north_edge, stair_type=self.stair_type,
-        )
-        notes: List[str] = []
 
         # ── Stage 1: space program ────────────────────────────────────────
         program = build_program(
@@ -449,14 +499,28 @@ class LayoutEngine:
         ext_len = program.external_stair.footprint_l if program.external_stair else 0.0
         site = planner.plan_footprint(program.target_area * 1.12, program.min_area, min_w, min_d, ext_len)
 
+        # User size wishes re-balance rooms inside the same envelope (footprint unchanged)
+        intent_notes: List[str] = []
+        if self.design_intents:
+            from floorplan_generator.intent_engine import apply_size_intents
+            intent_notes = apply_size_intents(program, self.design_intents, self.base_layout)
+
         # ── Stage 3: zoning & geometry (with progressive relaxation) ─────
         fx, fy, fw, fd = site.footprint
         trim_notes = trim_program(program, fw * fd) if fw * fd < program.min_area else []
         seed = int(self.plot_width * 100) * 31 + int(self.plot_height * 100) * 17 + "NESW".index(self.orientation)
         result = None
+        solver = None
         relax_notes: List[str] = []
-        for attempt in range(5):
-            solver = BandSpineSolver(program, site.footprint, self.orientation, self.vastu_enabled, seed=seed)
+        # An edit re-plan replays the relaxations its base plan needed, so the program matches
+        start = int(self.base_layout.get("relax_level", 0) or 0) if self.base_layout else 0
+        for attempt in range(min(start, 4)):
+            relax_notes.extend(self._relax_program(program, attempt))
+        relax_level = start
+        for attempt in range(min(start, 4), 5):
+            relax_level = attempt
+            solver = self._make_solver(program, site.footprint, seed)
+            solver.door_exclusion = getattr(site, "door_exclusion", None)
             result = solver.solve()
             if result is not None and result.penalties.get("access", 0) == 0 and \
                     result.penalties.get("circulation", 0) == 0:
@@ -465,6 +529,28 @@ class LayoutEngine:
             relax_notes.extend(step)
             if not step and attempt > 2:
                 break
+        alts = []
+        if alternatives and result is not None and hasattr(solver, "alternatives"):
+            alts = solver.alternatives(alternatives)
+        return {"program": program, "planner": planner, "site": site, "result": result, "solver": solver,
+                "alternatives": alts, "trim_notes": trim_notes, "relax_notes": relax_notes,
+                "intent_notes": intent_notes, "relax_level": relax_level}
+
+    def _assemble(self, ctx: Dict, result) -> GeneratedFloorPlan:
+        """Stages 4-9 for one solved layout: doors, amenities, walls, windows, audit, report."""
+        program, planner, site = ctx["program"], ctx["planner"], ctx["site"]
+        plan = GeneratedFloorPlan(
+            plot_width=self.plot_width, plot_height=self.plot_height,
+            orientation=self.orientation, vastu_enabled=self.vastu_enabled,
+            bhk_config=self.bhk_name, family_description=self.family_description,
+            quality_level=self.quality_level, project_name=self.project_name,
+            has_lift=self.has_lift, lift_capacity=self.lift_capacity,
+            building_type=self.building_type, num_floors=self.num_floors,
+            additional_components=self.additional_components,
+            north_edge=self.north_edge, stair_type=self.stair_type,
+        )
+        notes: List[str] = []
+        fx, fy, fw, fd = site.footprint
 
         if result is None:
             # Last resort: legacy functional subdivision inside the footprint
@@ -474,7 +560,7 @@ class LayoutEngine:
             placed = None
         else:
             rooms = [RoomRect(name=p.name, category=p.category, x=p.x, y=p.y, w=p.w, h=p.h,
-                              color=p.color, role=p.role) for p in result.rooms]
+                              color=p.color, role=p.role, key=p.key) for p in result.rooms]
             door_x = result.door
             placed = result.rooms
         bhk_now = program.bhk
@@ -529,13 +615,46 @@ class LayoutEngine:
 
         engineering = self._engineering_report(rooms, walls, program, site, carpet, built_up)
         plan.engineering = engineering
-        notes = (program.notes + trim_notes + relax_notes + site.notes + notes
-                 + engineering.pop("notes", []))
+        notes = (program.notes + ctx["intent_notes"] + ctx["trim_notes"] + ctx["relax_notes"] + site.notes
+                 + notes + engineering.pop("notes", []))
         if result is not None:
             notes.insert(0, f"Layout: {result.mode}-band zoning optimised over the building's Vastu "
                             f"Purusha Mandala (raw objective {result.score:.1f}).")
+            plan.layout_state = self._layout_state(result, program, site.footprint)
+            plan.layout_state["relax_level"] = ctx.get("relax_level", 0)
+            # quantities of the design the owner started from — edits are priced against it
+            from floorplan_generator.quantities import layout_quantities
+            ref = (self.base_layout or {}).get("ref_quantities")
+            plan.layout_state["ref_quantities"] = dict(ref) if ref else layout_quantities(plan)
         plan.design_notes = notes
+        plan.generation_params = dict(self.generation_params)
         return plan
+
+    def _layout_state(self, result, program, footprint) -> Dict:
+        """Solver arrangement + per-room geometry, the base an intent re-plan stays close to."""
+        groups = {g.key: g for g in program.groups}
+        rooms: Dict[str, Dict] = {}
+        for p in result.rooms:
+            # small rooms stacked in one column keep their own group (the solver moves them separately)
+            gk = p.key if p.key in groups else p.group
+            g = groups.get(gk)
+            if p.key.startswith("filler_"):           # foyer / passage end of a small-room column
+                kind, bands = "filler", [p.band]
+            elif g is not None:
+                kind, bands = g.kind, list(g.bands)
+            elif p.group == "living":
+                kind, bands = "living", ["front"]
+            else:
+                kind, bands = ("spine" if p.band == "spine" else p.group or "other"), [p.band]
+            rooms[p.key] = {"name": p.name, "category": p.category, "role": p.role, "group": gk,
+                            "parent": p.parent, "band": p.band, "kind": kind, "bands": bands,
+                            "cx": round(p.cx, 3), "cy": round(p.cy, 3), "w": round(p.w, 3), "h": round(p.h, 3),
+                            "area": round(p.area, 2)}
+        st = result.state
+        return {"mode": st.mode, "bands": {k: list(v) for k, v in st.bands.items()},
+                "cells": {k: list(v) for k, v in st.cells.items()}, "flip": dict(st.flip),
+                "rooms": rooms, "footprint": [round(v, 3) for v in footprint],
+                "facing": self.orientation, "vastu": round(result.vastu_score, 1)}
 
     # =========================================================================
     # Program relaxation & legacy fallback
