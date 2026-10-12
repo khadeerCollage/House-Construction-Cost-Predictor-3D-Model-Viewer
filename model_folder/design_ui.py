@@ -18,6 +18,20 @@ root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
+# A long-running Streamlit keeps old copies of these modules in sys.modules; refresh them
+# (dependencies first) whenever this module is (re)loaded so new engine code is picked up.
+import importlib as _importlib
+for _name in ("floorplan_generator.room_specs", "floorplan_generator.vastu_engine",
+              "floorplan_generator.family_analyzer", "floorplan_generator.space_program",
+              "floorplan_generator.site_planner", "floorplan_generator.layout_solver",
+              "floorplan_generator.layout_engine", "floorplan_generator.vastu_analyzer",
+              "floorplan_renderer._common", "floorplan_renderer.svg_renderer",
+              "floorplan_renderer.dxf_renderer", "floorplan_renderer.pdf_renderer",
+              "floorplan_renderer.png_renderer", "model_folder.cost_engine",
+              "model_folder.floorplan_editor"):
+    if _name in sys.modules:
+        _importlib.reload(sys.modules[_name])
+
 from floorplan_generator.family_analyzer import FamilyAnalyzer, FamilyProfile
 from floorplan_generator.layout_engine import LayoutEngine, GeneratedFloorPlan
 from floorplan_renderer.dxf_renderer import DXFRenderer
@@ -163,8 +177,132 @@ def render_design_tab():
         bhk_override = None if bhk_choice.startswith("Auto") else bhk_choice
 
         quality = st.selectbox("Construction Quality", options=["Economy", "Standard", "Premium", "Luxury"], index=1)
-        city_tier = st.selectbox("Location / City Tier", options=["Tier-1 Metro", "Tier-2 Urban", "Tier-3 Semi-Urban", "Rural"], index=1)
-        floors = st.number_input("Number of Floors", min_value=1, max_value=4, value=1, step=1)
+        country = st.selectbox(
+            "🌍 Country / Market", options=CostEngine.markets(), index=0,
+            help="Currency, construction system and 2026 cost benchmarks for the market")
+        _regions = CostEngine.regions(country)
+        city_tier = st.selectbox(
+            "📍 City / Region", options=_regions,
+            index=_regions.index(CostEngine.default_region(country)), key=f"cost_region_{country}",
+            help="Location cost index applied to labour, materials and site works")
+        bldg_type = st.selectbox(
+            "🏢 Building Type",
+            ["Independent House / Villa", "Apartment / Multi-Storey Building", "Duplex Home"],
+            index=0,
+            help="Select Independent House or Multi-Storey Apartment"
+        )
+
+        max_floors = 10 if "Apartment" in bldg_type else 5
+        floors = st.number_input("Number of Floors", min_value=1, max_value=max_floors, value=1, step=1)
+
+        # Lift/Elevator toggle — intelligent auto-enable for 4+ floors or Apartments
+        is_mandated_lift = (floors >= 4) or ("Apartment" in bldg_type)
+        if is_mandated_lift:
+            st.info("🛗 **Lift Mandated / Auto-Enabled** (Required per NBC 2016 for 4+ storeys or multi-family apartments).")
+            has_lift = st.toggle(
+                "🛗 Lift / Elevator Shaft",
+                value=True,
+                help="IS 14665 compliant lift shaft (min 1.5m × 1.5m). Placed per Vastu in S/SW/W zone."
+            )
+        else:
+            has_lift = st.toggle(
+                "🛗 Lift / Elevator Shaft",
+                value=False,
+                help="IS 14665 compliant lift shaft (min 1.5m × 1.5m). Placed per Vastu in S/SW/W zone."
+            )
+
+        if has_lift:
+            lift_capacity = st.selectbox(
+                "Lift Capacity",
+                ["4 Person (630kg) — 1.5m × 1.5m shaft",
+                 "6 Person (480kg) — 1.6m × 1.7m shaft",
+                 "8 Person (680kg) — 1.8m × 2.0m shaft"],
+                index=0
+            )
+        else:
+            lift_capacity = "4 Person"
+
+        # Staircase type
+        stair_options = [
+            "Dog-Leg (U-Turn) — Space Efficient",
+            "Straight Flight — Simple & Direct",
+            "L-Shaped (Quarter Turn) — Corner Fit",
+            "Open Well (Bifurcated) — Grand Central",
+            "Spiral / Circular — Compact Architectural",
+            "Crossing / Zigzag — Modern Split-Level",
+        ]
+        stair_map = {
+            "Dog-Leg (U-Turn) — Space Efficient": "dog_leg",
+            "Straight Flight — Simple & Direct": "straight",
+            "L-Shaped (Quarter Turn) — Corner Fit": "l_shaped",
+            "Open Well (Bifurcated) — Grand Central": "open_well",
+            "Spiral / Circular — Compact Architectural": "spiral",
+            "Crossing / Zigzag — Modern Split-Level": "zigzag",
+        }
+        stair_type = st.selectbox(
+            "🪜 Staircase Type",
+            stair_options,
+            index=0,
+            help="Dog-leg fits in compact plots. Open Well needs larger footprint."
+        )
+        stair_code = stair_map.get(stair_type, "dog_leg")
+
+    # ---------------------------------------------------------
+    # Additional Components & Site Amenities
+    # ---------------------------------------------------------
+    st.markdown("""
+    <div style="background: linear-gradient(135deg, #1E293B 0%, #0F172A 100%);
+                padding: 18px 24px; border-radius: 10px; border: 1px solid #38BDF8;
+                margin-top: 20px; margin-bottom: 20px;">
+        <h4 style="color: #38BDF8; margin: 0 0 6px 0;"> Additional Components & Site Amenities</h4>
+        <p style="color: #94A3B8; font-size: 13px; margin: 0;">
+            Customize exterior amenities, parking provisions, and utility rooms tailored for villas, multi-storey rentals, and apartments.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    ac_col1, ac_col2, ac_col3 = st.columns(3)
+
+    with ac_col1:
+        has_car_parking = st.toggle("🚗 Car Parking Bay", value=False)
+        if has_car_parking:
+            car_slots = st.number_input("Car Slots", min_value=1, max_value=8, value=1 if "Independent" in bldg_type else 3)
+        else:
+            car_slots = 0
+
+        has_bike_parking = st.toggle("🏍️ Two-Wheeler Parking", value=False)
+        if has_bike_parking:
+            bike_slots = st.number_input("Bike Slots", min_value=2, max_value=20, value=2 if "Independent" in bldg_type else 6, step=2)
+        else:
+            bike_slots = 0
+
+    with ac_col2:
+        has_garden = st.toggle("🌿 Landscaped Garden / Lawn", value=False)
+        if has_garden:
+            garden_pct = st.slider("Garden Size (% of Plot)", min_value=5, max_value=25, value=10, step=5)
+        else:
+            garden_pct = 0
+
+        has_pool = st.toggle("🏊 Swimming Pool", value=False)
+        if has_pool:
+            pool_size = st.selectbox("Pool Dimension", ["Small (3m × 6m)", "Medium (4m × 8m)", "Large (5m × 10m)"])
+        else:
+            pool_size = ""
+
+    with ac_col3:
+        has_sump = st.toggle("💧 Underground Water Sump (NE)", value=False, help="Underground water reservoir placed in Ishan / NE zone per Vastu")
+        has_genset = st.toggle("⚡ Backup Generator / Transformer", value=False, help="Acoustic generator room in Agni/Nairutya per engineering codes")
+        has_security = st.toggle("🛡️ Security / Watchman Cabin", value=False, help="Gatehouse located at the plot entrance boundary")
+
+    additional_components = {
+        'car_parking': {'enabled': has_car_parking, 'slots': car_slots if has_car_parking else 0},
+        'bike_parking': {'enabled': has_bike_parking, 'slots': bike_slots if has_bike_parking else 0},
+        'garden': {'enabled': has_garden, 'pct': garden_pct if has_garden else 0},
+        'swimming_pool': {'enabled': has_pool, 'size': pool_size if has_pool else ''},
+        'water_tank': {'enabled': has_sump},
+        'generator_room': {'enabled': has_genset},
+        'security_cabin': {'enabled': has_security},
+    }
 
     st.write("---")
 
@@ -191,19 +329,60 @@ def render_design_tab():
                 analyzer = FamilyAnalyzer()
                 analysis = analyzer.analyze(profile, plot_area=plot_area_sqm)
 
-                # Step B: Core Layout Engine
-                engine = LayoutEngine(
-                    plot_width=plot_w,
-                    plot_height=plot_h,
-                    bhk_config=analysis.recommended_bhk,
-                    vastu_enabled=vastu_on,
-                    orientation=orient_code,
-                    quality_level=quality,
-                    project_name=f"{analysis.recommended_bhk} ({plot_cents:.1f} Cents) Blueprint",
-                    family_description=profile.description,
-                )
+                # Step B: Core Layout Engine (ensure fresh class reload)
+                import importlib
+                import inspect
+                import floorplan_generator.room_specs
+                import floorplan_generator.vastu_engine
+                # Reload dependencies first (a long-running Streamlit may hold stale copies),
+                # then the modules that import names from them.
+                importlib.reload(floorplan_generator.room_specs)
+                importlib.reload(floorplan_generator.vastu_engine)
+                import floorplan_generator.space_program
+                import floorplan_generator.site_planner
+                import floorplan_generator.layout_solver
+                import floorplan_generator.layout_engine
+                for _mod in (floorplan_generator.space_program, floorplan_generator.site_planner,
+                             floorplan_generator.layout_solver, floorplan_generator.layout_engine):
+                    importlib.reload(_mod)
+                from floorplan_generator.layout_engine import LayoutEngine, GeneratedFloorPlan
+
+                engine_kwargs = {
+                    "plot_width": plot_w,
+                    "plot_height": plot_h,
+                    "bhk_config": analysis.recommended_bhk,
+                    "vastu_enabled": vastu_on,
+                    "orientation": orient_code,
+                    "quality_level": quality,
+                    "project_name": f"{analysis.recommended_bhk} ({plot_cents:.1f} Cents) Blueprint",
+                    "family_description": profile.description,
+                    "has_lift": has_lift,
+                    "lift_capacity": lift_capacity,
+                    "stair_type": stair_code,
+                    "num_floors": floors,
+                    "building_type": bldg_type,
+                    "additional_components": additional_components,
+                    "family_profile": profile,
+                }
+                init_sig = inspect.signature(LayoutEngine.__init__)
+                has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in init_sig.parameters.values())
+                if has_varkw:
+                    call_kwargs = engine_kwargs
+                else:
+                    call_kwargs = {k: v for k, v in engine_kwargs.items() if k in init_sig.parameters}
+
+                engine = LayoutEngine(**call_kwargs)
+                if not hasattr(engine, "additional_components") or not engine.additional_components:
+                    engine.additional_components = additional_components
                 st.session_state['gen_cents'] = plot_cents
                 plan = engine.generate()
+
+                # Store lift/stair selections for downstream renderers
+                st.session_state['has_lift'] = has_lift
+                st.session_state['lift_capacity'] = lift_capacity
+                st.session_state['stair_code'] = stair_code
+                st.session_state['building_type'] = bldg_type
+                st.session_state['additional_components'] = additional_components
 
                 # Step C: Render CAD & Vector outputs in memory/temp
                 temp_dir = os.path.join(root_dir, "model_folder", "static", "generated_plans", "session_plan")
@@ -230,12 +409,14 @@ def render_design_tab():
                 pdf_r = PDFRenderer()
                 pdf_r.render(plan, pdf_path)
 
-                # Step D: Construction Cost Engine
-                cost_data = CostEngine.estimate_cost(
-                    area_sqm=plan.total_carpet_area,
+                # Step D: Construction Cost Engine — plinth area × floors, real wet-area
+                # counts, lift and site works (UI labels are normalised inside CostEngine)
+                cost_data = CostEngine.estimate_for_plan(
+                    plan,
                     city_tier=city_tier,
                     quality_level=quality,
-                    num_floors=floors
+                    num_floors=floors,
+                    country=country,
                 )
 
                 # Read binary file buffers for download buttons
@@ -273,7 +454,11 @@ def render_design_tab():
     if 'gen_plan' in st.session_state:
         plan: GeneratedFloorPlan = st.session_state['gen_plan']
         analysis = st.session_state['gen_analysis']
-        cost_data = st.session_state['gen_cost']
+        # Re-price live so the Country / City / Quality dropdowns update the estimate without regenerating
+        _plan_floors = getattr(plan, "num_floors", None) or floors
+        cost_data = CostEngine.estimate_for_plan(
+            plan, city_tier=city_tier, quality_level=quality, num_floors=_plan_floors, country=country)
+        st.session_state['gen_cost'] = cost_data
 
         st.markdown("---")
         st.markdown(f"### 📋 Architectural Overview: {plan.bhk_config} ({plan.project_name})")
@@ -294,8 +479,7 @@ def render_design_tab():
         m2.metric("Carpet Area", f"{plan.total_carpet_area:.1f} m2", f"{cents_carpet:.2f} Cents ({plan.total_carpet_area * 10.764:.0f} sq ft)")
         m3.metric("Built-up Area", f"{plan.total_built_up_area:.1f} m2", f"{cents_plot:.2f} Cents Plot ({plan.total_built_up_area * 10.764:.0f} sq ft)")
         
-        est_lakhs = cost_data['total_cost'] / 100000.0
-        m4.metric("Est. Total Cost", f"Rs {est_lakhs:.2f} Lakhs", f"Rs {cost_data['cost_per_sqft']}/sqft")
+        m4.metric("Est. Total Cost", cost_data['display']['total_compact'], cost_data['display']['rate'])
 
         # Style View Selector
         style_col1, style_col2 = st.columns([3, 1])
@@ -324,7 +508,8 @@ def render_design_tab():
         with st.expander("✏️ Interactive Floor Plan Studio & Live Customizer — Add Doors, Flat Steps, Adjust Meters & Edit Blueprint", expanded=False):
             FloorPlanEditor.render_editor_section(
                 plan,
-                cost_params={"city_tier": city_tier, "quality": quality, "floors": floors}
+                cost_params={"city_tier": city_tier, "quality": quality, "floors": _plan_floors,
+                             "country": country}
             )
 
         st.write("")
@@ -486,29 +671,44 @@ def render_design_tab():
 
         with t3:
             st.markdown("##### Construction Cost Estimate & Bill of Quantities (BOQ)")
-            st.markdown(f"**Total Estimate:** ₹ {cost_data['total_cost']:,.2f} (*{est_lakhs:.2f} Lakhs INR*) at **₹ {cost_data['cost_per_sqft']}/sq ft**")
-            
+            _money = lambda v, c=False: CostEngine.format_money(v, cost_data['country'], compact=c)  # noqa: E731
+            disp = cost_data['display']
+            _md = lambda s: s.replace("$", r"\$")  # noqa: E731 — '$…$' would render as LaTeX
+            st.markdown(_md(
+                f"**Total Project Cost (excl. land):** {disp['total']} (*{disp['total_compact']}*) at "
+                f"**{disp['rate']}** — {cost_data['region']}, {cost_data['country']} · "
+                f"{cost_data['currency']} · Construction (hard) cost {disp['construction']}"))
+
+            calc_col, split_col = st.columns([3, 2])
+            with calc_col:
+                st.markdown("###### 🧮 How this number is calculated")
+                st.table([{"Step": s["step"], "Basis": _md(s["basis"]), "Value": _md(s["value"])}
+                          for s in cost_data['calculation']])
+            with split_col:
+                st.markdown("###### 📊 Cost Breakdown")
+                _tot = max(1.0, cost_data['total_cost'])
+                st.table([{"Item": k, "Amount": _md(_money(v)), "Share": f"{100 * v / _tot:.1f}%"}
+                          for k, v in cost_data['cost_breakdown'].items()])
+
+            st.markdown(f"###### 🌍 Location × Quality Cost Matrix — this house across {cost_data['country']}")
+            _matrix = CostEngine.region_matrix_for_plan(plan, cost_data['country'], _plan_floors)
+            _q_cols = ["Economy", "Standard", "Premium", "Luxury"]
+            st.dataframe(
+                [{"City / Region": ("▶ " if r["region"] == cost_data['region'] else "") + r["region"],
+                  "Index": f"×{r['index']:.2f}", **{q: _money(r[q], True) for q in _q_cols}}
+                 for r in _matrix],
+                use_container_width=True, hide_index=True, height=min(420, 38 + 35 * len(_matrix)))
+
             st.markdown("###### 🧱 Estimated Structural Materials Required:")
-            mat_cols = st.columns(5)
             materials = cost_data['materials']
-            
-            c_info = materials.get('Cement', {})
-            mat_cols[0].metric("Cement", f"{c_info.get('quantity', 0)} Bags", f"₹ {c_info.get('cost', 0):,}")
-            
-            s_info = materials.get('Steel', {})
-            mat_cols[1].metric("TMT Steel", f"{s_info.get('quantity', 0):,} Kg", f"₹ {s_info.get('cost', 0):,}")
-            
-            b_info = materials.get('Bricks', {})
-            mat_cols[2].metric("Clay Bricks", f"{b_info.get('quantity', 0):,} Pcs", f"₹ {b_info.get('cost', 0):,}")
-            
-            sa_info = materials.get('Sand', {})
-            mat_cols[3].metric("River Sand", f"{sa_info.get('quantity', 0):,} CFT", f"₹ {sa_info.get('cost', 0):,}")
-            
-            ag_info = materials.get('Aggregate', {})
-            mat_cols[4].metric("Aggregate", f"{ag_info.get('quantity', 0):,} CFT", f"₹ {ag_info.get('cost', 0):,}")
+            mat_cols = st.columns(len(materials) or 1)
+            for _col, (_k, _info) in zip(mat_cols, materials.items()):
+                _col.metric(_info.get('label', _k), f"{_info.get('quantity', 0):,} {_info.get('unit', '')}",
+                            _money(_info.get('cost', 0)))
 
             st.write("")
-            st.caption(f"Cost estimates based on {city_tier} market rates and {quality} grade construction materials per Indian CPWD / State PWD schedules.")
+            for _note in cost_data.get('notes', []):
+                st.caption(_note)
 
         with t4:
             st.markdown("##### 🏡 AI Architect — Best House Archetype & Layout Recommendations")

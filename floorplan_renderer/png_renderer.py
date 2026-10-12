@@ -22,6 +22,7 @@ from PIL import Image, ImageDraw
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import math
+from floorplan_renderer._common import north_angle, dim_offset, entrance_steps, rotate_point, fit_label
 from floorplan_generator.layout_engine import (
     GeneratedFloorPlan, RoomRect, WallSegment,
     DoorPlacement, WindowPlacement, DimLine
@@ -63,20 +64,10 @@ class PNGRenderer:
             min_dim = min(r.w, r.h)
             font_size = max(6, min(10, 5 + math.sqrt(area) * 0.8))
             
-            name = r.name
-            if min_dim < 1.5 or area < 3.0:
-                abbrevs = {
-                    'Attached Bathroom': 'ATT. BATH',
-                    'Bathroom': 'BATH',
-                    'Balcony': 'BALC.',
-                    'Corridor': 'CORR.',
-                    'Utility': 'UTIL.',
-                    'Store Room': 'STORE',
-                    'Servant Quarter': 'SQ',
-                }
-                name = abbrevs.get(name, name)
+            # ~0.0125 m per point of font size per character at this figure scale
+            name, font_size = fit_label(r.name, r.w - 0.15, font_size, char_w=0.0125 / 1.0 * 1.0, min_font=4.5)
 
-            ax.text(cx, cy + 0.25, name.upper(), ha='center', va='center',
+            ax.text(cx, cy + 0.25, name, ha='center', va='center',
                     fontsize=font_size, weight='bold', color='#111827')
             ax.text(cx, cy - 0.05, f"{r.w:.2f} x {r.h:.2f} m", ha='center', va='center',
                     fontsize=max(5, font_size - 1.5), color='#4B5563')
@@ -172,39 +163,23 @@ class PNGRenderer:
             # Hinge point
             ax.plot(hx, hy, marker='o', markersize=3, color='#059669')
 
-            # Main entrance steps
+            # Main entrance landing + steps (outside the door, any wall side)
             if d.is_main_entrance:
-                landing_depth = 1.2
-                step_depth = 0.3
-                side_ext = 0.3
-                if side == 'S':
-                    x_l = hx - r / 2 - side_ext
-                    x_r = hx + r / 2 + side_ext
-                    # Landing
-                    ax.add_patch(patches.Rectangle(
-                        (x_l, hy - landing_depth), x_r - x_l, landing_depth,
-                        facecolor='#F1F5F9', edgecolor='#334155', linewidth=1.0
-                    ))
-                    # 3 Steps
-                    for i in range(3):
-                        sy = hy - landing_depth - (i + 1) * step_depth
-                        ax.plot([x_l, x_r], [sy, sy], color='#334155', linewidth=1.0)
-                    ax.plot([x_l, x_l], [hy - landing_depth, hy - landing_depth - 3 * step_depth], color='#334155', linewidth=1.0)
-                    ax.plot([x_r, x_r], [hy - landing_depth, hy - landing_depth - 3 * step_depth], color='#334155', linewidth=1.0)
-                    # UP annotation
-                    mx = (x_l + x_r) / 2
-                    ax.annotate('UP', xy=(mx, hy - landing_depth),
-                                xytext=(mx, hy - landing_depth - 3 * step_depth - 0.2),
-                                arrowprops=dict(arrowstyle="->", color='#334155', lw=1.0),
-                                ha='center', va='center', fontsize=7, weight='bold', color='#334155')
+                land, lines, a_from, a_to = entrance_steps(d)
+                ax.add_patch(patches.Polygon(land, closed=True, facecolor='#F1F5F9',
+                                             edgecolor='#334155', linewidth=1.0))
+                for (p1, p2) in lines:
+                    ax.plot([p1[0], p2[0]], [p1[1], p2[1]], color='#334155', linewidth=1.0)
+                ax.annotate('UP', xy=a_to, xytext=a_from,
+                            arrowprops=dict(arrowstyle="->", color='#334155', lw=1.0),
+                            ha='center', va='center', fontsize=7, weight='bold', color='#334155')
 
         # 5. Dimension Lines with 45° Tick marks
         for dim in plan.dimensions:
             x1, y1 = dim.x1, dim.y1
             x2, y2 = dim.x2, dim.y2
             is_horizontal = abs(y2 - y1) < abs(x2 - x1)
-            tier_offsets = {1: 0.8, 2: 1.6, 3: 2.4}
-            offset = tier_offsets.get(dim.tier, dim.offset)
+            offset = dim_offset(dim)
             
             dx = 0 if is_horizontal else offset
             dy = offset if is_horizontal else 0
@@ -229,12 +204,16 @@ class PNGRenderer:
             ax.text(text_x, text_y, dim.label, ha='center', va='center',
                     fontsize=6.5, color='#374151', weight='bold' if dim.tier == 3 else 'normal')
 
-        # 6. North Arrow
+        # 6. North Arrow (rotated to true North for the chosen road facing)
         na_x = plan.plot_width + 1.8
-        na_y = plan.plot_height - 0.8
-        ax.annotate('N', xy=(na_x, na_y + 0.6), xytext=(na_x, na_y - 0.4),
-                    arrowprops=dict(facecolor='#1F2937', edgecolor='#1F2937', width=2, headwidth=8),
-                    ha='center', va='center', fontsize=10, weight='bold', color='#1F2937')
+        na_y = plan.plot_height - 1.2
+        ang = north_angle(plan)
+        tip = rotate_point(na_x, na_y + 0.8, na_x, na_y, ang)
+        tail = rotate_point(na_x, na_y - 0.5, na_x, na_y, ang)
+        ax.annotate('', xy=tip, xytext=tail,
+                    arrowprops=dict(facecolor='#1F2937', edgecolor='#1F2937', width=2, headwidth=8))
+        lbl = rotate_point(na_x, na_y + 1.15, na_x, na_y, ang)
+        ax.text(lbl[0], lbl[1], 'N', ha='center', va='center', fontsize=10, weight='bold', color='#1F2937')
 
         # 7. Title Block
         tb_x = plan.plot_width + 0.8

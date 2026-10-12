@@ -19,67 +19,11 @@ from typing import Dict, List, Optional, Tuple, Any
 import math
 import datetime
 
-from floorplan_generator.vastu_engine import VastuEngine, VastuZone
+from floorplan_generator.vastu_engine import (
+    VastuEngine, VastuZone, EntranceGateInfo, _PADA_DATABASE, pada_for_point,
+    plan_sides_for_facing,
+)
 from floorplan_generator.layout_engine import GeneratedFloorPlan, RoomRect, DoorPlacement
-
-
-# =============================================================================
-# 32-Pada Entrance Gates Database
-# =============================================================================
-@dataclass
-class EntranceGateInfo:
-    pada_id: str
-    deity: str
-    direction: str
-    angle_start: float
-    angle_end: float
-    rating: str          # 'SUPER_AUSPICIOUS', 'AUSPICIOUS', 'NEUTRAL', 'NEGATIVE', 'TABOO'
-    score: int           # -50 to +10
-    effect: str          # Traditional effect description
-    remedy: str = ""     # Remedy if negative
-
-
-_PADA_DATABASE: Dict[str, EntranceGateInfo] = {
-    # North Face: NW -> NE
-    "N1": EntranceGateInfo("N1", "Roga", "North", 348.75, 0.0, "NEGATIVE", -20, "Chronic illness, fear of opposition", "Install Brass pyramid on door frame"),
-    "N2": EntranceGateInfo("N2", "Naga", "North", 0.0, 11.25, "NEGATIVE", -15, "Jealousy and unnecessary friction", "Hang Copper Swastik on lintel"),
-    "N3": EntranceGateInfo("N3", "Mukhya", "North", 11.25, 22.5, "SUPER_AUSPICIOUS", 10, "Supreme wealth, continuous cashflow, commercial success"),
-    "N4": EntranceGateInfo("N4", "Bhallata", "North", 22.5, 33.75, "SUPER_AUSPICIOUS", 10, "Abundant inheritance, property multiplication, prosperity"),
-    "N5": EntranceGateInfo("N5", "Soma (Kubera)", "North", 33.75, 45.0, "AUSPICIOUS", 9, "Spiritual clarity, financial stability, peace of mind"),
-    "N6": EntranceGateInfo("N6", "Bhujanga", "North", 45.0, 56.25, "NEGATIVE", -10, "Discontentment among youth, deceitful guests", "Place yellow mustard seeds at threshold"),
-    "N7": EntranceGateInfo("N7", "Aditi", "North", 56.25, 67.5, "NEUTRAL", 0, "High household expenses, restlessness", "Add brass plate under threshold"),
-    "N8": EntranceGateInfo("N8", "Diti", "North", 67.5, 78.75, "NEGATIVE", -10, "Petty misunderstandings, divided attention", "Install Zinc wire below entry sill"),
-
-    # East Face: NE -> SE
-    "E1": EntranceGateInfo("E1", "Shikhi", "East", 78.75, 90.0, "NEGATIVE", -30, "Mental agitation, fire hazard risk", "Install Green fluorite pyramid over entrance"),
-    "E2": EntranceGateInfo("E2", "Parjanya", "East", 90.0, 101.25, "NEUTRAL", 0, "Excess luxury expenditures, casual approach", "Balance with indoor Tulsi plant nearby"),
-    "E3": EntranceGateInfo("E3", "Jayanta", "East", 101.25, 112.5, "SUPER_AUSPICIOUS", 10, "Victory, social influence, rapid career advancement"),
-    "E4": EntranceGateInfo("E4", "Indra", "East", 112.5, 123.75, "SUPER_AUSPICIOUS", 10, "Executive power, authoritative stature, government honors"),
-    "E5": EntranceGateInfo("E5", "Surya", "East", 123.75, 135.0, "NEGATIVE", -10, "Excessive pride, frequent conflicts with authority", "Keep copper bowl of water with white flowers"),
-    "E6": EntranceGateInfo("E6", "Satya", "East", 135.0, 146.25, "NEGATIVE", -15, "Broken commitments, disputes in partnerships", "Place Brass Vishnu Yantra"),
-    "E7": EntranceGateInfo("E7", "Bhrisha", "East", 146.25, 157.5, "NEGATIVE", -20, "Hasty impulsive decisions, burnout", "Add 3 brass pyramids above door"),
-    "E8": EntranceGateInfo("E8", "Akash", "East", 157.5, 168.75, "TABOO", -30, "Financial drainage, vulnerability to deceit", "Embed copper strip in threshold floor"),
-
-    # South Face: SE -> SW
-    "S1": EntranceGateInfo("S1", "Anila (Vayu)", "South", 168.75, 180.0, "NEGATIVE", -20, "Fiery temper, stress for children", "Hang red jasper crystal on right door jamb"),
-    "S2": EntranceGateInfo("S2", "Pusha", "South", 180.0, 191.25, "NEGATIVE", -15, "Subjugation, feeling of servitude", "Add brass bell on door"),
-    "S3": EntranceGateInfo("S3", "Vitatha", "South", 191.25, 202.5, "AUSPICIOUS", 8, "Clever strategies, lucrative trade, wealth retention"),
-    "S4": EntranceGateInfo("S4", "Brihatkshata", "South", 202.5, 213.75, "SUPER_AUSPICIOUS", 10, "Lineage glory, robust male lineage health, abundant wealth"),
-    "S5": EntranceGateInfo("S5", "Yama", "South", 213.75, 225.0, "TABOO", -40, "Heavy debt liabilities, chronic health obstacles", "Install Lead metal strip under threshold with Rahu Yantra"),
-    "S6": EntranceGateInfo("S6", "Gandharva", "South", 225.0, 236.25, "NEGATIVE", -20, "Loss of public reputation, hollow pride", "Place Rock salt lamp near entrance"),
-    "S7": EntranceGateInfo("S7", "Bhrigaraja", "South", 236.25, 247.5, "NEGATIVE", -25, "Wasted efforts, sudden fund shortages", "Embed copper wire boundary"),
-    "S8": EntranceGateInfo("S8", "Mriga", "South", 247.5, 258.75, "TABOO", -35, "Weakness in family foundation, vitality loss", "Install Panchadhatu strip with lead plate"),
-
-    # West Face: SW -> NW
-    "W1": EntranceGateInfo("W1", "Pitri", "West", 258.75, 270.0, "TABOO", -50, "Strict taboo: obstacles to progeny, severe instability", "Embed Lead strip, place yellow stone threshold, Rahu helix"),
-    "W2": EntranceGateInfo("W2", "Dauvarika", "West", 270.0, 281.25, "NEGATIVE", -15, "Insecure income, career volatility", "Install 9 Brass pyramids on frame"),
-    "W3": EntranceGateInfo("W3", "Sugriva", "West", 281.25, 292.5, "SUPER_AUSPICIOUS", 10, "Steady business expansion, scholastic excellence, gold accumulation"),
-    "W4": EntranceGateInfo("W4", "Pushpadanta", "West", 292.5, 303.75, "SUPER_AUSPICIOUS", 10, "Blessing of children, abundance, fame and public goodwill"),
-    "W5": EntranceGateInfo("W5", "Varuna", "West", 303.75, 315.0, "NEUTRAL", -5, "Over-ambition leading to fluctuating savings", "Hang wind chime with 5 metal hollow rods"),
-    "W6": EntranceGateInfo("W6", "Asura", "West", 315.0, 326.25, "NEGATIVE", -20, "Chronic exhaustion, depressive moods, tax troubles", "Add Lead helix on West wall"),
-    "W7": EntranceGateInfo("W7", "Sosha", "West", 326.25, 337.5, "NEGATIVE", -25, "Bodily weakness, respiratory complaints", "Place sea salt bowl renewed weekly"),
-    "W8": EntranceGateInfo("W8", "Papayakshma", "West", 337.5, 348.75, "TABOO", -40, "Financial leaks, addiction tendencies", "Embed thick Brass strip and install Shani Yantra"),
-}
 
 
 # =============================================================================
@@ -187,14 +131,28 @@ class VastuAnalyzer:
     Comprehensive architectural Vastu Shastra audit and recommendation engine.
     """
 
+    SITE_CATEGORIES = {"PARKING", "BIKE_PARKING", "GARDEN", "POOL", "WATER_TANK", "GENERATOR", "SECURITY"}
+
     def __init__(self, plan: GeneratedFloorPlan):
         self.plan = plan
-        self.engine = VastuEngine(
-            plot_width=plan.plot_width,
-            plot_height=plan.plot_height,
-            north_direction=plan.orientation
-        )
+        # House rooms are judged on the building's own mandala; site amenities on the plot mandala.
+        self.engine = VastuEngine.for_plan(plan, scope="building")
+        self.site_engine = VastuEngine.for_plan(plan, scope="plot")
         self.all_zones = self.engine.get_all_zones()
+
+    def _is_site(self, r: RoomRect) -> bool:
+        return r.category in self.SITE_CATEGORIES or "External" in r.name
+
+    def _key(self, r: RoomRect) -> str:
+        role = getattr(r, "role", "")
+        return role if role in ("MASTER_BEDROOM", "CHILD_BEDROOM", "GUEST_BEDROOM", "ELDER_BEDROOM") else r.category
+
+    def _zone(self, r: RoomRect) -> VastuZone:
+        eng = self.site_engine if self._is_site(r) else self.engine
+        return eng.get_zone_for_position(r.cx, r.cy)
+
+    def _skip(self, r: RoomRect) -> bool:
+        return any(t in r.name for t in ("Dress", "Wardrobe", "Duct"))
 
     # =========================================================================
     # 1. Zone-by-Zone Analysis
@@ -209,13 +167,14 @@ class VastuAnalyzer:
         # Build map of rooms occupying each zone
         zone_rooms: Dict[VastuZone, List[RoomRect]] = {z: [] for z in VastuZone}
         for r in self.plan.rooms:
-            z = self.engine.get_zone_for_position(r.cx, r.cy)
-            zone_rooms[z].append(r)
+            if self._skip(r):
+                continue
+            zone_rooms[self._zone(r)].append(r)
 
         for zone_enum, meta in ZONE_METADATA.items():
             rooms_here = zone_rooms.get(zone_enum, [])
             room_names = [r.name for r in rooms_here]
-            categories = [r.category for r in rooms_here]
+            categories = [self._key(r) for r in rooms_here]
             
             # Compute zone composite score
             if not categories:
@@ -307,36 +266,16 @@ class VastuAnalyzer:
                 "remedy": ""
             }
 
-        # Calculate angle of door relative to plot center
-        cx = self.plan.plot_width / 2.0
-        cy = self.plan.plot_height / 2.0
-        dx = main_door.x - cx
-        dy = main_door.y - cy
-
-        # Compass angle in degrees: North = 0/360, East = 90, South = 180, West = 270
-        angle_rad = math.atan2(dx, dy)
-        deg = math.degrees(angle_rad)
-        if deg < 0:
-            deg += 360.0
-
-        # Match angle against 32 padas
-        matched_pada = None
-        for pid, pinfo in _PADA_DATABASE.items():
-            if pinfo.angle_start > pinfo.angle_end:
-                # Wraps around 0 (e.g. N1: 348.75 to 0.0)
-                if deg >= pinfo.angle_start or deg < pinfo.angle_end:
-                    matched_pada = pinfo
-                    break
-            else:
-                if pinfo.angle_start <= deg < pinfo.angle_end:
-                    matched_pada = pinfo
-                    break
-
-        if not matched_pada:
-            # Fallback based on wall_side
-            side = main_door.wall_side
-            default_map = {'N': "N3", 'E': "E3", 'S': "S4", 'W': "W3"}
-            matched_pada = _PADA_DATABASE[default_map.get(side, "N3")]
+        # Door centre on its wall, then the pada along the building facade
+        # (each side split into 8 equal padas, counted clockwise from its corner).
+        if main_door.wall_side in ("N", "S"):
+            px, py = main_door.x + main_door.width / 2.0, main_door.y
+        else:
+            px, py = main_door.x, main_door.y + main_door.width / 2.0
+        fp = getattr(self.plan, "building_footprint", None)
+        rect = fp if fp and fp[2] > 0 else (0.0, 0.0, self.plan.plot_width, self.plan.plot_height)
+        matched_pada = pada_for_point(px, py, rect, self.plan.orientation)
+        deg = {"N": 0.0, "E": 90.0, "S": 180.0, "W": 270.0}[matched_pada.direction[0]]
 
         return {
             "pada_id": matched_pada.pada_id,
@@ -367,19 +306,15 @@ class VastuAnalyzer:
             "Akasha (Space)": []
         }
 
+        primary = {
+            "NE": "Jal (Water)", "N": "Jal (Water)",
+            "E": "Agni (Fire)", "SE": "Agni (Fire)",
+            "S": "Prithvi (Earth)", "SW": "Prithvi (Earth)",
+            "W": "Vayu (Air)", "NW": "Vayu (Air)",
+            "CENTER": "Akasha (Space)",
+        }
         for z in zone_data:
-            elem = z["element"]
-            sc = max(0, z["score"])
-            if "Water" in elem or "Jal" in elem:
-                scores_by_element["Jal (Water)"].append(sc)
-            if "Fire" in elem or "Agni" in elem or "Solar" in elem:
-                scores_by_element["Agni (Fire)"].append(sc)
-            if "Earth" in elem or "Prithvi" in elem:
-                scores_by_element["Prithvi (Earth)"].append(sc)
-            if "Air" in elem or "Vayu" in elem:
-                scores_by_element["Vayu (Air)"].append(sc)
-            if "Space" in elem or "Akasha" in elem:
-                scores_by_element["Akasha (Space)"].append(sc)
+            scores_by_element[primary[z["zone_key"]]].append(max(0, z["score"]))
 
         balance = {}
         for elem, sc_list in scores_by_element.items():
@@ -405,7 +340,32 @@ class VastuAnalyzer:
         """
         defects = []
         for r in self.plan.rooms:
-            z = self.engine.get_zone_for_position(r.cx, r.cy)
+            if self._skip(r):
+                continue
+            z = self._zone(r)
+            key = self._key(r)
+            if self._is_site(r) and self.site_engine.is_taboo(key, z.value):
+                defects.append({
+                    "defect": f"Site Dosha: {r.name} in the {z.value} of the plot",
+                    "severity": "HIGH",
+                    "impact": "Water bodies in Niruthi/Agni or fire equipment in Ishan disturb the plot's energy balance.",
+                    "remedy": "Relocate during construction if possible; otherwise mark the zone with a copper strip and keep it clean and dry."
+                })
+                continue
+            if key == "STAIRS" and z in (VastuZone.NE, VastuZone.CENTER):
+                defects.append({
+                    "defect": "Sopana Dosha (Staircase in Ishan / Brahmasthan)",
+                    "severity": "HIGH",
+                    "impact": "Heavy stair mass blocks the pranic inflow; associated with financial stress.",
+                    "remedy": "1. Keep the space under the stair open (no toilet/store). 2. Ensure stairs ascend clockwise. 3. Place a brass pyramid at the first step."
+                })
+            if key == "MASTER_BEDROOM" and z in (VastuZone.NE, VastuZone.NW, VastuZone.SE):
+                defects.append({
+                    "defect": "Griha-Swami Dosha (Master Bedroom away from Nairutya)",
+                    "severity": "MODERATE",
+                    "impact": "Weak authority and decision-making for the head of the family.",
+                    "remedy": "1. Sleep with head towards South. 2. Keep heavy furniture along the South-West walls. 3. Earthy tones on SW walls."
+                })
             
             # Toilet in NE (Ishan Dosha)
             if r.category == "BATHROOM" and z == VastuZone.NE:
@@ -478,20 +438,27 @@ class VastuAnalyzer:
         # Room swap suggestions
         swaps = []
         for r in self.plan.rooms:
-            z = self.engine.get_zone_for_position(r.cx, r.cy)
-            sc = self.engine.get_room_score(r.category, z.value)
+            if self._skip(r) or r.category == "CORRIDOR":
+                continue
+            key = self._key(r)
+            eng = self.site_engine if self._is_site(r) else self.engine
+            z = self._zone(r)
+            sc = eng.get_room_score(key, z.value)
             if sc < 5:
-                opt_zone = self.engine.get_optimal_zone(r.category)
+                opt_zone = eng.get_optimal_zone(key)
+                best = eng.get_room_score(key, opt_zone.value)
                 swaps.append(
-                    f"Consider swapping **{r.name}** currently in *{z.value}* to the *{opt_zone.value}* zone "
-                    f"to elevate individual room compatibility from {sc} to +10."
+                    f"Consider moving **{r.name}** from *{z.value}* to the *{opt_zone.value}* zone "
+                    f"(compatibility {sc:+d} → {best:+d})."
                 )
+        for note in getattr(self.plan, "design_notes", []) or []:
+            swaps.append(f"🛠️ {note}")
 
         # Suggest best house archetype
-        if score >= 90:
+        if score >= 85:
             strong_type = "Deva-Shilpi (Imperial Vastu Estate)"
             summary = "This layout achieves top-tier harmonic resonance. Structural massing in South-West and open circulation in North/East create maximum Pranic energy conservation."
-        elif score >= 75:
+        elif score >= 70:
             strong_type = "Sukha-Nivasa (Harmonic Family Sanctuary)"
             summary = "A highly stable, prosperous residence. Core functional rooms align comfortably with natural solar-path geometry."
         else:
@@ -501,7 +468,7 @@ class VastuAnalyzer:
         return {
             "house_archetype": strong_type,
             "plot_shape_evaluation": shape_eval,
-            "vastu_rating_grade": "A+ (Exemplary)" if score >= 90 else "A (Superior)" if score >= 75 else "B+ (Satisfactory)",
+            "vastu_rating_grade": "A+ (Exemplary)" if score >= 85 else "A (Superior)" if score >= 70 else "B+ (Satisfactory)" if score >= 50 else "C (Needs Remedies)",
             "summary": summary,
             "room_swap_recommendations": swaps if swaps else ["All placed rooms currently occupy their optimal Vedic quadrants. No swaps required!"]
         }
@@ -528,7 +495,7 @@ class VastuAnalyzer:
             f"CERTIFICATE ID : {cert_num:<25} AUDIT DATE : {date_str}",
             f"PROJECT NAME   : {self.plan.project_name:<25} CONFIG     : {self.plan.bhk_config}",
             f"PLOT DIMENSIONS: {self.plan.plot_width:.2f} m x {self.plan.plot_height:.2f} m       TOTAL AREA : {self.plan.total_built_up_area:.1f} sq.m",
-            f"CARDINAL NORTH : {self.plan.orientation} Edge                        FINAL GRADE: {rec['vastu_rating_grade']}",
+            f"ROAD FACING    : {self.plan.orientation:<25} FINAL GRADE: {rec['vastu_rating_grade']}",
             "-" * 82,
             "1. ENTRANCE GATE AUDIT (32 PADAS SYSTEM)",
             f"   Main Door Position: {entrance['direction']} Face | Gate: {entrance['pada_id']} ({entrance['deity']})",
@@ -616,8 +583,9 @@ class VastuAnalyzer:
         # Room map by zone
         zone_rooms: Dict[VastuZone, List[str]] = {z: [] for z in VastuZone}
         for r in self.plan.rooms:
-            z = self.engine.get_zone_for_position(r.cx, r.cy)
-            zone_rooms[z].append(r.name)
+            if self._skip(r):
+                continue
+            zone_rooms[self._zone(r)].append(r.name)
 
         # Draw 9 cells
         for (col, row), z_enum in grid_coords.items():

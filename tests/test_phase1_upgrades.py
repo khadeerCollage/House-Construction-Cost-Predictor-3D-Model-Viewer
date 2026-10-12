@@ -176,8 +176,16 @@ class TestPhase1Upgrades(unittest.TestCase):
         self.assertIn("text", types)
         self.assertIn("circle", types)
 
-        # Check room label text includes dimensions and area
-        texts = [obj.get("text", "") for obj in fabric_data["objects"] if obj.get("type") == "text"]
+        # Check room label text includes dimensions and area (room labels live inside
+        # draggable Fabric groups, so collect texts recursively)
+        def collect_texts(objs):
+            out = []
+            for obj in objs:
+                if obj.get("type") == "text":
+                    out.append(obj.get("text", ""))
+                out.extend(collect_texts(obj.get("objects", [])))
+            return out
+        texts = collect_texts(fabric_data["objects"])
         has_room_label = any("m²" in t and "×" in t for t in texts)
         self.assertTrue(has_room_label, "Room label text must contain meters dimensions and m² area")
 

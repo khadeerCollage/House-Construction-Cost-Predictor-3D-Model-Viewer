@@ -677,6 +677,8 @@ def estimate_construction_cost():
         city_tier = data.get('city_tier', 'Tier-2 (Urban)')
         quality_level = data.get('quality_level', 'Standard (Medium)')
         num_floors = data.get('num_floors', 1)
+        country = data.get('country')          # optional: 'India' | 'United States' | ...
+        region = data.get('region')            # optional: a CostEngine.regions(country) entry
         
         try:
             from cost_engine import CostEngine
@@ -691,10 +693,17 @@ def estimate_construction_cost():
             living_rooms=living,
             city_tier=city_tier,
             quality_level=quality_level,
-            num_floors=num_floors
+            num_floors=num_floors,
+            country=country,
+            region=region,
         )
-        
+
         return jsonify({
+            'currency': estimate['currency'],
+            'country': estimate['country'],
+            'region': estimate['region'],
+            'calculation': estimate['calculation'],
+            'display': estimate['display'],
             'estimated_cost': estimate['total_cost'],
             'breakdown': estimate['cost_breakdown'],
             'materials': estimate['materials'],
@@ -766,8 +775,15 @@ def generate_floor_plan_endpoint():
         vastu_enabled = bool(data.get('vastu_enabled', True))
         quality_level = str(data.get('quality_level', 'Standard'))
         city_tier = str(data.get('city_tier', 'Tier-2 Urban'))
+        country = data.get('country')          # optional cost market (default India)
+        region = data.get('region')            # optional city/region within that market
         num_floors = int(data.get('num_floors', 1))
         project_name = str(data.get('project_name', 'Custom Villa Blueprint'))
+        building_type = str(data.get('building_type', 'Independent House'))
+        has_lift = bool(data.get('has_lift', False))
+        lift_capacity = str(data.get('lift_capacity', '4 Person'))
+        stair_type = str(data.get('stair_type', 'dog_leg'))
+        additional_components = data.get('additional_components') or {}
 
         # Step A: Family intent analysis
         profile = FamilyProfile(
@@ -794,6 +810,13 @@ def generate_floor_plan_endpoint():
             quality_level=quality_level,
             project_name=project_name,
             family_description=profile.description,
+            has_lift=has_lift,
+            lift_capacity=lift_capacity,
+            stair_type=stair_type,
+            num_floors=num_floors,
+            building_type=building_type,
+            additional_components=additional_components,
+            family_profile=profile,
         )
         plan = engine.generate()
 
@@ -823,12 +846,14 @@ def generate_floor_plan_endpoint():
         pdf_r = PDFRenderer()
         pdf_r.render(plan, pdf_path)
 
-        # Step D: Cost Estimation with Indian Market BOQ
-        cost_data = CostEngine.estimate_cost(
-            area_sqm=plan.total_carpet_area,
+        # Step D: Cost Estimation with Indian Market BOQ (plinth area, lift, site works)
+        cost_data = CostEngine.estimate_for_plan(
+            plan,
             city_tier=city_tier,
             quality_level=quality_level,
-            num_floors=num_floors
+            num_floors=num_floors,
+            country=country,
+            region=region,
         )
 
         # Step E: Construct comprehensive response
@@ -866,6 +891,11 @@ def generate_floor_plan_endpoint():
             'door_count': len(plan.doors),
             'window_count': len(plan.windows),
             'cost_estimation': cost_data,
+            'setbacks': plan.setbacks,
+            'building_footprint': plan.building_footprint,
+            'engineering': plan.engineering,
+            'vastu_breakdown': plan.vastu_breakdown,
+            'design_notes': plan.design_notes,
             'svg_content': svg_content,
             'download_urls': {
                 'dxf': f'/download-plan/dxf/{plan_id}',

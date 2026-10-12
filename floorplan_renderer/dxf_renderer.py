@@ -1,5 +1,6 @@
 import math
 import ezdxf
+from floorplan_renderer._common import north_angle, dim_offset, entrance_steps, door_arc, rotate_point
 from floorplan_generator.layout_engine import (
     GeneratedFloorPlan, RoomRect, WallSegment,
     DoorPlacement, WindowPlacement, DimLine
@@ -77,34 +78,17 @@ class DXFRenderer:
 
     def _draw_doors(self, msp, doors):
         for d in doors:
-            if d.wall_side == 'N':
-                start_angle = 0 if d.swing_direction == 'RIGHT' else 90
-                end_angle = 90 if d.swing_direction == 'RIGHT' else 180
-            elif d.wall_side == 'S':
-                start_angle = 180 if d.swing_direction == 'RIGHT' else 270
-                end_angle = 270 if d.swing_direction == 'RIGHT' else 360
-            elif d.wall_side == 'E':
-                start_angle = 270 if d.swing_direction == 'RIGHT' else 0
-                end_angle = 360 if d.swing_direction == 'RIGHT' else 90
-            else: # 'W'
-                start_angle = 90 if d.swing_direction == 'RIGHT' else 180
-                end_angle = 180 if d.swing_direction == 'RIGHT' else 270
-            
+            # Swing arc centred on the hinge; the leaf opens into the owning room
+            start_angle, end_angle, leaf = door_arc(d)
             msp.add_arc((d.x, d.y), radius=d.width, start_angle=start_angle, end_angle=end_angle, dxfattribs={'layer': 'A-DOOR-FULL'})
-            msp.add_line((d.x, d.y), (d.x + math.cos(math.radians(end_angle))*d.width, d.y + math.sin(math.radians(end_angle))*d.width), dxfattribs={'layer': 'A-DOOR-FULL'})
+            msp.add_line((d.x, d.y), leaf, dxfattribs={'layer': 'A-DOOR-FULL'})
 
-            # Entrance steps
-            if d.is_main_entrance and d.wall_side == 'S':
-                landing_d = 1.2
-                step_d = 0.3
-                lx1 = d.x - d.width/2 - 0.3
-                lx2 = d.x + d.width/2 + 0.3
-                msp.add_lwpolyline([(lx1, d.y), (lx2, d.y), (lx2, d.y - landing_d), (lx1, d.y - landing_d)], close=True, dxfattribs={'layer': 'A-DOOR-FULL'})
-                for i in range(3):
-                    sy = d.y - landing_d - (i + 1) * step_d
-                    msp.add_line((lx1, sy), (lx2, sy), dxfattribs={'layer': 'A-DOOR-FULL'})
-                msp.add_line((lx1, d.y - landing_d), (lx1, d.y - landing_d - 0.9), dxfattribs={'layer': 'A-DOOR-FULL'})
-                msp.add_line((lx2, d.y - landing_d), (lx2, d.y - landing_d - 0.9), dxfattribs={'layer': 'A-DOOR-FULL'})
+            # Entrance landing + steps outside the main door (any wall side)
+            if d.is_main_entrance:
+                land, lines, _, _ = entrance_steps(d)
+                msp.add_lwpolyline(land, close=True, dxfattribs={'layer': 'A-DOOR-FULL'})
+                for (p1, p2) in lines:
+                    msp.add_line(p1, p2, dxfattribs={'layer': 'A-DOOR-FULL'})
 
     def _draw_windows(self, msp, windows):
         for w in windows:
@@ -132,13 +116,18 @@ class DXFRenderer:
             dimstyle.dxf.dimtxt = 0.2
             
         for dim in dimensions:
+            vertical = abs(dim.x2 - dim.x1) < abs(dim.y2 - dim.y1)
+            off = dim_offset(dim)
+            mx, my = (dim.x1 + dim.x2) / 2, (dim.y1 + dim.y2) / 2
+            base = (mx + off, my) if vertical else (mx, my + off)
             msp.add_linear_dim(
-                base=(dim.x1 + (dim.x2-dim.x1)/2, dim.y1 + (dim.y2-dim.y1)/2 + dim.offset),
+                base=base,
                 p1=(dim.x1, dim.y1),
                 p2=(dim.x2, dim.y2),
+                angle=90 if vertical else 0,
                 dimstyle='ARCH_DIM',
                 text=dim.label,
-                override={'layer': 'A-ANNO-DIMS'}
+                dxfattribs={'layer': 'A-ANNO-DIMS'}
             ).render()
 
     def _draw_title_block(self, msp, plan):
@@ -151,8 +140,12 @@ class DXFRenderer:
         msp.add_text(f"Built Area: {plan.total_built_up_area:.1f} sqm ({cents:.2f} Cents)", dxfattribs={'layer': 'A-ANNO-TEXT', 'height': 0.2}).set_placement((x+0.2, y+1))
 
     def _draw_north_arrow(self, msp, plan):
-        x, y = plan.plot_width + 1, plan.plot_height
-        msp.add_lwpolyline([(x, y), (x-0.5, y-1), (x, y-0.8)], close=True, dxfattribs={'layer': 'A-ANNO-TEXT'})
-        msp.add_lwpolyline([(x, y), (x+0.5, y-1), (x, y-0.8)], close=True, dxfattribs={'layer': 'A-ANNO-TEXT'})
-        msp.add_hatch(color=7, dxfattribs={'layer': 'A-ANNO-TEXT'}).paths.add_polyline_path([(x, y), (x+0.5, y-1), (x, y-0.8)], is_closed=True)
-        msp.add_text("N", dxfattribs={'layer': 'A-ANNO-TEXT', 'height': 0.3}).set_placement((x-0.1, y+0.2))
+        cx, cy = plan.plot_width + 1, plan.plot_height - 0.5
+        ang = north_angle(plan)
+        rp = lambda px, py: rotate_point(px, py, cx, cy, ang)
+        tip, left, right, notch = rp(cx, cy + 0.5), rp(cx - 0.5, cy - 0.5), rp(cx + 0.5, cy - 0.5), rp(cx, cy - 0.3)
+        msp.add_lwpolyline([tip, left, notch], close=True, dxfattribs={'layer': 'A-ANNO-TEXT'})
+        msp.add_lwpolyline([tip, right, notch], close=True, dxfattribs={'layer': 'A-ANNO-TEXT'})
+        msp.add_hatch(color=7, dxfattribs={'layer': 'A-ANNO-TEXT'}).paths.add_polyline_path([tip, right, notch], is_closed=True)
+        lx, ly = rp(cx, cy + 0.8)
+        msp.add_text("N", dxfattribs={'layer': 'A-ANNO-TEXT', 'height': 0.3}).set_placement((lx - 0.1, ly))

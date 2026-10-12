@@ -32,6 +32,15 @@ class RoomCategory(str, Enum):
     FOYER = "FOYER"
     SERVANT = "SERVANT"
     STORE = "STORE"
+    STAIRS = "STAIRS"
+    LIFT = "LIFT"
+    PARKING = "PARKING"
+    BIKE_PARKING = "BIKE_PARKING"
+    GARDEN = "GARDEN"
+    POOL = "POOL"
+    WATER_TANK = "WATER_TANK"
+    GENERATOR = "GENERATOR"
+    SECURITY = "SECURITY"
 
 
 # =============================================================================
@@ -308,6 +317,96 @@ NBC_ROOM_SPECS: Dict[str, RoomSpec] = {
         requires_external_wall=True,
         requires_ventilation=False,
         color="#F0F0F0"
+    ),
+    "staircase": RoomSpec(
+        name="Staircase",
+        category=RoomCategory.STAIRS,
+        min_area=3.0, target_area=4.5, max_area=8.0,
+        min_width=1.0, min_height=2.10,
+        min_aspect_ratio=0.30, max_aspect_ratio=3.00,
+        requires_external_wall=False,
+        requires_ventilation=False,
+        color="#94A3B8"
+    ),
+    "lift_shaft": RoomSpec(
+        name="Lift / Elevator",
+        category=RoomCategory.LIFT,
+        min_area=2.25, target_area=4.0, max_area=6.0,
+        min_width=1.5, min_height=2.10,
+        min_aspect_ratio=0.60, max_aspect_ratio=1.60,
+        requires_external_wall=False,
+        requires_ventilation=False,
+        color="#38BDF8"
+    ),
+    "car_parking": RoomSpec(
+        name="Car Parking",
+        category=RoomCategory.PARKING,
+        min_area=12.5, target_area=15.0, max_area=50.0,
+        min_width=2.5, min_height=2.4,
+        min_aspect_ratio=0.4, max_aspect_ratio=2.5,
+        requires_external_wall=True,
+        requires_ventilation=True,
+        color="#475569"
+    ),
+    "bike_parking": RoomSpec(
+        name="Two-Wheeler Parking",
+        category=RoomCategory.BIKE_PARKING,
+        min_area=3.0, target_area=6.0, max_area=20.0,
+        min_width=1.5, min_height=2.4,
+        min_aspect_ratio=0.4, max_aspect_ratio=2.5,
+        requires_external_wall=True,
+        requires_ventilation=True,
+        color="#64748B"
+    ),
+    "garden": RoomSpec(
+        name="Landscaped Garden / Lawn",
+        category=RoomCategory.GARDEN,
+        min_area=10.0, target_area=25.0, max_area=150.0,
+        min_width=2.0, min_height=0.0,
+        min_aspect_ratio=0.2, max_aspect_ratio=5.0,
+        requires_external_wall=True,
+        requires_ventilation=False,
+        color="#15803D"
+    ),
+    "swimming_pool": RoomSpec(
+        name="Swimming Pool",
+        category=RoomCategory.POOL,
+        min_area=18.0, target_area=32.0, max_area=100.0,
+        min_width=3.0, min_height=1.5,
+        min_aspect_ratio=0.3, max_aspect_ratio=3.5,
+        requires_external_wall=True,
+        requires_ventilation=False,
+        color="#0284C7"
+    ),
+    "water_sump": RoomSpec(
+        name="Underground Water Sump",
+        category=RoomCategory.WATER_TANK,
+        min_area=3.0, target_area=4.0, max_area=10.0,
+        min_width=1.5, min_height=1.8,
+        min_aspect_ratio=0.7, max_aspect_ratio=1.4,
+        requires_external_wall=True,
+        requires_ventilation=False,
+        color="#0EA5E9"
+    ),
+    "generator_room": RoomSpec(
+        name="Power / Generator Room",
+        category=RoomCategory.GENERATOR,
+        min_area=4.0, target_area=6.25, max_area=16.0,
+        min_width=2.0, min_height=2.4,
+        min_aspect_ratio=0.6, max_aspect_ratio=1.8,
+        requires_external_wall=True,
+        requires_ventilation=True,
+        color="#D97706"
+    ),
+    "security_cabin": RoomSpec(
+        name="Security / Gate Cabin",
+        category=RoomCategory.SECURITY,
+        min_area=3.0, target_area=4.0, max_area=9.0,
+        min_width=1.8, min_height=2.4,
+        min_aspect_ratio=0.7, max_aspect_ratio=1.4,
+        requires_external_wall=True,
+        requires_ventilation=True,
+        color="#7C3AED"
     ),
 }
 

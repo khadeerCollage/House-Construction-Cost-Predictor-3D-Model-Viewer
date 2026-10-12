@@ -17,6 +17,7 @@ from reportlab.lib.pagesizes import A3, landscape
 from reportlab.lib.units import mm
 from reportlab.lib.colors import HexColor
 import math
+from floorplan_renderer._common import north_angle, dim_offset, entrance_steps, rotate_point
 from floorplan_generator.layout_engine import (
     GeneratedFloorPlan, RoomRect, WallSegment,
     DoorPlacement, WindowPlacement, DimLine
@@ -204,29 +205,24 @@ class PDFRenderer:
             c.setFillColor(HexColor('#059669'))
             c.circle(hx, hy, 1.2 * mm, fill=1, stroke=0)
 
-            # Main entrance steps
-            if d.is_main_entrance and side == 'S':
-                landing_d = 1.2 * scale
-                step_d = 0.3 * scale
-                side_ext = 0.3 * scale
-                lx1 = hx - r_pt / 2 - side_ext
-                lx2 = hx + r_pt / 2 + side_ext
-                
+            # Main entrance landing + steps (outside the door, any wall side)
+            if d.is_main_entrance:
+                land, lines, a_from, a_to = entrance_steps(d)
                 c.setStrokeColor(HexColor('#334155'))
                 c.setLineWidth(0.8)
                 c.setFillColor(HexColor('#F1F5F9'))
-                c.rect(lx1, hy - landing_d, lx2 - lx1, landing_d, fill=1, stroke=1)
-                
-                for i in range(3):
-                    sy = hy - landing_d - (i + 1) * step_d
-                    c.line(lx1, sy, lx2, sy)
-                c.line(lx1, hy - landing_d, lx1, hy - landing_d - 3 * step_d)
-                c.line(lx2, hy - landing_d, lx2, hy - landing_d - 3 * step_d)
-                
-                # UP label
+                pth = c.beginPath()
+                pth.moveTo(*tr(*land[0]))
+                for pt in land[1:]:
+                    pth.lineTo(*tr(*pt))
+                pth.close()
+                c.drawPath(pth, fill=1, stroke=1)
+                for (p1, p2) in lines:
+                    c.line(*tr(*p1), *tr(*p2))
                 c.setFillColor(HexColor('#334155'))
                 c.setFont("Helvetica-Bold", 6.5)
-                c.drawCentredString((lx1 + lx2) / 2, hy - landing_d - 3.5 * step_d, "UP")
+                ux, uy = tr(*a_from)
+                c.drawCentredString(ux, uy, "UP")
 
         # 5. Dimension Lines with 45° Tick marks
         c.setStrokeColor(HexColor('#475569'))
@@ -236,8 +232,7 @@ class PDFRenderer:
             x1, y1 = tr(dim.x1, dim.y1)
             x2, y2 = tr(dim.x2, dim.y2)
             is_horizontal = abs(y2 - y1) < abs(x2 - x1)
-            tier_offsets = {1: 0.8, 2: 1.6, 3: 2.4}
-            offset = tier_offsets.get(dim.tier, dim.offset) * scale
+            offset = dim_offset(dim) * scale
             
             dx = 0 if is_horizontal else offset
             dy = offset if is_horizontal else 0
@@ -269,18 +264,21 @@ class PDFRenderer:
         # 6. North Arrow
         na_x = page_w - margin_r - tb_w / 2
         na_y = page_h - margin_t - 25 * mm
+        ang = north_angle(plan)
+        rp = lambda px, py: rotate_point(px, py, na_x, na_y, ang)
         c.setStrokeColor(HexColor('#0F172A'))
         c.setLineWidth(1.2)
-        c.line(na_x, na_y - 10 * mm, na_x, na_y + 10 * mm)
+        c.line(*rp(na_x, na_y - 10 * mm), *rp(na_x, na_y + 10 * mm))
         c.setFillColor(HexColor('#0F172A'))
         p = c.beginPath()
-        p.moveTo(na_x, na_y + 10 * mm)
-        p.lineTo(na_x - 3 * mm, na_y + 3 * mm)
-        p.lineTo(na_x, na_y + 5 * mm)
+        p.moveTo(*rp(na_x, na_y + 10 * mm))
+        p.lineTo(*rp(na_x - 3 * mm, na_y + 3 * mm))
+        p.lineTo(*rp(na_x, na_y + 5 * mm))
         p.close()
         c.drawPath(p, fill=1, stroke=0)
         c.setFont("Helvetica-Bold", 10)
-        c.drawCentredString(na_x, na_y + 12 * mm, "N")
+        lx, ly = rp(na_x, na_y + 13 * mm)
+        c.drawCentredString(lx, ly - 1.5 * mm, "N")
 
         # 7. ISO Title Block
         c.setStrokeColor(HexColor('#0F172A'))

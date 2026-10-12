@@ -9,6 +9,7 @@ This module bridges the gap between human-readable family descriptions
 specifications consumed by the layout engine.
 """
 
+import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -117,20 +118,20 @@ class FamilyAnalyzer:
             additional_rooms.append("Study / Home Office")
             reasoning.append("Home office added for remote work needs")
 
-        if profile.needs_pooja_room and bedrooms >= 2:
+        if profile.needs_pooja_room:
             additional_rooms.append("Pooja Room")
-            reasoning.append("Pooja room added (Indian residential tradition)")
+            reasoning.append("Pooja room added in the Ishan (NE) zone (Indian residential tradition)")
 
-        if profile.needs_servant_quarter and bedrooms >= 3:
+        if profile.needs_servant_quarter:
             additional_rooms.append("Servant Quarter")
-            reasoning.append("Servant quarter added for household help")
+            reasoning.append("Servant quarter with its own toilet added near the kitchen/utility (NW/SE)")
 
         if profile.needs_store_room:
             additional_rooms.append("Store Room")
             reasoning.append("Dedicated storage room added")
 
         # Step 4: Map to BHK configuration
-        if profile.bhk_override:
+        if profile.bhk_override and profile.bhk_override.upper().replace(" ", "") in ("1BHK", "2BHK", "3BHK", "4BHK"):
             bhk = profile.bhk_override.upper().replace(" ", "")
             reasoning.insert(0, f"Using user-specified configuration: {bhk}")
         else:
@@ -180,11 +181,11 @@ class FamilyAnalyzer:
             bedrooms += 1
             reasoning.append("1 Master Bedroom for adult couple/single")
 
-        # Additional adult couples (joint family)
-        extra_adult_pairs = max(0, (profile.adults - 2) // 2)
+        # Additional adults (joint family / grown-up children): one room per pair, rounded up
+        extra_adult_pairs = max(0, math.ceil((profile.adults - 2) / 2))
         if extra_adult_pairs > 0:
             bedrooms += extra_adult_pairs
-            reasoning.append(f"{extra_adult_pairs} additional bedroom(s) for extra adults")
+            reasoning.append(f"{extra_adult_pairs} additional bedroom(s) for {profile.adults - 2} extra adult(s)")
 
         # Children's bedrooms
         if profile.children >= 1:
@@ -192,17 +193,21 @@ class FamilyAnalyzer:
             bedrooms += child_rooms
             reasoning.append(f"{child_rooms} bedroom(s) for {profile.children} children")
 
-        # Elderly bedroom
+        # Elderly bedroom(s): an elderly couple shares one accessible room
         if profile.elderly >= 1:
-            bedrooms += 1
-            reasoning.append("1 bedroom for elderly (ground floor, attached bath)")
+            elder_rooms = math.ceil(profile.elderly / 2)
+            bedrooms += elder_rooms
+            reasoning.append(f"{elder_rooms} ground-floor bedroom(s) for elders with accessible attached bath")
 
         # Guest bedroom
         if profile.guests_frequent:
             bedrooms += 1
-            reasoning.append("1 guest bedroom for frequent overnight visitors")
+            reasoning.append("1 guest bedroom for frequent overnight visitors (NW / Vayavya zone)")
 
         # Cap at 4 for practical Indian residential
+        if bedrooms > 4:
+            reasoning.append(f"{bedrooms} bedrooms needed — capped at 4BHK on one floor; "
+                             "plan the rest on an upper floor")
         bedrooms = min(bedrooms, 4)
 
         return bedrooms
@@ -219,23 +224,23 @@ class FamilyAnalyzer:
         - Common bathroom: 1 per 2-3 remaining bedrooms
         - 4BHK+: each bedroom gets attached bath
         """
-        bathrooms = 1  # Master bath (always)
+        attached = 1  # Master bath (always)
         reasoning.append("1 attached bathroom for master bedroom")
 
-        if profile.elderly >= 1:
-            bathrooms += 1
-            reasoning.append("1 attached bathroom for elderly accessibility")
+        if profile.elderly >= 1 and bedrooms >= 2:
+            attached += 1
+            reasoning.append("1 attached accessible bathroom for elders (grab bars, 1.5 m turning circle)")
 
         if bedrooms >= 3:
-            # Common bathroom + additional attached
-            bathrooms += 1
-            reasoning.append("1 common bathroom for family/guests")
-
+            attached += 1
+            reasoning.append("1 more attached bathroom for the 3rd bedroom")
         if bedrooms >= 4:
-            bathrooms += 1
-            reasoning.append("1 additional bathroom for 4-bedroom layout")
+            attached = max(attached, 3)
 
-        return bathrooms
+        common = 1 if attached < bedrooms or bedrooms == 1 else 0
+        if common:
+            reasoning.append("1 common bathroom for the remaining bedrooms / guests")
+        return attached + common
 
     def _determine_bhk(self, bedrooms: int,
                        additional_rooms: List[str],
@@ -254,17 +259,10 @@ class FamilyAnalyzer:
             bhk = "4BHK"
             reasoning.append(f"=> Recommended: 4BHK ({bedrooms} bedrooms needed)")
 
-        # If many additional rooms are needed, consider upgrading
-        if len(additional_rooms) >= 2 and bhk in ("1BHK", "2BHK"):
-            old_bhk = bhk
-            bhk_order = ["1BHK", "2BHK", "3BHK", "4BHK"]
-            idx = bhk_order.index(bhk)
-            if idx < 3:
-                bhk = bhk_order[idx + 1]
-                reasoning.append(
-                    f"Upgraded {old_bhk} => {bhk} to accommodate "
-                    f"{len(additional_rooms)} additional rooms"
-                )
+        # Lifestyle spaces (pooja, study, store, servant) are real rooms in the
+        # space program, so they no longer inflate the bedroom count.
+        if additional_rooms:
+            reasoning.append("Lifestyle spaces planned as dedicated rooms: " + ", ".join(additional_rooms))
 
         return bhk
 
@@ -298,6 +296,3 @@ class FamilyAnalyzer:
             "recommended_height": round(rec_height, 1),
         }
 
-
-# Need math for plot recommendation
-import math

@@ -1,21 +1,24 @@
 """
 V-HSP Layout Engine
 ====================
-Vastu-Guided Hierarchical Space Partitioning (V-HSP) — the core algorithm
-that converts user inputs (plot dimensions, BHK config, Vastu preferences)
-into a complete, professional floor plan with rooms, walls, doors, and windows.
+Vastu-Guided Hierarchical Space Partitioning — converts plot dimensions, BHK,
+family intent, lifestyle spaces, engineering options and site amenities into a
+complete, professional floor plan (rooms, walls with real openings, doors,
+windows, staircases, site amenities, dimensions) plus an engineering report.
 
-Algorithm Pipeline:
-  Stage 1: Functional Zoning (Public / Private / Service macro-zones)
-  Stage 2: Vastu Mandala mapping (rooms → compass zones)
-  Stage 3: Hierarchical room subdivision (area-ratio proportional splitting)
-  Stage 4: NBC dimension clamping (minimum widths, aspect ratios)
-  Stage 5: Wall insetting & classification (external 230mm, internal 115mm)
-  Stage 6: Door & window placement on shared wall segments
-  Stage 7: Corridor synthesis along major partition spines
-  Stage 8: Dimension line generation (3-tier hierarchy)
+Pipeline:
+  Stage 1: Space program        — rooms the family needs (space_program.py)
+  Stage 2: Site planning        — setbacks, Vastu open space, footprint (site_planner.py)
+  Stage 3: Zoning & geometry    — band-spine solver, optimised for Vastu + NBC (layout_solver.py)
+  Stage 4: Doors & arches       — every room reachable from the main door
+  Stage 5: Main entrance        — best auspicious pada on the road facade
+  Stage 6: Site amenities       — parking, sump, genset, pool, garden, security, terrace stair
+  Stage 7: Walls & openings     — 230 mm envelope, 115 mm partitions, compound wall, cut openings
+  Stage 8: Windows              — NBC Part 3 glazing (≥ 1/10 floor area), more on N/E
+  Stage 9: Dimensions & audit   — 3-tier dimensions, Vastu score, RERA carpet, engineering notes
 
-Performance: < 10ms on any CPU for up to 15 rooms.
+Plan frame: metres, origin at the plot's bottom-left corner, +x right, +y up,
+and the road / entrance side ("orientation" = facing) is the TOP edge.
 """
 
 from dataclasses import dataclass, field
@@ -26,7 +29,10 @@ from floorplan_generator.room_specs import (
     BHKConfig, RoomTemplate, WallThickness, RoomCategory,
     get_bhk_config, recommend_bhk_for_plot,
 )
-from floorplan_generator.vastu_engine import VastuEngine, VastuZone
+from floorplan_generator.vastu_engine import (
+    VastuEngine, VastuZone, ROOM_IMPORTANCE,
+    north_edge_for_facing, plan_sides_for_facing, pada_for_point,
+)
 
 
 # =============================================================================
@@ -35,7 +41,7 @@ from floorplan_generator.vastu_engine import VastuEngine, VastuZone
 
 @dataclass
 class RoomRect:
-    """A placed room with its physical bounds."""
+    """A placed room with its physical bounds (wall centre-line rectangle)."""
     name: str
     category: str       # RoomCategory value string
     x: float            # left edge, meters from plot origin
@@ -44,6 +50,7 @@ class RoomRect:
     h: float            # height in meters
     color: str           # hex color code for visualization
     area: float = 0.0    # carpet area in m² (computed)
+    role: str = ""       # Vastu role (MASTER_BEDROOM, CHILD_BEDROOM, …) when known
 
     def __post_init__(self):
         if self.area == 0.0:
@@ -67,11 +74,11 @@ class RoomRect:
     def top(self) -> float:
         return self.y + self.h
 
-    def overlaps(self, other: "RoomRect") -> bool:
-        """Check if two rooms overlap (excluding touching edges)."""
+    def overlaps(self, other: "RoomRect", tol: float = 1e-6) -> bool:
+        """Check if two rooms overlap (excluding touching edges, float-tolerant)."""
         return (
-            self.x < other.right and self.right > other.x and
-            self.y < other.top and self.top > other.y
+            self.x < other.right - tol and self.right > other.x + tol and
+            self.y < other.top - tol and self.top > other.y + tol
         )
 
     def shares_wall_with(self, other: "RoomRect", tolerance: float = 0.05) -> Optional[str]:
@@ -84,30 +91,22 @@ class RoomRect:
         """
         min_shared = 0.5  # minimum shared length in meters for a door
 
-        # East wall of self touches West wall of other
         if abs(self.right - other.x) < tolerance:
             overlap = min(self.top, other.top) - max(self.y, other.y)
             if overlap >= min_shared:
                 return "E"
-
-        # West wall of self touches East wall of other
         if abs(self.x - other.right) < tolerance:
             overlap = min(self.top, other.top) - max(self.y, other.y)
             if overlap >= min_shared:
                 return "W"
-
-        # North wall of self touches South wall of other
         if abs(self.top - other.y) < tolerance:
             overlap = min(self.right, other.right) - max(self.x, other.x)
             if overlap >= min_shared:
                 return "N"
-
-        # South wall of self touches North wall of other
         if abs(self.y - other.top) < tolerance:
             overlap = min(self.right, other.right) - max(self.x, other.x)
             if overlap >= min_shared:
                 return "S"
-
         return None
 
 
@@ -120,6 +119,7 @@ class WallSegment:
     y2: float
     thickness: float  # meters (0.23 external, 0.115 internal)
     is_external: bool
+    wall_type: str = ""   # 'external' | 'internal' | 'compound' (informational)
 
     @property
     def length(self) -> float:
@@ -136,11 +136,17 @@ class WallSegment:
 
 @dataclass
 class DoorPlacement:
-    """A door placed in a wall opening."""
-    x: float            # hinge position X in meters
-    y: float            # hinge position Y in meters
+    """
+    A door placed in a wall opening.
+
+    (x, y) is the low-coordinate end of the opening on the wall line; the
+    opening spans [x, x+width] for N/S walls and [y, y+width] for E/W walls.
+    The hinge is at (x, y) and the leaf swings into `room_name`.
+    """
+    x: float
+    y: float
     width: float        # door width in meters
-    wall_side: str      # 'N', 'S', 'E', 'W' — which wall of the room
+    wall_side: str      # 'N', 'S', 'E', 'W' — which wall of the room (plan-relative)
     swing_direction: str  # 'LEFT', 'RIGHT'
     room_name: str      # which room this door belongs to
     is_main_entrance: bool = False
@@ -152,9 +158,26 @@ class WindowPlacement:
     x: float            # center X position in meters
     y: float            # center Y position in meters
     width: float        # window width in meters
-    height: float       # window height in meters
+    height: float       # window height in meters (for E/W windows: length along the wall)
     wall_side: str      # 'N', 'S', 'E', 'W'
     room_name: str
+
+
+@dataclass
+class StaircaseRect:
+    """A placed staircase with its physical bounds."""
+    name: str  # "Staircase", "Lift"
+    stair_type: str  # "straight", "dog_leg", "open_well", "lift"
+    x: float
+    y: float
+    w: float  # width in meters
+    h: float  # height/depth in meters
+    direction: str  # "up" direction — 'N', 'S', 'E', 'W'
+    num_steps: int = 15
+    tread_depth_m: float = 0.25  # 250mm per step
+    riser_height_m: float = 0.175  # 175mm per step
+    has_landing: bool = True
+    landing_depth_m: float = 1.0
 
 
 @dataclass
@@ -164,9 +187,9 @@ class DimLine:
     y1: float
     x2: float
     y2: float
-    offset: float       # perpendicular offset from wall in meters
+    offset: float       # perpendicular offset from wall in meters (negative = outside, below/left)
     label: str          # dimension text like "3,500"
-    tier: int           # 1=openings, 2=rooms, 3=overall
+    tier: int           # 1=rooms/setbacks, 2=building envelope, 3=overall plot
 
 
 @dataclass
@@ -174,11 +197,12 @@ class GeneratedFloorPlan:
     """Complete output of the layout engine — everything needed to render."""
     plot_width: float
     plot_height: float
-    orientation: str          # compass direction of North edge
+    orientation: str          # road / entrance facing direction (N/E/S/W) — drawn at the top
     rooms: List[RoomRect] = field(default_factory=list)
     walls: List[WallSegment] = field(default_factory=list)
     doors: List[DoorPlacement] = field(default_factory=list)
     windows: List[WindowPlacement] = field(default_factory=list)
+    staircases: List[StaircaseRect] = field(default_factory=list)
     dimensions: List[DimLine] = field(default_factory=list)
     vastu_score: float = 0.0
     vastu_enabled: bool = True
@@ -188,6 +212,20 @@ class GeneratedFloorPlan:
     family_description: str = ""
     quality_level: str = "Standard"
     project_name: str = "Residential Floor Plan"
+    has_lift: bool = False
+    lift_capacity: str = "4 Person"
+    building_type: str = "Independent House"
+    num_floors: int = 1
+    additional_components: Dict = field(default_factory=dict)
+    # ── Engineering upgrade fields ─────────────────────────────────────────
+    north_edge: str = ""                       # plan edge pointing North ('N' top, 'E' right, …)
+    building_footprint: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    setbacks: Dict[str, float] = field(default_factory=dict)   # by compass direction
+    stair_type: str = "dog_leg"
+    openings: List[Tuple[float, float, float, float]] = field(default_factory=list)
+    design_notes: List[str] = field(default_factory=list)
+    engineering: Dict = field(default_factory=dict)
+    vastu_breakdown: Dict = field(default_factory=dict)
 
 
 # =============================================================================
@@ -196,6 +234,13 @@ class GeneratedFloorPlan:
 
 # Architectural grid module (snap dimensions to this increment)
 GRID_MODULE = 0.15  # 150mm = half-brick module
+
+# Room categories that live outside the house envelope
+SITE_CATEGORIES = {
+    RoomCategory.PARKING.value, RoomCategory.BIKE_PARKING.value, RoomCategory.GARDEN.value,
+    RoomCategory.POOL.value, RoomCategory.WATER_TANK.value, RoomCategory.GENERATOR.value,
+    RoomCategory.SECURITY.value,
+}
 
 
 def _snap_to_grid(value: float, module: float = GRID_MODULE) -> float:
@@ -208,24 +253,80 @@ def _clamp(value: float, min_val: float, max_val: float) -> float:
     return max(min_val, min(max_val, value))
 
 
+def _is_site_room(r) -> bool:
+    return r.category in SITE_CATEGORIES or "External" in r.name
+
+
+def audit_vastu(rooms, doors, plot_w: float, plot_h: float, facing: str,
+                footprint=None, setbacks_compass: Optional[Dict[str, float]] = None,
+                vastu_enabled: bool = True) -> Tuple[float, Dict]:
+    """
+    Plan-level Vastu score shared by the generator and the interactive editor.
+
+    House rooms are scored on the building's mandala, site amenities on the plot
+    mandala (role-aware for bedrooms), plus the main door's 32-pada score,
+    Brahmasthan violations (−8 each) and the N/E vs S/W open-space balance (−4).
+    """
+    north = north_edge_for_facing(facing)
+    building = [r for r in rooms if not _is_site_room(r)]
+    if not footprint or footprint[2] <= 0:
+        if building:
+            x0 = min(r.x for r in building)
+            y0 = min(r.y for r in building)
+            footprint = (x0, y0, max(r.right for r in building) - x0, max(r.top for r in building) - y0)
+        else:
+            footprint = (0.0, 0.0, plot_w, plot_h)
+    fx, fy, fw, fd = footprint
+    house = VastuEngine(fw, fd, north, fx, fy)
+    plot = VastuEngine(plot_w, plot_h, north)
+    placements, weights, rows = [], [], []
+    for r in rooms:
+        if "Dress" in r.name or "Wardrobe" in r.name or "Duct" in r.name:
+            continue
+        role = getattr(r, "role", "")
+        key = role if role in ("MASTER_BEDROOM", "CHILD_BEDROOM", "GUEST_BEDROOM", "ELDER_BEDROOM") else r.category
+        eng = plot if _is_site_room(r) else house
+        zone = eng.get_zone_for_position(r.cx, r.cy).value
+        placements.append((key, zone))
+        weights.append(ROOM_IMPORTANCE.get(key, 1.0))
+        rows.append({"room": r.name, "key": key, "zone": zone,
+                     "score": eng.get_room_score(key, zone), "taboo": eng.is_taboo(key, zone)})
+    main = next((d for d in doors if d.is_main_entrance), None)
+    extra = []
+    pada = None
+    if main is not None:
+        if main.wall_side in ("N", "S"):
+            px, py = main.x + main.width / 2, main.y
+        else:
+            px, py = main.x, main.y + main.width / 2
+        pada = pada_for_point(px, py, footprint, facing)
+        extra.append((pada.score, ROOM_IMPORTANCE["ENTRANCE"]))
+    score = house.compute_plan_score(placements, weights, extra_scores=extra)
+    bcx, bcy = fx + fw / 2, fy + fd / 2
+    brahma = [r.name for r in building if r.x < bcx < r.right and r.y < bcy < r.top
+              and r.category in ("BATHROOM", "KITCHEN", "STAIRS", "LIFT", "STORE", "UTILITY")]
+    score -= 8 * len(brahma)
+    sb = setbacks_compass or {}
+    ne_open, sw_open = sb.get("N", 0) + sb.get("E", 0), sb.get("S", 0) + sb.get("W", 0)
+    if vastu_enabled and sb and ne_open + 0.05 < sw_open:
+        score -= 4
+    score = max(0.0, min(100.0, score))
+    return score, {
+        "rooms": rows,
+        "entrance_pada": pada.pada_id if pada else None,
+        "entrance_score": pada.score if pada else None,
+        "brahmasthan_violations": brahma,
+        "open_space_ne_m": round(ne_open, 2), "open_space_sw_m": round(sw_open, 2),
+    }
+
+
 class LayoutEngine:
     """
     Vastu-Guided Hierarchical Space Partitioning (V-HSP) Layout Engine.
 
-    Generates professional residential floor plans from:
-    - Plot dimensions (width × height in meters)
-    - BHK configuration (room schedule)
-    - Vastu Shastra preferences
-    - Compass orientation
-
     Usage:
-        engine = LayoutEngine(
-            plot_width=12.0,
-            plot_height=15.0,
-            bhk_config="2BHK",
-            vastu_enabled=True,
-            orientation="N"
-        )
+        engine = LayoutEngine(plot_width=12.0, plot_height=15.0, bhk_config="2BHK",
+                              vastu_enabled=True, orientation="N")
         plan = engine.generate()
     """
 
@@ -240,193 +341,255 @@ class LayoutEngine:
         project_name: str = "Residential Floor Plan",
         family_description: str = "",
         custom_rooms: Optional[List[RoomTemplate]] = None,
+        has_lift: bool = False,
+        lift_capacity: str = "4 Person",
+        stair_type: str = "dog_leg",
+        num_floors: int = 1,
+        building_type: str = "Independent House",
+        additional_components: Optional[Dict] = None,
+        family_profile=None,
+        **kwargs,
     ):
         """
-        Initialize the layout engine.
-
         Args:
-            plot_width: Plot width in meters (X axis).
-            plot_height: Plot height in meters (Y axis).
+            plot_width: Plot width in meters (X axis, along the road).
+            plot_height: Plot depth in meters (Y axis).
             bhk_config: '1BHK', '2BHK', '3BHK', '4BHK', or 'auto'.
-            vastu_enabled: Whether to enforce Vastu Shastra placement.
-            orientation: North direction — 'N' (top), 'E' (right), 'S' (bottom), 'W' (left).
-            quality_level: 'Economy', 'Standard', 'Premium', 'Luxury'.
+            vastu_enabled: Whether to optimise for Vastu Shastra.
+            orientation: Road / entrance facing direction 'N', 'E', 'S', 'W'
+                         (the road side is drawn at the top of the plan).
+            quality_level: 'Economy', 'Standard', 'Premium', 'Luxury' (scales room sizes).
             project_name: Project title for title block.
             family_description: Human-readable family description.
-            custom_rooms: Optional custom room list (overrides BHK config).
+            custom_rooms: Optional custom room list (legacy fallback only).
+            has_lift: Whether to include an IS 14665 lift shaft.
+            lift_capacity: '4 Person', '6 Person', or '8 Person'.
+            stair_type: 'dog_leg', 'straight', 'l_shaped', 'open_well', 'spiral', 'zigzag'.
+            num_floors: Number of floors (stairs/lift, setbacks, genset, cost).
+            building_type: 'Independent House', 'Apartment', or 'Duplex'.
+            additional_components: Site amenities dict (parking, garden, pool, ...).
+            family_profile: Optional FamilyProfile — drives bedroom roles and lifestyle rooms.
         """
         self.plot_width = max(plot_width, 4.0)
         self.plot_height = max(plot_height, 4.0)
         self.vastu_enabled = vastu_enabled
-        self.orientation = orientation.upper()
+        self.orientation = (orientation or "N").upper()[0]
+        if self.orientation not in "NESW":
+            self.orientation = "N"
         self.quality_level = quality_level
         self.project_name = project_name
         self.family_description = family_description
+        self.has_lift = has_lift
+        self.lift_capacity = lift_capacity
+        valid_stairs = {"dog_leg", "straight", "l_shaped", "open_well", "spiral", "zigzag"}
+        self.stair_type = stair_type if stair_type in valid_stairs else "dog_leg"
+        self.num_floors = max(1, int(num_floors or 1))
+        self.building_type = building_type
+        if additional_components is None and "additional_components" in kwargs:
+            additional_components = kwargs["additional_components"]
+        self.additional_components = additional_components or {}
+        self.family_profile = family_profile
+        self.custom_rooms = custom_rooms
 
-        # Walls
         self.wall = WallThickness()
+        self.north_edge = north_edge_for_facing(self.orientation)
+        self.sides = plan_sides_for_facing(self.orientation)
 
-        # Resolve BHK config
         if bhk_config.lower() == "auto":
             plot_area = self.plot_width * self.plot_height
             self.bhk_name = recommend_bhk_for_plot(plot_area)
         else:
             self.bhk_name = bhk_config.upper().replace(" ", "")
-
         self.config = get_bhk_config(self.bhk_name)
+        self.room_templates = list(custom_rooms) if custom_rooms else list(self.config.rooms)
 
-        # Use custom rooms if provided
-        if custom_rooms:
-            self.room_templates = custom_rooms
-        else:
-            self.room_templates = list(self.config.rooms)
+        # Vastu engine over the whole plot (kept for backward compatibility)
+        self.vastu = VastuEngine(self.plot_width, self.plot_height, self.north_edge) if self.vastu_enabled else None
 
-        # Filter optional rooms that won't fit
-        self._filter_rooms_for_plot()
-
-        # Vastu engine
-        if self.vastu_enabled:
-            self.vastu = VastuEngine(self.plot_width, self.plot_height, self.orientation)
-        else:
-            self.vastu = None
-
-    def _filter_rooms_for_plot(self):
-        """Remove optional rooms if the plot is too small."""
-        plot_area = self.plot_width * self.plot_height
-        usable_area = plot_area * 0.85  # ~15% for walls and corridors
-
-        # Sum required room areas
-        required_area = sum(
-            t.target_width * t.target_height
-            for t in self.room_templates
-            if not t.is_optional
-        )
-
-        # Keep optional rooms only if there's space
-        if required_area > usable_area * 0.95:
-            self.room_templates = [
-                t for t in self.room_templates if not t.is_optional
-            ]
+    # =========================================================================
+    # Main pipeline
+    # =========================================================================
 
     def generate(self) -> GeneratedFloorPlan:
-        """
-        Execute the full V-HSP pipeline and return a complete floor plan.
+        """Execute the full pipeline and return a complete floor plan."""
+        from floorplan_generator.space_program import build_program, trim_program
+        from floorplan_generator.site_planner import SitePlanner
+        from floorplan_generator.layout_solver import BandSpineSolver
 
-        Returns:
-            GeneratedFloorPlan with all rooms, walls, doors, windows, dimensions.
-        """
         plan = GeneratedFloorPlan(
-            plot_width=self.plot_width,
-            plot_height=self.plot_height,
-            orientation=self.orientation,
-            vastu_enabled=self.vastu_enabled,
-            bhk_config=self.bhk_name,
-            family_description=self.family_description,
-            quality_level=self.quality_level,
-            project_name=self.project_name,
+            plot_width=self.plot_width, plot_height=self.plot_height,
+            orientation=self.orientation, vastu_enabled=self.vastu_enabled,
+            bhk_config=self.bhk_name, family_description=self.family_description,
+            quality_level=self.quality_level, project_name=self.project_name,
+            has_lift=self.has_lift, lift_capacity=self.lift_capacity,
+            building_type=self.building_type, num_floors=self.num_floors,
+            additional_components=self.additional_components,
+            north_edge=self.north_edge, stair_type=self.stair_type,
         )
+        notes: List[str] = []
 
-        # Stage 1-3: Place rooms using Vastu-guided subdivision
-        rooms = self._place_rooms()
+        # ── Stage 1: space program ────────────────────────────────────────
+        program = build_program(
+            self.bhk_name, self.family_profile, self.building_type, self.num_floors,
+            self.quality_level, self.has_lift, self.lift_capacity, self.stair_type)
+        members = 4
+        fp_prof = self.family_profile
+        if fp_prof is not None:
+            members = max(1, getattr(fp_prof, "adults", 2) + getattr(fp_prof, "children", 0)
+                          + getattr(fp_prof, "elderly", 0))
 
-        # Stage 4: Validate and clamp NBC dimensions
-        rooms = self._clamp_nbc_dimensions(rooms)
+        # ── Stage 2: site planning ────────────────────────────────────────
+        comps = dict(self.additional_components)
+        comps["_has_lift"] = bool(program.lift)
+        planner = SitePlanner(self.plot_width, self.plot_height, self.orientation, self.vastu_enabled,
+                              self.building_type, self.num_floors, comps, members)
+        n_bed = int(program.bhk[0])
+        min_w = {1: 5.6, 2: 6.6, 3: 7.6, 4: 8.4}.get(n_bed, 6.6)
+        min_d = 6.8
+        ext_len = program.external_stair.footprint_l if program.external_stair else 0.0
+        site = planner.plan_footprint(program.target_area * 1.12, program.min_area, min_w, min_d, ext_len)
 
-        # Stage 5: Generate wall segments
+        # ── Stage 3: zoning & geometry (with progressive relaxation) ─────
+        fx, fy, fw, fd = site.footprint
+        trim_notes = trim_program(program, fw * fd) if fw * fd < program.min_area else []
+        seed = int(self.plot_width * 100) * 31 + int(self.plot_height * 100) * 17 + "NESW".index(self.orientation)
+        result = None
+        relax_notes: List[str] = []
+        for attempt in range(5):
+            solver = BandSpineSolver(program, site.footprint, self.orientation, self.vastu_enabled, seed=seed)
+            result = solver.solve()
+            if result is not None and result.penalties.get("access", 0) == 0 and \
+                    result.penalties.get("circulation", 0) == 0:
+                break
+            step = self._relax_program(program, attempt)
+            relax_notes.extend(step)
+            if not step and attempt > 2:
+                break
+
+        if result is None:
+            # Last resort: legacy functional subdivision inside the footprint
+            notes.append("Compact plot: rooms arranged by functional subdivision (no feasible band layout).")
+            rooms = self._legacy_rooms(site.footprint)
+            door_x = (fx + fw / 2 - 0.5, fx + fw / 2 + 0.5)
+            placed = None
+        else:
+            rooms = [RoomRect(name=p.name, category=p.category, x=p.x, y=p.y, w=p.w, h=p.h,
+                              color=p.color, role=p.role) for p in result.rooms]
+            door_x = result.door
+            placed = result.rooms
+        bhk_now = program.bhk
+        if bhk_now != self.bhk_name:
+            plan.bhk_config = bhk_now
+
+        # ── Stages 4-5: doors, arches, main entrance ─────────────────────
+        doors, openings = self._place_doors(rooms, placed, door_x, site.footprint)
+
+        # ── Stage 6: site amenities ──────────────────────────────────────
+        planner.place_amenities(site, door_x[0], door_x[1], program.external_stair)
+        for it in site.items:
+            x, y, w, h = it.rect
+            rooms.append(RoomRect(name=it.name, category=it.category, x=round(x, 3), y=round(y, 3),
+                                  w=round(w, 3), h=round(h, 3), color=it.color))
+
+        # ── Stage 7: walls with openings ─────────────────────────────────
         walls = self._generate_walls(rooms)
+        cuts = [self._door_cut(d) for d in doors] + list(openings)
+        top = self.plot_height
+        cuts += [(g0, top, g1, top) for g0, g1 in site.gates]
+        walls = self._cut_openings(walls, cuts)
 
-        # Stage 6: Place doors and windows
-        doors = self._place_doors(rooms)
-        windows = self._place_windows(rooms)
+        # ── Stage 8: windows ─────────────────────────────────────────────
+        windows = self._place_windows(rooms, doors, site.footprint)
 
-        # Stage 7: Generate dimension annotations
+        # Staircases (internal + external terrace stair)
+        staircases = self._place_staircases(rooms, program)
+
+        # ── Stage 9: dimensions, areas, Vastu audit, engineering notes ───
         dimensions = self._generate_dimensions(rooms)
+        self._set_clear_areas(rooms, site.footprint)
+        lift_area = sum(r.w * r.h for r in rooms if r.category == RoomCategory.LIFT.value)
+        duct_area = sum(r.w * r.h for r in rooms if "Duct" in r.name)
+        carpet = max(0.0, (fw - self.wall.external) * (fd - self.wall.external) - lift_area - duct_area)
+        built_up = (fw + self.wall.external) * (fd + self.wall.external)
 
-        # Compute Vastu score
-        vastu_score = 0.0
-        if self.vastu_enabled and self.vastu:
-            placements = []
-            for room in rooms:
-                zone = self.vastu.get_zone_for_position(room.cx, room.cy)
-                placements.append((room.category, zone.value))
-            vastu_score = self.vastu.compute_plan_score(placements)
-
-        # Compute areas
-        carpet_area = sum(r.area for r in rooms if r.category != RoomCategory.CORRIDOR.value)
-        wall_area = sum(
-            w.length * w.thickness for w in walls
-        )
-        built_up_area = carpet_area + wall_area
-
-        # Populate plan
+        vastu_score, breakdown = self._vastu_audit(rooms, doors, site)
         plan.rooms = rooms
         plan.walls = walls
         plan.doors = doors
         plan.windows = windows
+        plan.staircases = staircases
         plan.dimensions = dimensions
+        plan.openings = list(openings)
         plan.vastu_score = round(vastu_score, 1)
-        plan.total_carpet_area = round(carpet_area, 2)
-        plan.total_built_up_area = round(built_up_area, 2)
+        plan.vastu_breakdown = breakdown
+        plan.total_carpet_area = round(carpet, 2)
+        plan.total_built_up_area = round(built_up, 2)
+        plan.building_footprint = (round(fx, 3), round(fy, 3), round(fw, 3), round(fd, 3))
+        plan.setbacks = {self.sides[k]: v for k, v in site.setbacks.items()}
 
+        engineering = self._engineering_report(rooms, walls, program, site, carpet, built_up)
+        plan.engineering = engineering
+        notes = (program.notes + trim_notes + relax_notes + site.notes + notes
+                 + engineering.pop("notes", []))
+        if result is not None:
+            notes.insert(0, f"Layout: {result.mode}-band zoning optimised over the building's Vastu "
+                            f"Purusha Mandala (raw objective {result.score:.1f}).")
+        plan.design_notes = notes
         return plan
 
     # =========================================================================
-    # Stage 1-3: Room Placement
+    # Program relaxation & legacy fallback
     # =========================================================================
 
-    def _place_rooms(self) -> List[RoomRect]:
-        """
-        Place all rooms within the plot using hierarchical subdivision.
-
-        The algorithm:
-        1. Compute internal bounds (after exterior wall deduction)
-        2. Group rooms by functional zone (public/private/service)
-        3. If Vastu enabled, assign rooms to 3×3 Mandala zones
-        4. Subdivide each zone among its assigned rooms
-        """
-        # Internal bounds after deducting exterior wall thickness
-        ext = self.wall.external
-        ix = ext
-        iy = ext
-        iw = self.plot_width - 2 * ext
-        ih = self.plot_height - 2 * ext
-
-        if iw <= 0 or ih <= 0:
+    def _relax_program(self, program, attempt: int) -> List[str]:
+        """Progressively simplify the program when no access-complete layout exists."""
+        if attempt == 0:
+            for g in program.groups:
+                if g.kind == "suite":
+                    g.rooms = [r for r in g.rooms if "Wardrobe" not in r.name and "Dress" not in r.name]
+            return ["Wardrobe/dress areas folded into bedrooms to fit the footprint."]
+        if attempt == 1:
+            for g in program.groups:
+                if g.kind == "service" and len(g.rooms) > 1:
+                    g.rooms = g.rooms[:1]
+                    g.kind = "single"
+            return ["Utility/wash area merged into the kitchen (compact footprint)."]
+        if attempt == 2:
+            for key in ("servant", "store", "study"):
+                for g in list(program.groups):
+                    if g.key == key:
+                        program.groups.remove(g)
+                        return [f"{g.primary.name} omitted: footprint cannot give it a door and daylight."]
             return []
+        if attempt == 3:
+            for r in [g.primary for g in program.groups]:
+                if r.category == RoomCategory.BEDROOM.value:
+                    r.min_width = min(r.min_width, 2.4)
+            program.living.min_width = 2.7
+            return ["Bedroom minimum widths relaxed to the NBC 2.4 m limit."]
+        return []
 
-        # Build room placement list with names and target areas
-        room_entries = self._build_room_entries()
-
-        if self.vastu_enabled and self.vastu:
-            rooms = self._place_rooms_vastu(room_entries, ix, iy, iw, ih)
-        else:
-            rooms = self._place_rooms_functional(room_entries, ix, iy, iw, ih)
-
-        return rooms
+    def _legacy_rooms(self, footprint) -> List[RoomRect]:
+        fx, fy, fw, fd = footprint
+        entries = self._build_room_entries()
+        rooms = self._place_rooms_functional(entries, fx, fy, fw, fd)
+        return self._clamp_nbc_dimensions(rooms, footprint)
 
     def _build_room_entries(self) -> List[dict]:
-        """Build list of room entries with unique names."""
+        """Build list of room entries with unique names (legacy fallback)."""
         entries = []
         name_counts: Dict[str, int] = {}
-
         for template in self.room_templates:
+            if template.is_optional:
+                continue
             base_name = template.spec.name
             name_counts[base_name] = name_counts.get(base_name, 0) + 1
             count = name_counts[base_name]
-
-            # Make name unique if duplicates
-            if count > 1:
-                name = f"{base_name} {count}"
-            else:
-                name = base_name
-
-            # Scale target area to fit plot
-            target_area = template.target_width * template.target_height
-
+            name = f"{base_name} {count}" if count > 1 else base_name
             entries.append({
                 "name": name,
                 "category": template.spec.category.value,
-                "target_area": target_area,
+                "target_area": template.target_width * template.target_height,
                 "min_width": template.spec.min_width,
                 "target_width": template.target_width,
                 "target_height": template.target_height,
@@ -434,638 +597,617 @@ class LayoutEngine:
                 "preferred_zone": template.preferred_vastu_zone,
                 "attached_to": template.attached_to,
             })
-
-        # Fix duplicate names for rooms that only appear once
-        single_counts = {k for k, v in name_counts.items() if v == 1}
-        for entry in entries:
-            # The first occurrence of a multi-count name needs renaming too
-            base = entry["name"]
-            if base not in single_counts and not any(c.isdigit() for c in base):
-                # Find the base name in counts
-                for bn, cnt in name_counts.items():
-                    if cnt > 1 and base == bn:
-                        entry["name"] = f"{bn} 1"
-                        break
-
         return entries
-
-    def _place_rooms_vastu(self, entries: List[dict],
-                           ix: float, iy: float,
-                           iw: float, ih: float) -> List[RoomRect]:
-        """Place rooms using Vastu Mandala zone assignment."""
-        zones = self.vastu.get_all_zones()
-        zone_assignments: Dict[str, List[dict]] = {z.value: [] for z in VastuZone}
-
-        # Assign rooms to their preferred Vastu zones
-        assigned = set()
-        for entry in entries:
-            pref = entry["preferred_zone"]
-            if pref in zone_assignments:
-                zone_assignments[pref].append(entry)
-                assigned.add(entry["name"])
-
-        # Any unassigned rooms go to CENTER
-        for entry in entries:
-            if entry["name"] not in assigned:
-                zone_assignments["CENTER"].append(entry)
-
-        # Now subdivide each zone among its rooms
-        rooms = []
-        for zone_name, zone_entries in zone_assignments.items():
-            if not zone_entries:
-                continue
-
-            zone_enum = VastuZone(zone_name)
-            zb = zones[zone_enum]
-
-            # Map zone bounds to internal coordinates
-            # Zone bounds are in plot coordinates; clip to internal bounds
-            zx = max(zb.x, ix)
-            zy = max(zb.y, iy)
-            zr = min(zb.x + zb.w, ix + iw)
-            zt = min(zb.y + zb.h, iy + ih)
-            zw = max(0, zr - zx)
-            zh = max(0, zt - zy)
-
-            if zw <= 0 or zh <= 0:
-                continue
-
-            # Subdivide zone among its rooms
-            zone_rooms = self._subdivide_zone(zone_entries, zx, zy, zw, zh)
-            rooms.extend(zone_rooms)
-
-        return rooms
 
     def _place_rooms_functional(self, entries: List[dict],
                                 ix: float, iy: float,
                                 iw: float, ih: float) -> List[RoomRect]:
-        """Place rooms using functional zoning (no Vastu)."""
-        # Group rooms by function
+        """Place rooms using functional zoning (legacy fallback)."""
         public = [e for e in entries if e["category"] in
-                  (RoomCategory.LIVING.value, RoomCategory.DINING.value,
-                   RoomCategory.FOYER.value)]
+                  (RoomCategory.LIVING.value, RoomCategory.DINING.value, RoomCategory.FOYER.value)]
         private = [e for e in entries if e["category"] in
-                   (RoomCategory.BEDROOM.value, RoomCategory.STUDY.value,
-                    RoomCategory.POOJA.value)]
+                   (RoomCategory.BEDROOM.value, RoomCategory.STUDY.value, RoomCategory.POOJA.value)]
         service = [e for e in entries if e["category"] in
                    (RoomCategory.KITCHEN.value, RoomCategory.BATHROOM.value,
-                    RoomCategory.UTILITY.value, RoomCategory.SERVANT.value,
-                    RoomCategory.STORE.value)]
-        corridors = [e for e in entries if e["category"] == RoomCategory.CORRIDOR.value]
+                    RoomCategory.UTILITY.value, RoomCategory.SERVANT.value, RoomCategory.STORE.value)]
+        classified = {e["name"] for grp in (public, private, service) for e in grp}
+        public.extend(e for e in entries if e["name"] not in classified)
 
-        # Remaining unclassified
-        classified_names = {e["name"] for group in [public, private, service, corridors]
-                           for e in group}
-        misc = [e for e in entries if e["name"] not in classified_names]
-        if misc:
-            public.extend(misc)
-
-        # Calculate area ratios for zone splits
         total_area = sum(e["target_area"] for e in entries) or 1.0
         public_ratio = sum(e["target_area"] for e in public) / total_area
-        private_ratio = sum(e["target_area"] for e in private) / total_area
         service_ratio = sum(e["target_area"] for e in service) / total_area
 
         rooms = []
-
-        # Split plot into zones based on aspect ratio
         if iw >= ih:
-            # Wide plot: split vertically into columns
-            # [Service | Public | Private]
-            sx = ix
             sw = _snap_to_grid(iw * service_ratio)
-            px = sx + sw
             pw = _snap_to_grid(iw * public_ratio)
-            prx = px + pw
             prw = iw - sw - pw
-
             if service:
-                rooms.extend(self._subdivide_zone(service, sx, iy, sw, ih))
+                rooms.extend(self._subdivide_zone(service, ix, iy, sw, ih))
             if public:
-                rooms.extend(self._subdivide_zone(public, px, iy, pw, ih))
+                rooms.extend(self._subdivide_zone(public, ix + sw, iy, pw, ih))
             if private:
-                rooms.extend(self._subdivide_zone(private, prx, iy, prw, ih))
+                rooms.extend(self._subdivide_zone(private, ix + sw + pw, iy, prw, ih))
         else:
-            # Tall plot: split horizontally into rows
-            # Bottom: Service, Middle: Public, Top: Private
-            sy = iy
             sh = _snap_to_grid(ih * service_ratio)
-            py = sy + sh
             ph = _snap_to_grid(ih * public_ratio)
-            pry = py + ph
             prh = ih - sh - ph
-
             if service:
-                rooms.extend(self._subdivide_zone(service, ix, sy, iw, sh))
-            if public:
-                rooms.extend(self._subdivide_zone(public, ix, py, iw, ph))
+                rooms.extend(self._subdivide_zone(service, ix, iy, iw, sh))
             if private:
-                rooms.extend(self._subdivide_zone(private, ix, pry, iw, prh))
-
+                rooms.extend(self._subdivide_zone(private, ix, iy + sh, iw, prh))
+            if public:
+                rooms.extend(self._subdivide_zone(public, ix, iy + sh + prh, iw, ph))
         return rooms
 
-    def _subdivide_zone(self, entries: List[dict],
-                        zx: float, zy: float,
+    def _subdivide_zone(self, entries: List[dict], zx: float, zy: float,
                         zw: float, zh: float) -> List[RoomRect]:
-        """
-        Recursively subdivide a rectangular zone among a list of rooms.
-
-        Uses area-ratio proportional binary splitting.
-        """
-        if not entries:
+        """Recursively subdivide a rectangular zone (area-ratio binary splitting)."""
+        if not entries or zw <= 0 or zh <= 0:
             return []
-
         if len(entries) == 1:
             e = entries[0]
-            w = _snap_to_grid(max(zw, e.get("min_width", 1.0)))
-            h = _snap_to_grid(max(zh, e.get("min_width", 1.0)))
-            return [RoomRect(
-                name=e["name"],
-                category=e["category"],
-                x=round(zx, 3),
-                y=round(zy, 3),
-                w=round(min(w, zw), 3),
-                h=round(min(h, zh), 3),
-                color=e["color"],
-            )]
-
-        if len(entries) == 2:
-            return self._split_two(entries, zx, zy, zw, zh)
-
-        # More than 2: split into two halves and recurse
-        # Sort by target area descending for better space utilization
+            return [RoomRect(name=e["name"], category=e["category"], x=round(zx, 3), y=round(zy, 3),
+                             w=round(zw, 3), h=round(zh, 3), color=e["color"])]
         sorted_entries = sorted(entries, key=lambda e: e["target_area"], reverse=True)
         mid = len(sorted_entries) // 2
-        left_group = sorted_entries[:mid]
-        right_group = sorted_entries[mid:]
-
-        left_area = sum(e["target_area"] for e in left_group)
-        right_area = sum(e["target_area"] for e in right_group)
-        total_area = left_area + right_area
-
-        if total_area <= 0:
-            ratio = 0.5
-        else:
-            ratio = left_area / total_area
-
+        left_group, right_group = sorted_entries[:mid], sorted_entries[mid:]
+        la = sum(e["target_area"] for e in left_group)
+        ra = sum(e["target_area"] for e in right_group)
+        ratio = la / (la + ra) if la + ra > 0 else 0.5
         rooms = []
-
         if zw >= zh:
-            # Split vertically
-            lw = _snap_to_grid(zw * ratio)
-            lw = _clamp(lw, 1.0, zw - 1.0)
-            rw = zw - lw
+            lw = _clamp(_snap_to_grid(zw * ratio), min(1.0, zw / 2), max(zw - 1.0, zw / 2))
             rooms.extend(self._subdivide_zone(left_group, zx, zy, lw, zh))
-            rooms.extend(self._subdivide_zone(right_group, zx + lw, zy, rw, zh))
+            rooms.extend(self._subdivide_zone(right_group, zx + lw, zy, zw - lw, zh))
         else:
-            # Split horizontally
-            lh = _snap_to_grid(zh * ratio)
-            lh = _clamp(lh, 1.0, zh - 1.0)
-            rh = zh - lh
+            lh = _clamp(_snap_to_grid(zh * ratio), min(1.0, zh / 2), max(zh - 1.0, zh / 2))
             rooms.extend(self._subdivide_zone(left_group, zx, zy, zw, lh))
-            rooms.extend(self._subdivide_zone(right_group, zx, zy + lh, zw, rh))
-
+            rooms.extend(self._subdivide_zone(right_group, zx, zy + lh, zw, zh - lh))
         return rooms
 
-    def _split_two(self, entries: List[dict],
-                   zx: float, zy: float,
+    def _split_two(self, entries: List[dict], zx: float, zy: float,
                    zw: float, zh: float) -> List[RoomRect]:
-        """Split a zone between exactly two rooms."""
-        e1, e2 = entries[0], entries[1]
-        a1 = e1["target_area"]
-        a2 = e2["target_area"]
-        total = a1 + a2
+        """Split a zone between exactly two rooms (kept for API compatibility)."""
+        return self._subdivide_zone(entries[:2], zx, zy, zw, zh)
 
-        if total <= 0:
-            ratio = 0.5
-        else:
-            ratio = a1 / total
-
-        rooms = []
-
-        # Check if one is attached to the other (e.g. attached bathroom)
-        # If so, split along the shorter axis to keep them side-by-side
-        is_attached = (e1.get("attached_to") and e2["name"].startswith(e1["attached_to"])) or \
-                      (e2.get("attached_to") and e1["name"].startswith(e2["attached_to"]))
-
-        if zw >= zh or is_attached:
-            # Split vertically (side by side)
-            w1 = _snap_to_grid(zw * ratio)
-            w1 = _clamp(w1, max(1.0, e1.get("min_width", 1.0)), zw - max(1.0, e2.get("min_width", 1.0)))
-            w2 = zw - w1
-
-            rooms.append(RoomRect(
-                name=e1["name"], category=e1["category"],
-                x=round(zx, 3), y=round(zy, 3),
-                w=round(w1, 3), h=round(zh, 3),
-                color=e1["color"],
-            ))
-            rooms.append(RoomRect(
-                name=e2["name"], category=e2["category"],
-                x=round(zx + w1, 3), y=round(zy, 3),
-                w=round(w2, 3), h=round(zh, 3),
-                color=e2["color"],
-            ))
-        else:
-            # Split horizontally (stacked)
-            h1 = _snap_to_grid(zh * ratio)
-            h1 = _clamp(h1, max(1.0, e1.get("min_width", 1.0)), zh - max(1.0, e2.get("min_width", 1.0)))
-            h2 = zh - h1
-
-            rooms.append(RoomRect(
-                name=e1["name"], category=e1["category"],
-                x=round(zx, 3), y=round(zy, 3),
-                w=round(zw, 3), h=round(h1, 3),
-                color=e1["color"],
-            ))
-            rooms.append(RoomRect(
-                name=e2["name"], category=e2["category"],
-                x=round(zx, 3), y=round(zy + h1, 3),
-                w=round(zw, 3), h=round(h2, 3),
-                color=e2["color"],
-            ))
-
-        return rooms
-
-    # =========================================================================
-    # Stage 4: NBC Dimension Clamping
-    # =========================================================================
-
-    def _clamp_nbc_dimensions(self, rooms: List[RoomRect]) -> List[RoomRect]:
-        """
-        Validate and adjust room dimensions to meet NBC 2016 minimums.
-
-        Ensures:
-        - No room width below its category minimum
-        - Aspect ratios within 1:0.55 to 1:1.8
-        - Rooms don't exceed plot boundaries
-        """
-        ext = self.wall.external
-        max_x = self.plot_width - ext
-        max_y = self.plot_height - ext
-
+    def _clamp_nbc_dimensions(self, rooms: List[RoomRect], footprint=None) -> List[RoomRect]:
+        """Keep rooms inside the footprint and recompute areas."""
+        if footprint is None:
+            ext = self.wall.external
+            footprint = (ext, ext, self.plot_width - 2 * ext, self.plot_height - 2 * ext)
+        fx, fy, fw, fd = footprint
         for room in rooms:
-            # Clamp to plot bounds
-            room.x = _clamp(room.x, ext, max_x - 1.0)
-            room.y = _clamp(room.y, ext, max_y - 1.0)
-            room.w = min(room.w, max_x - room.x)
-            room.h = min(room.h, max_y - room.y)
-
-            # Ensure minimum dimensions
-            room.w = max(room.w, 1.2)
-            room.h = max(room.h, 1.2)
-
-            # Snap to grid
-            room.w = _snap_to_grid(room.w)
-            room.h = _snap_to_grid(room.h)
-
-            # Recalculate area
+            room.x = _clamp(room.x, fx, fx + fw - 0.5)
+            room.y = _clamp(room.y, fy, fy + fd - 0.5)
+            room.w = max(0.5, min(room.w, fx + fw - room.x))
+            room.h = max(0.5, min(room.h, fy + fd - room.y))
             room.area = round(room.w * room.h, 2)
-
         return rooms
 
     # =========================================================================
-    # Stage 5: Wall Generation
+    # Doors, arches and the main entrance
+    # =========================================================================
+
+    @staticmethod
+    def _shared(a, b, tol: float = 0.02):
+        if abs(a.top - b.y) < tol:
+            lo, hi = max(a.x, b.x), min(a.right, b.right)
+            if hi - lo > tol:
+                return "N", lo, hi, a.top
+        if abs(a.y - b.top) < tol:
+            lo, hi = max(a.x, b.x), min(a.right, b.right)
+            if hi - lo > tol:
+                return "S", lo, hi, a.y
+        if abs(a.right - b.x) < tol:
+            lo, hi = max(a.y, b.y), min(a.top, b.top)
+            if hi - lo > tol:
+                return "E", lo, hi, a.right
+        if abs(a.x - b.right) < tol:
+            lo, hi = max(a.y, b.y), min(a.top, b.top)
+            if hi - lo > tol:
+                return "W", lo, hi, a.x
+        return None
+
+    def _make_door(self, room, side, lo, hi, coord, width, toward=None) -> DoorPlacement:
+        """Door near one end of the shared segment (keeps wall space for furniture)."""
+        width = min(width, max(0.6, hi - lo - 0.1))
+        margin = 0.15 if hi - lo >= width + 0.45 else max(0.0, (hi - lo - width) / 2)
+        if toward is not None and toward > (lo + hi) / 2:
+            pos = hi - margin - width
+        else:
+            pos = lo + margin
+        pos = round(pos, 3)
+        if side in ("N", "S"):
+            return DoorPlacement(x=pos, y=round(coord, 3), width=round(width, 3), wall_side=side,
+                                 swing_direction="RIGHT", room_name=room.name)
+        return DoorPlacement(x=round(coord, 3), y=pos, width=round(width, 3), wall_side=side,
+                             swing_direction="RIGHT", room_name=room.name)
+
+    def _place_doors(self, rooms: List[RoomRect], placed, door_x, footprint):
+        """
+        Doors: attached rooms open into their parent (bath → dress/bedroom,
+        utility → kitchen); every other room opens to the best circulation room
+        (bedrooms → dining/passage before living for privacy, kitchen → dining,
+        pooja → living). Living↔dining and stairs↔circulation get open arches.
+        """
+        from floorplan_generator.layout_solver import door_width_for
+        doors: List[DoorPlacement] = []
+        openings: List[Tuple[float, float, float, float]] = []
+        fx, fy, fw, fd = footprint
+
+        if placed is None:
+            # Legacy fallback: a door on any shared wall + main door on the top facade
+            for i, r in enumerate(rooms):
+                for o in rooms[i + 1:]:
+                    se = self._shared(r, o)
+                    if se and se[2] - se[1] >= 0.9:
+                        doors.append(self._make_door(r, se[0], se[1], se[2], se[3], 0.8))
+                        break
+            top_rooms = [r for r in rooms if abs(r.top - (fy + fd)) < 0.05]
+            lr = next((r for r in top_rooms if r.category == RoomCategory.LIVING.value), top_rooms[0] if top_rooms else None)
+            if lr:
+                doors.append(DoorPlacement(x=round(lr.cx - 0.5, 3), y=round(lr.top, 3), width=1.0, wall_side="N",
+                                           swing_direction="RIGHT", room_name=lr.name, is_main_entrance=True))
+            return doors, openings
+
+        by_key = {p.key: (p, r) for p, r in zip(placed, rooms)}
+
+        # Main entrance on the living room's front facade
+        if "living" in by_key:
+            lp, lr = by_key["living"]
+            doors.append(DoorPlacement(x=round(door_x[0], 3), y=round(lr.top, 3),
+                                       width=round(door_x[1] - door_x[0], 3), wall_side="N",
+                                       swing_direction="RIGHT", room_name=lr.name, is_main_entrance=True))
+
+        circ_pref = {
+            "BEDROOM": ["dining", "passage", "living"], "STUDY": ["passage", "dining", "living"],
+            "KITCHEN": ["dining", "living", "passage"], "POOJA": ["living", "dining", "passage"],
+            "BATHROOM": ["dining", "passage", "living"], "STORE": ["dining", "passage", "living"],
+            "SERVANT": ["dining", "passage", "living"], "LIFT": ["dining", "passage", "living"],
+        }
+        circulation = [p for p in placed if p.circulation]
+
+        for p, r in zip(placed, rooms):
+            if p.circulation:
+                continue
+            dw = door_width_for(p)
+            if p.category == RoomCategory.STAIRS.value:
+                # open flight onto circulation: cut an arch the width of one flight
+                for c in sorted(circulation, key=lambda c: 0 if c.key == "dining" else 1):
+                    se = self._shared(r, by_key[c.key][1])
+                    if se and se[2] - se[1] >= 0.9:
+                        w = min(se[2] - se[1] - 0.1, 1.2)
+                        lo = (se[1] + se[2]) / 2 - w / 2
+                        openings.append(self._segment(se[0], lo, lo + w, se[3]))
+                        break
+                continue
+            target = None
+            if p.parent and p.parent in by_key:
+                parent_room = by_key[p.parent][1]
+                # baths prefer to open into the dress area when there is one
+                dress = next((q for q in placed if q.parent == p.parent and q.key != p.key
+                              and ("Dress" in q.name or "Wardrobe" in q.name)), None)
+                if p.category == RoomCategory.BATHROOM.value and dress is not None:
+                    se = self._shared(r, by_key[dress.key][1])
+                    if se and se[2] - se[1] >= dw + 0.05:
+                        target = (by_key[dress.key][1], se)
+                if target is None:
+                    se = self._shared(r, parent_room)
+                    if se and se[2] - se[1] >= 0.65:
+                        target = (parent_room, se)
+            if target is None:
+                order = circ_pref.get(p.category, ["dining", "passage", "living"])
+                cands = []
+                for c in circulation:
+                    se = self._shared(r, by_key[c.key][1])
+                    if se and se[2] - se[1] >= 0.65:
+                        rank = order.index(c.key) if c.key in order else 9
+                        cands.append((rank, -(se[2] - se[1]), c, se))
+                if cands:
+                    cands.sort(key=lambda t: (t[0], t[1]))
+                    target = (by_key[cands[0][2].key][1], cands[0][3])
+            if target is None:
+                # anything shared at all (keeps every room reachable on tiny plots)
+                for o in rooms:
+                    if o is r or _is_site_room(o):
+                        continue
+                    se = self._shared(r, o)
+                    if se and se[2] - se[1] >= 0.65:
+                        target = (o, se)
+                        break
+            if target is None:
+                continue
+            other, (side, lo, hi, coord) = target
+            toward = other.cx if side in ("N", "S") else other.cy
+            if p.category == RoomCategory.LIFT.value:
+                c = (lo + hi) / 2
+                doors.append(self._make_door(r, side, c - dw / 2, c + dw / 2, coord, dw))
+            else:
+                doors.append(self._make_door(r, side, lo, hi, coord, dw, toward))
+
+        # Living ↔ dining / passage: wide open arch (open-plan Indian hall)
+        if "living" in by_key:
+            lr = by_key["living"][1]
+            for c in circulation:
+                if c.key == "living":
+                    continue
+                se = self._shared(lr, by_key[c.key][1])
+                if se and se[2] - se[1] >= 1.0:
+                    w = min(2.4, (se[2] - se[1]) * 0.6)
+                    mid = (se[1] + se[2]) / 2
+                    openings.append(self._segment(se[0], mid - w / 2, mid + w / 2, se[3]))
+        # Passages / foyers ↔ dining or living: open arches
+        hubs = [k for k in ("dining", "living") if k in by_key]
+        for c in circulation:
+            if c.key in ("living", "dining"):
+                continue
+            for hk in hubs:
+                se = self._shared(by_key[c.key][1], by_key[hk][1])
+                if se and se[2] - se[1] >= 0.9:
+                    w = min(1.2, se[2] - se[1] - 0.1)
+                    mid = (se[1] + se[2]) / 2
+                    openings.append(self._segment(se[0], mid - w / 2, mid + w / 2, se[3]))
+                    break
+
+        # Utility service door to outside when it touches the envelope (drying yard access)
+        for p, r in zip(placed, rooms):
+            if p.category == RoomCategory.UTILITY.value:
+                ext = self._exterior_edges(r, footprint)
+                if ext:
+                    side, lo, hi, coord = max(ext, key=lambda e: e[2] - e[1])
+                    if hi - lo >= 1.0 and side != "N":
+                        doors.append(self._make_door(r, side, lo, hi, coord, 0.8))
+        return doors, openings
+
+    @staticmethod
+    def _segment(side, lo, hi, coord):
+        if side in ("N", "S"):
+            return (round(lo, 3), round(coord, 3), round(hi, 3), round(coord, 3))
+        return (round(coord, 3), round(lo, 3), round(coord, 3), round(hi, 3))
+
+    @staticmethod
+    def _door_cut(d: DoorPlacement):
+        if d.wall_side in ("N", "S"):
+            return (d.x, d.y, d.x + d.width, d.y)
+        return (d.x, d.y, d.x, d.y + d.width)
+
+    # =========================================================================
+    # Walls
     # =========================================================================
 
     def _generate_walls(self, rooms: List[RoomRect]) -> List[WallSegment]:
         """
-        Generate wall segments for the floor plan.
-
-        Creates:
-        - Exterior walls around the plot perimeter (230mm)
-        - Interior partition walls between rooms (115mm)
+        Walls on room centre-lines:
+          - 230 mm external envelope around the house footprint
+          - 115 mm partitions, merged into continuous runs (no duplicates)
+          - 150 mm compound wall on the plot boundary
+        Works on any room list (also used by the interactive editor).
         """
-        walls = []
-        ext_t = self.wall.external
-        int_t = self.wall.internal
+        walls: List[WallSegment] = []
+        ext_t, int_t = self.wall.external, self.wall.internal
+        W, H = self.plot_width, self.plot_height
 
-        # Exterior walls (plot perimeter)
-        W = self.plot_width
-        H = self.plot_height
+        building = [r for r in rooms if not _is_site_room(r) and r.w > 0 and r.h > 0]
+        if building:
+            bx0 = min(r.x for r in building)
+            by0 = min(r.y for r in building)
+            bx1 = max(r.right for r in building)
+            by1 = max(r.top for r in building)
+        else:
+            bx0, by0, bx1, by1 = 0.0, 0.0, W, H
 
-        # Bottom wall
-        walls.append(WallSegment(0, 0, W, 0, ext_t, True))
-        # Right wall
-        walls.append(WallSegment(W, 0, W, H, ext_t, True))
-        # Top wall
-        walls.append(WallSegment(W, H, 0, H, ext_t, True))
-        # Left wall
-        walls.append(WallSegment(0, H, 0, 0, ext_t, True))
+        # Compound wall (skip when the house sits on the boundary)
+        if bx0 > 0.3 or by0 > 0.3 or bx1 < W - 0.3 or by1 < H - 0.3:
+            for seg in ((0, 0, W, 0), (W, 0, W, H), (W, H, 0, H), (0, H, 0, 0)):
+                walls.append(WallSegment(*seg, 0.15, True, "compound"))
 
-        # Interior walls (between rooms)
-        seen_edges = set()
+        # External envelope
+        walls.extend([
+            WallSegment(round(bx0, 3), round(by0, 3), round(bx1, 3), round(by0, 3), ext_t, True, "external"),
+            WallSegment(round(bx1, 3), round(by0, 3), round(bx1, 3), round(by1, 3), ext_t, True, "external"),
+            WallSegment(round(bx1, 3), round(by1, 3), round(bx0, 3), round(by1, 3), ext_t, True, "external"),
+            WallSegment(round(bx0, 3), round(by1, 3), round(bx0, 3), round(by0, 3), ext_t, True, "external"),
+        ])
 
-        for i, room in enumerate(rooms):
-            # Room boundary walls
-            edges = [
-                (room.x, room.y, room.right, room.y),          # bottom
-                (room.right, room.y, room.right, room.top),    # right
-                (room.right, room.top, room.x, room.top),      # top
-                (room.x, room.top, room.x, room.y),            # left
-            ]
+        # Interior partitions: union of room edges per line, minus the envelope
+        horiz: Dict[float, List[Tuple[float, float]]] = {}
+        vert: Dict[float, List[Tuple[float, float]]] = {}
+        for r in building:
+            for y in (r.y, r.top):
+                if abs(y - by0) > 0.01 and abs(y - by1) > 0.01:
+                    horiz.setdefault(round(y, 3), []).append((r.x, r.right))
+            for x in (r.x, r.right):
+                if abs(x - bx0) > 0.01 and abs(x - bx1) > 0.01:
+                    vert.setdefault(round(x, 3), []).append((r.y, r.top))
 
-            for x1, y1, x2, y2 in edges:
-                # Normalize edge for deduplication
-                edge_key = (round(min(x1, x2), 2), round(min(y1, y2), 2),
-                           round(max(x1, x2), 2), round(max(y1, y2), 2))
+        def merge(iv):
+            iv = sorted(iv)
+            out = [list(iv[0])]
+            for a, b in iv[1:]:
+                if a <= out[-1][1] + 0.01:
+                    out[-1][1] = max(out[-1][1], b)
+                else:
+                    out.append([a, b])
+            return out
 
-                # Skip if this edge is on the plot boundary (already covered)
-                is_on_boundary = (
-                    (abs(y1 - 0) < 0.01 and abs(y2 - 0) < 0.01) or    # bottom
-                    (abs(y1 - H) < 0.01 and abs(y2 - H) < 0.01) or    # top
-                    (abs(x1 - 0) < 0.01 and abs(x2 - 0) < 0.01) or    # left
-                    (abs(x1 - W) < 0.01 and abs(x2 - W) < 0.01)       # right
-                )
-
-                if is_on_boundary:
-                    continue
-
-                if edge_key not in seen_edges:
-                    seen_edges.add(edge_key)
-                    walls.append(WallSegment(
-                        round(x1, 3), round(y1, 3),
-                        round(x2, 3), round(y2, 3),
-                        int_t, False
-                    ))
-
+        for y, iv in horiz.items():
+            for a, b in merge(iv):
+                if b - a > 0.05:
+                    walls.append(WallSegment(round(a, 3), y, round(b, 3), y, int_t, False, "internal"))
+        for x, iv in vert.items():
+            for a, b in merge(iv):
+                if b - a > 0.05:
+                    walls.append(WallSegment(x, round(a, 3), x, round(b, 3), int_t, False, "internal"))
         return walls
 
+    @staticmethod
+    def _cut_openings(walls: List[WallSegment], cuts) -> List[WallSegment]:
+        """Split walls where doors, arches and gates create openings."""
+        out: List[WallSegment] = []
+        for w in walls:
+            pieces = [w]
+            for (x1, y1, x2, y2) in cuts:
+                nxt = []
+                for p in pieces:
+                    if p.is_horizontal and abs(y1 - y2) < 1e-6 and abs(p.y1 - y1) < 0.02:
+                        lo, hi = sorted((p.x1, p.x2))
+                        a, b = sorted((x1, x2))
+                        if b > lo + 1e-6 and a < hi - 1e-6:
+                            if a - lo > 0.05:
+                                nxt.append(WallSegment(lo, p.y1, a, p.y2, p.thickness, p.is_external, p.wall_type))
+                            if hi - b > 0.05:
+                                nxt.append(WallSegment(b, p.y1, hi, p.y2, p.thickness, p.is_external, p.wall_type))
+                            continue
+                    if p.is_vertical and abs(x1 - x2) < 1e-6 and abs(p.x1 - x1) < 0.02:
+                        lo, hi = sorted((p.y1, p.y2))
+                        a, b = sorted((y1, y2))
+                        if b > lo + 1e-6 and a < hi - 1e-6:
+                            if a - lo > 0.05:
+                                nxt.append(WallSegment(p.x1, lo, p.x2, a, p.thickness, p.is_external, p.wall_type))
+                            if hi - b > 0.05:
+                                nxt.append(WallSegment(p.x1, b, p.x2, hi, p.thickness, p.is_external, p.wall_type))
+                            continue
+                    nxt.append(p)
+                pieces = nxt
+            out.extend(pieces)
+        return out
+
     # =========================================================================
-    # Stage 6: Door & Window Placement
+    # Windows
     # =========================================================================
 
-    def _place_doors(self, rooms: List[RoomRect]) -> List[DoorPlacement]:
+    @staticmethod
+    def _exterior_edges(r, footprint, tol: float = 0.03):
+        fx, fy, fw, fd = footprint
+        edges = []
+        if abs(r.top - (fy + fd)) < tol:
+            edges.append(("N", r.x, r.right, r.top))
+        if abs(r.y - fy) < tol:
+            edges.append(("S", r.x, r.right, r.y))
+        if abs(r.right - (fx + fw)) < tol:
+            edges.append(("E", r.y, r.top, r.right))
+        if abs(r.x - fx) < tol:
+            edges.append(("W", r.y, r.top, r.x))
+        return edges
+
+    def _place_windows(self, rooms: List[RoomRect], doors: List[DoorPlacement], footprint) -> List[WindowPlacement]:
         """
-        Place doors on shared wall segments between adjacent rooms.
-
-        Rules:
-        - Each room gets at least one door
-        - Main entrance placed on the exterior wall closest to North/East (Vastu)
-        - Attached bathrooms get doors on the shared wall with their parent room
+        NBC 2016 Part 3 §8: habitable rooms need openings ≥ 1/10 of the floor area
+        (kitchens 1/10, bath ventilators ≥ 0.37 m²). Glazing is split across the
+        room's exterior walls, favouring the walls that face compass N and E.
         """
-        doors = []
-        rooms_with_doors = set()
-
-        # Find the main living/foyer room for the entrance
-        entrance_room = None
-        for room in rooms:
-            if room.category in (RoomCategory.LIVING.value, RoomCategory.FOYER.value):
-                entrance_room = room
-                break
-        if not entrance_room and rooms:
-            entrance_room = rooms[0]
-
-        # Place main entrance door
-        if entrance_room:
-            # Prefer North or East wall for Vastu
-            door_x = entrance_room.x + entrance_room.w / 2 - 0.5
-            door_y = entrance_room.top  # Top wall (North side)
-
-            # Check which exterior wall this room touches
-            if abs(entrance_room.top - (self.plot_height - self.wall.external)) < 0.15:
-                door_x = entrance_room.x + entrance_room.w / 2 - 0.5
-                door_y = entrance_room.top
-                wall_side = "N"
-            elif abs(entrance_room.y - self.wall.external) < 0.15:
-                door_x = entrance_room.x + entrance_room.w / 2 - 0.5
-                door_y = entrance_room.y
-                wall_side = "S"
-            elif abs(entrance_room.right - (self.plot_width - self.wall.external)) < 0.15:
-                door_x = entrance_room.right
-                door_y = entrance_room.y + entrance_room.h / 2 - 0.5
-                wall_side = "E"
-            else:
-                door_x = entrance_room.x
-                door_y = entrance_room.y + entrance_room.h / 2 - 0.5
-                wall_side = "W"
-
-            doors.append(DoorPlacement(
-                x=round(door_x, 3),
-                y=round(door_y, 3),
-                width=1.0,  # Main entrance = 1000mm
-                wall_side=wall_side,
-                swing_direction="RIGHT",
-                room_name=entrance_room.name,
-                is_main_entrance=True,
-            ))
-            rooms_with_doors.add(entrance_room.name)
-
-        # Place doors between adjacent rooms
-        for i, room_a in enumerate(rooms):
-            for j, room_b in enumerate(rooms):
-                if i >= j:
-                    continue
-
-                shared_wall = room_a.shares_wall_with(room_b)
-                if shared_wall is None:
-                    continue
-
-                # Determine door width based on room categories
-                bath_cats = (RoomCategory.BATHROOM.value,)
-                if room_a.category in bath_cats or room_b.category in bath_cats:
-                    door_width = 0.75
-                elif room_a.category == RoomCategory.KITCHEN.value or \
-                        room_b.category == RoomCategory.KITCHEN.value:
-                    door_width = 0.80
-                else:
-                    door_width = 0.90
-
-                # Calculate door position (centered on shared wall segment)
-                if shared_wall == "E":
-                    overlap_start = max(room_a.y, room_b.y)
-                    overlap_end = min(room_a.top, room_b.top)
-                    door_y = (overlap_start + overlap_end) / 2 - door_width / 2
-                    door_x = room_a.right
-                    wall_side = "E"
-                elif shared_wall == "W":
-                    overlap_start = max(room_a.y, room_b.y)
-                    overlap_end = min(room_a.top, room_b.top)
-                    door_y = (overlap_start + overlap_end) / 2 - door_width / 2
-                    door_x = room_a.x
-                    wall_side = "W"
-                elif shared_wall == "N":
-                    overlap_start = max(room_a.x, room_b.x)
-                    overlap_end = min(room_a.right, room_b.right)
-                    door_x = (overlap_start + overlap_end) / 2 - door_width / 2
-                    door_y = room_a.top
-                    wall_side = "N"
-                else:  # S
-                    overlap_start = max(room_a.x, room_b.x)
-                    overlap_end = min(room_a.right, room_b.right)
-                    door_x = (overlap_start + overlap_end) / 2 - door_width / 2
-                    door_y = room_a.y
-                    wall_side = "S"
-
-                doors.append(DoorPlacement(
-                    x=round(door_x, 3),
-                    y=round(door_y, 3),
-                    width=door_width,
-                    wall_side=wall_side,
-                    swing_direction="RIGHT",
-                    room_name=room_a.name,
-                ))
-                rooms_with_doors.add(room_a.name)
-                rooms_with_doors.add(room_b.name)
-
-        return doors
-
-    def _place_windows(self, rooms: List[RoomRect]) -> List[WindowPlacement]:
-        """
-        Place windows on external walls of rooms that require ventilation.
-
-        Rules:
-        - Habitable rooms must have windows (NBC daylight requirement)
-        - Windows placed on walls touching the plot exterior
-        - Window size proportional to room area
-        """
-        windows = []
-        ext = self.wall.external
-
-        for room in rooms:
-            # Skip rooms that don't need windows
-            if room.category in (RoomCategory.CORRIDOR.value, RoomCategory.STORE.value):
+        windows: List[WindowPlacement] = []
+        spec = {
+            "LIVING": (1.2, 1.2, 2.4), "DINING": (1.2, 1.2, 2.1), "BEDROOM": (1.2, 1.0, 2.1),
+            "STUDY": (1.2, 1.0, 1.8), "KITCHEN": (1.0, 0.9, 1.5), "SERVANT": (1.0, 0.75, 1.2),
+            "BATHROOM": (0.45, 0.6, 0.9), "UTILITY": (0.9, 0.6, 1.2), "POOJA": (0.9, 0.6, 0.9),
+            "STORE": (0.45, 0.6, 0.6),
+        }
+        good = {"N": 2, "E": 2, "W": 1, "S": 0}
+        for r in rooms:
+            if _is_site_room(r) or r.category not in spec:
                 continue
-
-            # Determine window size based on room category
-            if room.category in (RoomCategory.LIVING.value, RoomCategory.DINING.value):
-                win_w, win_h = 1.5, 1.2
-            elif room.category == RoomCategory.BEDROOM.value:
-                win_w, win_h = 1.2, 1.2
-            elif room.category == RoomCategory.KITCHEN.value:
-                win_w, win_h = 0.9, 0.6
-            elif room.category == RoomCategory.BATHROOM.value:
-                win_w, win_h = 0.6, 0.45
-            else:
-                win_w, win_h = 0.9, 0.9
-
-            # Find which external walls this room touches
-            placed = False
-
-            # Check top wall (near plot top)
-            if abs(room.top - (self.plot_height - ext)) < 0.15:
-                windows.append(WindowPlacement(
-                    x=round(room.x + room.w / 2, 3),
-                    y=round(room.top, 3),
-                    width=min(win_w, room.w * 0.6),
-                    height=win_h,
-                    wall_side="N",
-                    room_name=room.name,
-                ))
-                placed = True
-
-            # Check bottom wall (near plot bottom)
-            if abs(room.y - ext) < 0.15:
-                windows.append(WindowPlacement(
-                    x=round(room.x + room.w / 2, 3),
-                    y=round(room.y, 3),
-                    width=min(win_w, room.w * 0.6),
-                    height=win_h,
-                    wall_side="S",
-                    room_name=room.name,
-                ))
-                placed = True
-
-            # Check right wall (near plot right)
-            if not placed and abs(room.right - (self.plot_width - ext)) < 0.15:
-                windows.append(WindowPlacement(
-                    x=round(room.right, 3),
-                    y=round(room.y + room.h / 2, 3),
-                    width=min(win_w, room.h * 0.6),
-                    height=win_h,
-                    wall_side="E",
-                    room_name=room.name,
-                ))
-
-            # Check left wall (near plot left)
-            if not placed and abs(room.x - ext) < 0.15:
-                windows.append(WindowPlacement(
-                    x=round(room.x, 3),
-                    y=round(room.y + room.h / 2, 3),
-                    width=min(win_w, room.h * 0.6),
-                    height=win_h,
-                    wall_side="W",
-                    room_name=room.name,
-                ))
-
+            if "Dress" in r.name or "Wardrobe" in r.name or "Duct" in r.name:
+                continue
+            edges = [e for e in self._exterior_edges(r, footprint) if e[2] - e[1] >= 0.9]
+            if not edges:
+                continue
+            h, wmin, wmax = spec[r.category]
+            need = max(r.w * r.h / 10.0, 0.37 if r.category == "BATHROOM" else 0.8)
+            compass = {e[0]: self.sides[{"N": "top", "S": "bottom", "E": "right", "W": "left"}[e[0]]] for e in edges}
+            edges.sort(key=lambda e: (-good.get(compass[e[0]], 0), -(e[2] - e[1])))
+            max_windows = 2 if r.category in ("LIVING", "BEDROOM", "DINING", "STUDY") else 1
+            chosen = edges[:max_windows]
+            per = need / len(chosen)
+            for side, lo, hi, coord in chosen:
+                L = hi - lo
+                width = round(_clamp(per / h, wmin, min(wmax, 0.6 * L)), 2)
+                c = (lo + hi) / 2
+                # keep clear of a door on the same wall
+                for d in doors:
+                    if d.wall_side == side or d.is_main_entrance:
+                        if side in ("N", "S") and abs(d.y - coord) < 0.05:
+                            d0, d1 = d.x, d.x + d.width
+                        elif side in ("E", "W") and abs(d.x - coord) < 0.05:
+                            d0, d1 = d.y, d.y + d.width
+                        else:
+                            continue
+                        if c + width / 2 > d0 - 0.3 and c - width / 2 < d1 + 0.3:
+                            left_room = d0 - 0.3 - lo
+                            right_room = hi - d1 - 0.3
+                            if right_room >= left_room:
+                                c = d1 + 0.3 + min(width, right_room) / 2
+                                width = round(min(width, max(wmin * 0.75, right_room)), 2)
+                            else:
+                                c = lo + left_room / 2
+                                width = round(min(width, max(wmin * 0.75, left_room)), 2)
+                if width < 0.4:
+                    continue
+                if side in ("N", "S"):
+                    windows.append(WindowPlacement(x=round(c, 3), y=round(coord, 3), width=width,
+                                                   height=h, wall_side=side, room_name=r.name))
+                else:
+                    windows.append(WindowPlacement(x=round(coord, 3), y=round(c, 3), width=width,
+                                                   height=width, wall_side=side, room_name=r.name))
         return windows
 
     # =========================================================================
-    # Stage 7: Dimension Generation
+    # Staircases
+    # =========================================================================
+
+    def _place_staircases(self, rooms: List[RoomRect], program=None) -> List[StaircaseRect]:
+        staircases = []
+        for r in rooms:
+            if r.category != RoomCategory.STAIRS.value:
+                continue
+            external = "External" in r.name
+            design = None
+            if program is not None:
+                design = program.external_stair if external else program.stair
+            stype = "straight" if external else self.stair_type
+            direction = "N" if r.h >= r.w else "E"
+            if design is not None:
+                staircases.append(StaircaseRect(
+                    name=r.name, stair_type=stype, x=r.x, y=r.y, w=r.w, h=r.h, direction=direction,
+                    num_steps=design.risers, tread_depth_m=design.tread,
+                    riser_height_m=design.riser_height, has_landing=design.flights > 1,
+                    landing_depth_m=design.landing_depth))
+            else:
+                staircases.append(StaircaseRect(name=r.name, stair_type=stype, x=r.x, y=r.y,
+                                                 w=r.w, h=r.h, direction=direction))
+        return staircases
+
+    # =========================================================================
+    # Dimensions
     # =========================================================================
 
     def _generate_dimensions(self, rooms: List[RoomRect]) -> List[DimLine]:
         """
-        Generate 3-tier dimension annotations.
-
-        Tier 1: Individual room widths (closest to walls)
-        Tier 2: Room partition positions (middle distance)
-        Tier 3: Overall building envelope (outermost)
+        Three-tier dimensions along the bottom and left plot edges:
+          Tier 1 — setbacks + room partitions on the rear / left facade
+          Tier 2 — setbacks + building envelope
+          Tier 3 — overall plot
         """
-        dims = []
+        dims: List[DimLine] = []
+        W, H = self.plot_width, self.plot_height
+        building = [r for r in rooms if not _is_site_room(r)]
+        if building:
+            bx0 = min(r.x for r in building)
+            by0 = min(r.y for r in building)
+            bx1 = max(r.right for r in building)
+            by1 = max(r.top for r in building)
+        else:
+            bx0, by0, bx1, by1 = 0.0, 0.0, W, H
 
-        # Tier 3: Overall building dimensions (outermost)
-        # Bottom overall dimension
-        dims.append(DimLine(
-            x1=0, y1=0, x2=self.plot_width, y2=0,
-            offset=-1.8,
-            label=f"{self.plot_width * 1000:.0f}",
-            tier=3,
-        ))
-        # Left overall dimension
-        dims.append(DimLine(
-            x1=0, y1=0, x2=0, y2=self.plot_height,
-            offset=-1.8,
-            label=f"{self.plot_height * 1000:.0f}",
-            tier=3,
-        ))
+        def chain(points, horizontal, tier, offset):
+            pts = sorted({round(p, 3) for p in points})
+            for a, b in zip(pts, pts[1:]):
+                if b - a < 0.3:
+                    continue
+                if horizontal:
+                    dims.append(DimLine(a, 0, b, 0, offset, f"{(b - a) * 1000:.0f}", tier))
+                else:
+                    dims.append(DimLine(0, a, 0, b, offset, f"{(b - a) * 1000:.0f}", tier))
 
-        # Tier 1: Individual room dimensions (closest to walls)
-        # Collect unique X and Y partition lines
-        x_lines = sorted(set(
-            [r.x for r in rooms] + [r.right for r in rooms]
-        ))
-        y_lines = sorted(set(
-            [r.y for r in rooms] + [r.top for r in rooms]
-        ))
-
-        # Bottom edge room dimensions
-        prev_x = 0
-        for x in x_lines:
-            if x > prev_x + 0.5:  # Skip tiny segments
-                dims.append(DimLine(
-                    x1=prev_x, y1=0, x2=x, y2=0,
-                    offset=-0.6,
-                    label=f"{(x - prev_x) * 1000:.0f}",
-                    tier=1,
-                ))
-            prev_x = x
-        # Last segment to plot edge
-        if prev_x < self.plot_width - 0.5:
-            dims.append(DimLine(
-                x1=prev_x, y1=0, x2=self.plot_width, y2=0,
-                offset=-0.6,
-                label=f"{(self.plot_width - prev_x) * 1000:.0f}",
-                tier=1,
-            ))
-
-        # Left edge room dimensions
-        prev_y = 0
-        for y in y_lines:
-            if y > prev_y + 0.5:
-                dims.append(DimLine(
-                    x1=0, y1=prev_y, x2=0, y2=y,
-                    offset=-0.6,
-                    label=f"{(y - prev_y) * 1000:.0f}",
-                    tier=1,
-                ))
-            prev_y = y
-        if prev_y < self.plot_height - 0.5:
-            dims.append(DimLine(
-                x1=0, y1=prev_y, x2=0, y2=self.plot_height,
-                offset=-0.6,
-                label=f"{(self.plot_height - prev_y) * 1000:.0f}",
-                tier=1,
-            ))
-
+        rear = [r for r in building if abs(r.y - by0) < 0.03]
+        left = [r for r in building if abs(r.x - bx0) < 0.03]
+        chain([0, W, bx0, bx1] + [r.x for r in rear] + [r.right for r in rear], True, 1, -0.6)
+        chain([0, H, by0, by1] + [r.y for r in left] + [r.top for r in left], False, 1, -0.6)
+        if bx0 > 0.3 or bx1 < W - 0.3:
+            chain([0, bx0, bx1, W], True, 2, -1.2)
+        if by0 > 0.3 or by1 < H - 0.3:
+            chain([0, by0, by1, H], False, 2, -1.2)
+        dims.append(DimLine(0, 0, W, 0, -1.8, f"{W * 1000:.0f}", 3))
+        dims.append(DimLine(0, 0, 0, H, -1.8, f"{H * 1000:.0f}", 3))
         return dims
+
+    # =========================================================================
+    # Areas, Vastu audit, engineering report
+    # =========================================================================
+
+    def _set_clear_areas(self, rooms: List[RoomRect], footprint) -> None:
+        """Room areas become clear (carpet) areas: centre-line rectangle minus half-walls."""
+        fx, fy, fw, fd = footprint
+        ext, inn = self.wall.external, self.wall.internal
+        for r in rooms:
+            if _is_site_room(r):
+                r.area = round(r.w * r.h, 2)
+                continue
+            tl = ext if abs(r.x - fx) < 0.03 else inn
+            tr = ext if abs(r.right - (fx + fw)) < 0.03 else inn
+            tb = ext if abs(r.y - fy) < 0.03 else inn
+            tt = ext if abs(r.top - (fy + fd)) < 0.03 else inn
+            r.area = round(max(0.0, (r.w - tl / 2 - tr / 2) * (r.h - tb / 2 - tt / 2)), 2)
+
+    def _vastu_audit(self, rooms: List[RoomRect], doors: List[DoorPlacement], site) -> Tuple[float, Dict]:
+        """Weighted Vastu score: house mandala + main-door pada + site mandala + Brahmasthan."""
+        setbacks = {self.sides[k]: v for k, v in site.setbacks.items()}
+        return audit_vastu(rooms, doors, self.plot_width, self.plot_height, self.orientation,
+                           site.footprint, setbacks, self.vastu_enabled)
+
+    def _engineering_report(self, rooms, walls, program, site, carpet, built_up) -> Dict:
+        fx, fy, fw, fd = site.footprint
+        building = [r for r in rooms if not _is_site_room(r)]
+        notes: List[str] = []
+
+        # Structural frame: RCC columns on a grid set out along wall centre-lines (bays 2.4–4.5 m)
+        from floorplan_generator.structure import structural_grid
+        grid = structural_grid(rooms, site.footprint)
+        columns = len(grid.columns)
+        span = max((min(r.w, r.h) for r in building
+                    if r.category in ("LIVING", "DINING", "BEDROOM", "KITCHEN", "STUDY")), default=3.0)
+        slab = max(125, int(math.ceil(span * 1000 / 32 / 5.0) * 5))
+        beam_d = max(300, int(math.ceil(max(span, grid.max_bay) * 1000 / 12 / 25.0) * 25))
+        notes.append(f"RCC frame: {columns} columns (230 × 300 mm) on a {len(grid.xs)} × {len(grid.ys)} grid "
+                     f"(max bay {grid.max_bay:.2f} m); largest clear span {span:.2f} m → {slab} mm two-way slab, "
+                     f"230 × {beam_d} mm beams (L/12), M20 concrete, Fe500 steel.")
+
+        # Plumbing stacks
+        wet = [r for r in building if r.category in ("BATHROOM", "KITCHEN", "UTILITY")]
+        groups = []
+        for r in wet:
+            g = next((gg for gg in groups if any(self._shared(r, o) for o in gg)), None)
+            if g is None:
+                groups.append([r])
+            else:
+                g.append(r)
+        if wet:
+            notes.append(f"Plumbing: {len(wet)} wet rooms grouped into {len(groups)} vertical stack(s) "
+                         "(shared shafts cut pipe runs and leak points).")
+        internal_baths = [r.name for r in building if r.category == "BATHROOM"
+                          and not self._exterior_edges(r, site.footprint)]
+        if internal_baths:
+            notes.append("Mechanical exhaust (≥ 10 air changes/h) needed for internal toilets without an "
+                         "outside wall: " + ", ".join(internal_baths) + ".")
+        habitable_dark = [r.name for r in building if r.category in ("BEDROOM", "LIVING", "STUDY")
+                          and not self._exterior_edges(r, site.footprint)]
+        if habitable_dark:
+            notes.append("Daylight warning (NBC Part 3 §8): no outside wall for " + ", ".join(habitable_dark) + ".")
+        notes.append("Room labels show centre-line dimensions; areas are clear carpet areas (RERA definition).")
+
+        floors = self.num_floors
+        return {
+            "footprint_m": [round(fw, 2), round(fd, 2)],
+            "setbacks_m": {self.sides[k]: v for k, v in site.setbacks.items()},
+            "ground_coverage_pct": round(site.coverage * 100, 1),
+            "far": round(built_up * floors / (self.plot_width * self.plot_height), 2),
+            "carpet_m2_per_floor": round(carpet, 2),
+            "built_up_m2_per_floor": round(built_up, 2),
+            "built_up_m2_total": round(built_up * floors, 2),
+            "columns": columns,
+            "grid": {"x": grid.xs, "y": grid.ys, "max_bay_m": round(grid.max_bay, 2)},
+            "max_span_m": round(span, 2),
+            "slab_mm": slab,
+            "beam_mm": [230, beam_d],
+            "stair": None if not program.stair else {
+                "type": program.stair.stair_type, "risers": program.stair.risers,
+                "riser_mm": round(program.stair.riser_height * 1000), "tread_mm": round(program.stair.tread * 1000),
+                "flight_width_m": program.stair.flight_width},
+            "lift": None if not program.lift else {
+                "persons": program.lift.persons, "load_kg": program.lift.rated_load_kg,
+                "shaft_m": [program.lift.shaft_w, program.lift.shaft_d]},
+            "car_parking": site.car_mode,
+            "site_items": [it.name for it in site.items],
+            "notes": notes,
+        }
