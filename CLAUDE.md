@@ -84,11 +84,50 @@ floorplan_generator/          LIVE+WIP  generative engine (pure Python, metres, 
                   district-town rate × town size × street (indicative) — the owner's own rate always wins;
                   STATES: stamp/transfer/registration % (on max(market, guideline)), construction index, units, portal
   structure.py     RCC column grid (bays 2.4-4.5 m on wall centrelines); used by engineering report + drafting
+  apartment.py     (2026-10-14) building_type 'Apartment' = a TYPICAL FLOOR of 1 / 2 / 4 flats around a common
+                   stair + lift core (LayoutEngine.generate/generate_alternatives branch here). Each flat is planned
+                   by a sub-LayoutEngine inside its rectangle (`_fixed_site` = SitePlanFixed, no setbacks, no core,
+                   no terrace stair); front-row flats (4/floor) are planned for the opposite facing and turned 180°.
+                   compose(): flats' rooms prefixed 'A · ', core rooms role 'COMMON', 230 mm party walls, gallery
+                   front = 'parapet' walls, windows kept only to open air, building entrance = the only
+                   is_main_entrance door; layout_state = flat A's (+ 'apartment'), so Smart Re-Plan edits the flat
+                   type. flats_options()/plan_floor() = what fits (UI). Too narrow → old single-home fallback.
+                   (2026-10-15) LayoutEngine._stack_mode(): 'apartment' | 'house' (Independent House with 2+ floors =
+                   a home on every floor) | 'duplex' | None. 'house'/'duplex' use floor_layout(n=1, mode=…): a front
+                   band [stair turned along the front (1.0 m flights, ~2.1 m deep) | Stair Lobby / Entrance Foyer |
+                   lift] with the home behind; the house lobby's front is an open parapet sit-out (front windows
+                   kept), every floor's main door opens off it, an outside lift tower lands on it (side door into the
+                   lobby only); plan_floor(boost) retries a bigger plate; a home that still cannot solve → the old
+                   internal-stair house. engineering['apartment']['kind'] = 'house' | 'apartment'.
+  duplex.py        (2026-10-15) one home on two floors: split_program() — ground: living, dining, kitchen, pooja,
+                   store/servant, a toilet, the elders' (else guest, else 3BHK+ spare) bedroom; first: the other
+                   bedrooms, study (a study is added when one bedroom is alone), 'Family Lounge' (living) + 'Upper
+                   Hall'; both planned behind the same foyer band (stair + lift aligned by construction; the unit's
+                   main door becomes an arch). Returns the ground plan with plan.upper_plan (own drawing; 3D level 1;
+                   engineering['duplex']); retries boosts 1.0/1.15/1.3 so neither floor falls back to the template
+                   layout (which would put a kitchen upstairs); else the old repeated-floor house with a note.
+                   LayoutEngine._program_override = a custom SpaceProgram for a sub-plan.
+  gates.py         (2026-10-15) every compound-wall gate sized for what passes: people 1.05 m (3½ ft; 1.2 m for a
+                   block of homes), two-wheelers with no car 1.5 m (2.45 m for 6+), a car = the design car's swept path
+                   from the road (+0.3 m each side, ≥ 10 ft), 6+ cars ≥ 2 lanes, building ≥ 15 m → 4.5 m (NBC Part 4
+                   fire tender, also with no car); widths rounded up to whole feet. Swept path: design car by quality /
+                   type (CARS hatchback / suv / muv with brochure L, W, wheelbase, overhang, turning radius); rear-axle
+                   bicycle model, every start lane (0.25) × radius (0.4) tried at once (numpy), turn checked every 2°;
+                   may still be turning TURN_IN 1.5 m behind the wall, SWING_OUT 0.6 m beyond its bay; wall_lo/hi =
+                   plot corners (lopsided sweep at a corner bay); s_min = straight when parked; objective = smallest
+                   opening centred on the axis ⇒ narrower road never gives a narrower gate; narrow road → turn in
+                   the yard (2.5 m) → else '2-point turn' note. Leaves inward only: ≤1.25 one leaf, ≤4.25 two (if the
+                   arcs miss the parked car / porch / house), else sliding (run-back w+0.3, never across another
+                   opening), telescopic (w/2+0.3), bi-fold. A car gate too close (< 0.45 m pier) to the walking gate
+                   merges: 'vehicle_wicket' (wicket inside the leaf or beside it). Vastu pada of each gate (plot
+                   mandala), slack used for the best pada. stilt_bays(): 2.5 × 5.0 bays nose-in from the front edge,
+                   never on stair / lift / duct / lobby / a column (structure grid of the floors above), tandem
+                   last; stilt_plan() + note when fewer fit. drive_path() = car centre poses road → gate → bay.
 floorplan_renderer/           LIVE  plan -> files. SVG(drawsvg) DXF(ezdxf) PDF(reportlab) PNG(matplotlib)
   drafting.py      build_drafting(plan): wall poche, column grid, Vastu-aware furniture, tiles, levels, door/window tags + schedule (SVG only so far)
                    + Drafting.items (2026-10-14): every furniture symbol recorded as an object {kind, room, o/u/v wall frame | x/y, W, D, …}
                    (thread-local recorder; SVG output byte-identical) — the 3D view's furniture
-  walkthrough.py   build_scene(plan, latitude=None, state=None) → 3D scene JSON (2026-10-14): walls split round windows, lintels,
+  walkthrough.py   build_scene(plan, latitude=None, state=None) → 3D scene JSON (2026-10-14): scene['lift'] = the working lift; walls split round windows, lintels,
                    door leaves (hinge/swing), stairs, slab/parapet/mumty/upper-floor shell, stilt, site (cars, bikes, trees, gates,
                    road), 0.1 m walking grid (bitset), guided tour (road → gate → main door → every room, nearest next)
 model_folder/
@@ -158,6 +197,15 @@ design_ui.render_design_tab()              (direct imports; NOT via Flask)
       main door at best 32-pada on the living facade
     5 SitePlanner.place_amenities()  Vastu-ranked, collision-free, clear entrance path, gates; two-wheelers fall back to parallel
                                      parking two abreast (n/2 × 2.0 m by 1.5 m) for 1.65 m-deep small-plot front yards
+                                     Gates (2026-10-15, gates.py): walking gate first (its width sets the path), the
+                                     car gate right after the car (lanes per bay / side lane / stilt bay / 'fire'),
+                                     its drive corridor + leaf arcs / run-back reserved before later amenities;
+                                     planner.road / quality / stilt_info set by LayoutEngine._gate_brief (apartment
+                                     compose too); site.gate_specs / drive → engineering['gates' | 'drive' | 'road_m'
+                                     | 'stilt'] (LayoutEngine._gate_report). LayoutEngine(road_width=9.0) — kept in
+                                     generation_params only when not 9.0. Form: '🛣️ Road in front of the plot'
+                                     (15/20/25/30/40/60 ft); results: '🚪 Gates' card (design_ui._gates_card).
+                                     A side car lane on the same yard as the outside terrace stair gets +1.15 m.
     6 walls: 230 envelope / merged 115 partitions / 150 compound, openings cut for doors/arches/gates
     7 NBC windows (≥1/10 floor area, N/E preferred) · dimensions (3 tiers at plot edge) · audit_vastu() ·
       RERA carpet + plinth area · engineering report (columns, slab/beam, plumbing stacks, notes)
@@ -201,12 +249,63 @@ Intent editing loop (2026-10-11, UI reworked 2026-10-12) — the Design tab's "�
   Heights: FFL +0.45, storey = stair risers × riser (else 3.0), slab from engineering, door head 2.1, window sills from
   the drawing's schedule (0.9, kitchen 1.05, ventilators 1.8), arch 2.4, compound 1.5, parapet 1.0; stilt parking →
   house one storey up over the structural-grid columns. Upper floors are a translucent shell only (one floor is designed).
+  Floors (2026-10-15): 'All rooms' on 2+ floors with rooms = every floor solid and pulled apart (state.explode,
+  floor bar '🏢 All'; a floor button opens one floor, the floors above hidden; ghost outlines only in the lift
+  x-ray), the stair / lift run as translucent columns through the gaps (G.core). A duplex has two templates:
+  scene['upper'] (walls, windows, doors, arches, rooms, floors, furniture of plan.upper_plan),
+  levels_list[i]['plan'] 0|1, planOf(L) / PL(p) pick rooms, labels, door leaves (G.dyn2), fans, minimap; nav_typ is
+  the upper plan's grid; the tour climbs (stops with 'level' + 'target', walkTo in JS). The old one-walking-level
+  key 'upper' is now 'upper_level'. Homes on every floor are labelled '🏠 1st-floor home'.
+  Every floor (2026-10-14 latest): levels_list = [stilt,] the designed floor × num_floors, terrace
+  (z = base + L × storey, base 0.15 on a stilt else FFL). walk.js builds the floor once as a template
+  (body / stairs / furn / ceil) and clones it per level (shared geometry); ground-only extras (entrance frames,
+  lift pit, light-well floor) vs upper extras (balcony where the ground floor has an outside door; building
+  entrance closed as wall+window or parapet — door['upper']); door leaves, fans, room/flat labels and the
+  Vastu grid follow the floor in view (G.dyn). Views: floor bar (Top … G / Stilt), 'Floors apart' exploded
+  stack, lift ride from the HUD ('🛗 Lift to …'), stairs climbable through every floor: stair boxes carry a
+  7th value (0 lower half / 1 upper half of a flight); crossing halves changes walker.level; A* never crosses
+  halves within one level (segCells) so multi-floor routes go flight by flight. Grids: nav (ground or stilt),
+  nav_typ (upper floors: the plate + balconies), nav1 (terrace). Slab open over stair, lift and 'OTS' wells.
+  Flats numbered G01/101… by floor and letter. Apartment tour = entrance → lobby → flat A (others identical).
   Two walking levels (2026-10-14 later): `nav` = house / ground with every stair climbable, `nav1` = terrace (one storey)
   or the first-floor slab (G+1), `upper.z` = FFL + storey; the walker switches level half-way up a flight
   (`stairs[k].mid`). The outside terrace stair starts on the ground, so the 3D rebuilds it to climb the plinth too
   (19 × 182 mm to 3.45 m, the engine's `design_staircase` sizes it for 3.0 m only) and lands on a bridge through a gap
   in the parapet (`shell.parapet` comes from Python). Dog-leg flights are oriented so the foot faces the stair-room
   door and the exit lands on the floor; the mumty door sits at that exit.
+  Lift position + working lift (2026-10-14 last): LayoutEngine(lift_position='inside'|'entrance'|'side') for houses
+  (stored in generation_params only when not inside; apartments always use the core, duplex is UI-locked inside).
+  build_program leaves an outside lift out of the core group (program.lift_outside); SitePlanner.plan_footprint
+  (lift_out=…) reserves the yard (front: lift_front_need ≈ landing + 3 steps; side: lift_side_need ≈ 2.1 m, Vastu-picked
+  left/right, else falls back to the front) → site.lift_side; after the doors, LayoutEngine._outside_lift places a
+  LIFT room named 'Lift / Elevator (External)' (a site room: no carpet, plot-mandala Vastu, own 230 mm walls added after
+  _generate_walls, its door cut; _clear_windows slides windows it would cover): 'entrance' = beside the main door, door
+  facing the porch; 'side door' = against the side wall, door to the road, 1.5 m landing + side door into dining /
+  passage / foyer / living (kitchen / utility as service) — never a bedroom, bath, pooja or wardrobe; 'verandah' =
+  front end of the side yard with a 1.5 m verandah to the main door. engineering['lift'] += position, layout, side,
+  tower (outer), landing, entry. Fallbacks: tower can't fit / solve → inside with a note; inside can't solve (stair +
+  lift don't fit, e.g. 3-cent G+2) → the entrance tower instead of the old no-stair legacy layout.
+  site_feasibility.lift_options() = what the form offers (comfort rule); check_site(lift_position=…).
+  3D: scene['lift'] (walkthrough._lift_scene: room, clear shaft, door, stops [{L, z, label G/1/P}], head, pit, car
+  (space_program.lift_car: 4p 0.85×0.95, 6p 1.0×1.25 wheelchair, 8p 1.1×1.4 + helper), speed 0.7 / 1.0 m/s, tower,
+  landing, movable). The tower's plan walls are skipped by _walls (walk.js builds it full height, 'lift_tower' finish);
+  the porch (steps[0]) reaches its door, the landing is the balcony of the door it serves on every upper floor; the
+  tower blocks every grid. walk.js lift module: landing doors + frame + floor display + call button per stop, car
+  (doors, panel, mirror, handrail, light), counterweight/ropes/rails/motor/buffers (x-ray), collective controller
+  (calls ahead first, accel 0.8 m/s², doors 1.4/1.6 s, dwell 4 s), board by walking in / tapping / '🚶 Step in',
+  #cop on-screen panel (floors, ◀|▶ ▶|◀ 🔔, ⏩ ×3, sound), liftTrip() for the floor bar, chime/hum via WebAudio
+  (no files), '🛗 Lift' button = x-ray view (house as outlines, labelled parts, live speed), ghost outlines of the
+  floors above in All rooms / Top, '✏️ Move the lift' → setComponentValue({action:'lift', position}) →
+  walkthrough_ui._move_lift re-makes the design (intent_studio.commit: new version, undo).
+  Gates (2026-10-15): scene['gates'] = walkthrough._gate_list (engineering['gates'], else the compound-wall gaps
+  with 1–2 swing leaves); pillars sit just outside the opening (0.45 × 2.1 m for a car gate); walk.js gate() →
+  gateLeaf per leaf: swing (pivot), slide (rolls on a ground track to the run-back), fold (two panels), a wicket
+  frame in a sliding leaf; label '🚪 G1 · 12 ft car gate · telescopic' (Outside view). scene['road'].w = the road;
+  stilt cars = engineering['stilt'] bays; scene['drive'] (path, dims, gate) → '🚗 Drive in': the design car drives
+  from the road (3.2 m/s, 1.4 near the gate), the gate opens for it, orange lines trace its four corners (swept
+  path), it parks in its bay (that parked car is not drawn: c.drive). The tour starts at the walking gate.
+  Drawing: drafting._gate_symbols → Drafting.gates (leaves open + swing arcs, sliding leaf + dashed run-back +
+  arrow, bi-fold), tags G1… and schedule rows ('SCHEDULE OF DOORS, WINDOWS & GATES'); road label '30 FT (9 M)'.
 ```
 Flask `/generate-plan` now passes the same profile/multi-storey/amenity args and returns `setbacks`, `engineering`,
 `vastu_breakdown`, `design_notes`. Typical solve time 0.3–1.5 s (4BHK + everything ≈ 4 s).
@@ -427,6 +526,26 @@ the original list below describes the pre-upgrade engine.
 18. **[V] Test side-effects:** see §11. Detector has zero tests.
 
 ## 11. Tests
+**2026-10-15 (gates): 98/98 pass** + `tests/test_gates.py` (7: walk < bike < car gate widths on N/E/S/W and the
+compound wall cut at them; narrower road ⇒ never a narrower gate (simulation + engine), road_width rebuilt from
+generation_params; fire-engine 4.5 m with no car / two lanes for 6 cars; leaves inward, arcs clear of the parked car
+and house, run-back never across another opening; stilt bays clear of stair / lift / duct / lobby / columns and the 3D
+parks only there; the drive-in path crosses the wall inside its gate and ends in the bay; drawing + 3D show the same
+gates, the tour starts at the walking gate, Vastu pada reported). Every drawing with a compound wall changes by design.
+**2026-10-15 (homes on every floor + duplex): 91/91 pass** (single-floor SVGs byte-identical; 2-floor house drawings
+change by design) + `tests/test_floors.py` (6: a home on
+every floor N/E/S/W — lobby at the front, one main door, the home's door on the lobby, stair open to it; walked the
+same way on every floor; lifts in a house of floors (lobby / entrance tower landing / side door into the lobby);
+duplex = one home (one kitchen, master upstairs, elders downstairs, stair + lift aligned, first-floor drawing);
+duplex in 3D (two plans, the tour climbs, walkable upstairs); duplex re-plan + single-floor houses unchanged).
+**2026-10-14 (lift position + working lift): 85/85 pass** + `tests/test_lift.py` (8: inside default unchanged, tower
+beside the main door, side tower with a living-space side door or verandah, what fits + fallbacks + apartments keep the
+core, no room inside → tower not no-lift, re-plan keeps it, the 3D lift (stops, porch, landings, walkable), viewer).
+**2026-10-14 (apartments + every floor): 77/77 pass** + `tests/test_apartment.py` (6: 1/2/4 flats only where they fit,
+every flat's door on the common space and never home-to-home, stair/lift open to the lobby, 230 mm party walls,
+windows to open air, identical flats + front flats planned for their own facing, re-plan changes every flat,
+houses untouched + narrow fallback) and test_walkthrough test_10 (levels, balconies, closed entrance above
+ground, stair halves, apartment tour, stilt levels).
 **2026-10-14 (latest): 70/70 pass** (+ test_walkthrough test_09: yard → outside stair → terrace and living room →
 inside stair → first floor on the two walking grids; parapet open at the bridge).
 **2026-10-14 (later): 69/69 pass** + `tests/test_walkthrough.py` (8: scene for N/E/S/W, windows/doors really open with

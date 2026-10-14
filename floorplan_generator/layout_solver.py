@@ -49,6 +49,14 @@ def _snap(v: float) -> float:
 # Placed geometry
 # =============================================================================
 
+
+def _spans(exclusion):
+    """door_exclusion is one (x0, x1) range, or a list of them (an apartment lobby between stair and lift)."""
+    if exclusion and isinstance(exclusion[0], (int, float)):
+        return [tuple(exclusion)]
+    return [tuple(e) for e in exclusion or []]
+
+
 @dataclass
 class Placed:
     key: str
@@ -824,9 +832,9 @@ class BandSpineSolver:
         lo = living.x + 0.45
         hi = living.right - 0.45 - dw
         if self.door_exclusion:
-            ex0, ex1 = self.door_exclusion
+            spans = _spans(self.door_exclusion)
             ok = [x for x in (lo + 0.1 * i for i in range(int(max(0.0, hi - lo) / 0.1) + 1))
-                  if x >= ex1 or x + dw <= ex0]
+                  if all(x >= ex1 or x + dw <= ex0 for ex0, ex1 in spans)]
             if ok:
                 best = None
                 for x in ok:
@@ -995,7 +1003,7 @@ class BandSpineSolver:
         if living is not None:
             d0, d1, pada_score = self.best_door(living)
             door = (d0, d1)
-            if self.door_exclusion and d1 > self.door_exclusion[0] and d0 < self.door_exclusion[1]:
+            if self.door_exclusion and any(d1 > e0 and d0 < e1 for e0, e1 in _spans(self.door_exclusion)):
                 add("entrance_blocked", 40)     # the car bay would block the way to the main door
         placements, weights = [], []
         for r in rooms:

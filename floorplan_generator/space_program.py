@@ -163,6 +163,28 @@ def design_lift(capacity: str) -> LiftDesign:
     )
 
 
+# Lift car (inside size, width along the door × depth) by persons — IS 14665 / EN 81-20 car area for the
+# rated load (68 kg a person), and what it can carry (EN 81-70 accessible car types).
+LIFT_CARS = {4: (0.85, 0.95), 6: (1.0, 1.25), 8: (1.1, 1.4)}
+LIFT_DOOR_CLEAR = {4: 0.8, 6: 0.8, 8: 0.9}
+CAR_NEEDS = [("wheelchair", "a wheelchair user", 1.0, 1.25),
+             ("helper", "a wheelchair with a helper", 1.1, 1.4),
+             ("stretcher", "a stretcher", 1.1, 2.1)]
+
+
+def lift_car(persons: int) -> Dict:
+    """Car inside size and what fits in it (plain words for the owner)."""
+    p = 4 if persons <= 4 else (6 if persons <= 6 else 8)
+    w, d = LIFT_CARS[p]
+    fits = {k: (w >= cw - 1e-6 and d >= cd - 1e-6) for k, _, cw, cd in CAR_NEEDS}
+    yes = [txt for k, txt, _, _ in CAR_NEEDS if fits[k]]
+    no = [(txt, cw, cd) for k, txt, cw, cd in CAR_NEEDS if not fits[k]]
+    words = (f"Car {w:.2f} × {d:.2f} m inside · door {LIFT_DOOR_CLEAR[p]:.1f} m. "
+             + (f"Fits {yes[-1]}." if yes else "Too small for a wheelchair (needs 1.0 × 1.25 m).")
+             + (f" {no[0][0][0].upper() + no[0][0][1:]} needs {no[0][1]:.1f} × {no[0][2]:.2f} m." if yes and no else ""))
+    return {"w": w, "d": d, "door": LIFT_DOOR_CLEAR[p], "fits": fits, "words": words}
+
+
 # =============================================================================
 # Program data model
 # =============================================================================
@@ -215,6 +237,7 @@ class SpaceProgram:
     lift: Optional[LiftDesign] = None
     external_stair: Optional[StairDesign] = None
     elder_friendly: bool = False
+    lift_outside: Optional[str] = None      # 'entrance' | 'side': a lift tower outside the house walls
 
     @property
     def target_area(self) -> float:
@@ -261,7 +284,8 @@ def build_program(bhk: str,
                   quality_level: str = "Standard",
                   has_lift: bool = False,
                   lift_capacity: str = "4 Person",
-                  stair_type: str = "dog_leg") -> SpaceProgram:
+                  stair_type: str = "dog_leg",
+                  lift_position: str = "inside") -> SpaceProgram:
     """
     Build the room program.
 
@@ -411,19 +435,22 @@ def build_program(bhk: str,
     stair = None
     external_stair = None
     lift = None
+    lift_outside = None
     multi_level = floors > 1 or is_duplex or is_apartment
     if multi_level:
         stair = design_staircase(stair_type, building_type)
         if has_lift and (floors > 1 or is_apartment or is_duplex):
             lift = design_lift(lift_capacity)
+            if not is_apartment and (lift_position or "inside") in ("entrance", "side"):
+                lift_outside = lift_position          # a tower outside the walls, see site_planner / layout_engine
         core_rooms = [_room("stairs", "Staircase", "staircase", stair.footprint_w * stair.footprint_l,
                             role="STAIRS", min_area=3.0, min_width=stair.footprint_w)]
-        if lift:
+        if lift and not lift_outside:
             core_rooms.append(_room("lift", "Lift / Elevator", "lift_shaft", lift.shaft_w * lift.shaft_d,
                                     role="LIFT", parent=None, min_area=2.25, min_width=lift.shaft_w))
         groups.append(RoomGroup(key="core", kind="core", rooms=core_rooms,
                                 bands=("cell", "rear", "front", "private"), growth=0.0,
-                                min_depth=stair.footprint_w, stair=stair, lift=lift))
+                                min_depth=stair.footprint_w, stair=stair, lift=None if lift_outside else lift))
         level = "Duplex" if is_duplex else ("Apartment" if is_apartment else f"G+{floors - 1}")
         notes.append(
             f"Staircase ({stair.stair_type.replace('_', '-')}, {level}): {stair.risers} risers × "
@@ -432,6 +459,12 @@ def build_program(bhk: str,
         notes.extend(stair.notes)
         if lift:
             notes.extend(lift.notes)
+            notes.append("Lift car: " + lift_car(lift.persons)["words"])
+        if lift_outside:
+            notes.append("Lift outside the home " + ("beside the main door" if lift_outside == "entrance"
+                                                     else "against the side wall")
+                         + ": a 230 mm RCC tower with its own landing on every floor, so each floor is reached "
+                           "without walking through another — and the rooms keep the shaft's floor space.")
     else:
         if has_lift:
             notes.append("Lift omitted: single-storey house has no upper level to serve.")
@@ -443,7 +476,7 @@ def build_program(bhk: str,
     program = SpaceProgram(
         bhk=bhk_name, groups=groups, living=living, dining=dining, notes=notes,
         stair=stair, lift=lift, external_stair=external_stair,
-        elder_friendly=elderly > 0,
+        elder_friendly=elderly > 0, lift_outside=lift_outside,
     )
     if elderly:
         notes.append("Elders' bedroom on ground level with attached accessible toilet "

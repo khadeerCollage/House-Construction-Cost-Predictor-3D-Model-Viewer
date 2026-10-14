@@ -8,6 +8,8 @@ offline and calls no outside service.
 
 A wish made while standing in a room ("make it bigger", "move it to the other side", "keep it")
 goes straight into the 🧠 Smart Re-Plan wish list above, so the owner can see 3 new designs.
+Moving the lift (inside the home / beside the main door / at the side) re-makes the design with the
+lift there at once — a new version in the design history, with undo.
 """
 
 import hashlib
@@ -60,14 +62,50 @@ def _wish_from_event(plan, ev):
     return None, None
 
 
-def _handle(plan, ev) -> None:
-    if not isinstance(ev, dict) or ev.get("action") != "wish":
+LIFT_WORDS = {"inside": "Lift inside the home", "entrance": "Lift outside, beside the main door",
+              "side": "Lift outside, at the side of the house"}
+
+
+def _move_lift(plan, pos, cost_params) -> None:
+    """Re-make the design with the lift `pos` (same plot, rooms brief and amenities) and make it current."""
+    if pos not in LIFT_WORDS:
+        return
+    params = dict(getattr(plan, "generation_params", None) or {})
+    if not params:
+        st.session_state["walk3d_note"] = ("warn", "This design cannot be re-made — click Generate once more.")
+        return
+    params.pop("lift_position", None)
+    if pos != "inside":
+        params["lift_position"] = pos
+    le = importlib.import_module("floorplan_generator.layout_engine")
+    studio = importlib.import_module("model_folder.intent_studio")
+    with st.spinner("Re-making your design with the lift moved…"):
+        new = le.LayoutEngine(**params).generate()
+    got = ((getattr(new, "engineering", None) or {}).get("lift") or {}).get("position") or "inside"
+    est = studio._estimate(new, cost_params) if cost_params else None
+    studio.commit({"plan": new, "report": {"label": LIFT_WORDS.get(got, "Lift moved")}, "cost": est}, cost_params or {})
+    if got in ("inside", "entrance", "side"):
+        st.session_state["lift_position_pending"] = got  # the Design form shows the same choice (next run)
+    if got != pos:
+        why = next((n for n in new.design_notes if "lift could not" in n.lower()), "")
+        st.session_state["walk3d_note"] = ("warn", f"🛗 The lift could not go there on this plot. {why}")
+    else:
+        st.session_state["walk3d_note"] = ("ok", f"🛗 {LIFT_WORDS[pos]} — the drawing, the cost and this 3D house now "
+                                                 "show it. To go back: 🧠 Smart Re-Plan → Undo.")
+
+
+def _handle(plan, ev, cost_params=None) -> None:
+    if not isinstance(ev, dict) or ev.get("action") not in ("wish", "lift"):
         return
     seen = st.session_state.setdefault(SEEN, [])
     if ev.get("id") in seen:                       # a component keeps returning its last value
         return
     seen.append(ev.get("id"))
     del seen[:-50]
+    if ev.get("action") == "lift":
+        _move_lift(plan, ev.get("position"), cost_params)
+        st.rerun()
+        return
     studio = importlib.import_module("model_folder.intent_studio")
     if not studio.plan_supports_intents(plan):
         st.session_state["walk3d_note"] = ("warn", "Smart Re-Plan is not available for this layout — click Generate once more.")
@@ -92,7 +130,7 @@ def _handle(plan, ev) -> None:
     st.rerun()
 
 
-def render_walkthrough(plan, land=None, height: int = 720) -> None:
+def render_walkthrough(plan, land=None, height: int = 720, cost_params=None) -> None:
     st.markdown("### 🚶 Walk through your house — in 3D, before you build it")
     st.caption("Built from your drawing: the same walls, doors, windows, stairs and furniture at real size. "
                "Take the **guided walk** (it tells you about every room), walk on your own (drag to look, tap the "
@@ -110,4 +148,4 @@ def render_walkthrough(plan, land=None, height: int = 720) -> None:
     ev = _component(scene=js, sid=sid, height=height, can_wish=bool(studio.plan_supports_intents(plan)),
                     key="walk3d", default=None)
     if ev:
-        _handle(plan, ev)
+        _handle(plan, ev, cost_params)

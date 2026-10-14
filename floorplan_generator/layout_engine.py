@@ -258,6 +258,11 @@ def _clamp(value: float, min_val: float, max_val: float) -> float:
     return max(min_val, min(max_val, value))
 
 
+LIFT_TOWER = "Lift / Elevator (External)"     # a lift tower outside the house walls
+ZONE_NAMES = {"N": "North", "NE": "North-East", "E": "East", "SE": "South-East", "S": "South",
+              "SW": "South-West", "W": "West", "NW": "North-West", "CENTER": "centre"}
+
+
 def _is_site_room(r) -> bool:
     return r.category in SITE_CATEGORIES or "External" in r.name
 
@@ -325,6 +330,14 @@ def audit_vastu(rooms, doors, plot_w: float, plot_h: float, facing: str,
     }
 
 
+def SitePlanFixed(width: float, depth: float, facing: str, door_exclusion=None):
+    """Site plan of a flat inside an apartment floor: the whole rectangle is the home, no setbacks."""
+    from floorplan_generator.site_planner import SitePlan
+    return SitePlan(plot_w=width, plot_h=depth, facing=facing,
+                    setbacks={"top": 0.0, "bottom": 0.0, "left": 0.0, "right": 0.0},
+                    footprint=(0.0, 0.0, width, depth), door_exclusion=door_exclusion)
+
+
 class LayoutEngine:
     """
     Vastu-Guided Hierarchical Space Partitioning (V-HSP) Layout Engine.
@@ -355,6 +368,9 @@ class LayoutEngine:
         family_profile=None,
         design_intents: Optional[List[Dict]] = None,
         base_layout: Optional[Dict] = None,
+        flats_per_floor="auto",
+        lift_position: str = "inside",
+        road_width: float = 9.0,
         **kwargs,
     ):
         """
@@ -379,6 +395,12 @@ class LayoutEngine:
             design_intents: Optional user wishes for an edit re-plan (intent_engine dicts, e.g.
                             {"type": "zone", "room": "kitchen", "zones": ["NW"]}).
             base_layout: The `layout_state` of the plan being edited — the re-plan stays close to it.
+            flats_per_floor: Apartments only — 1, 2, 4 or 'auto' flats per typical floor around a
+                             common stair / lift core (floorplan_generator/apartment.py).
+            lift_position: Houses with a lift — 'inside' (next to the stair, opens into the home),
+                           'entrance' (a tower beside the main door) or 'side' (a tower against a
+                           side wall with its own landing). Apartments always use the common core.
+            road_width: Width of the road in front of the plot (m) — sizes the car gate (gates.py).
         """
         self.plot_width = max(plot_width, 4.0)
         self.plot_height = max(plot_height, 4.0)
@@ -411,6 +433,23 @@ class LayoutEngine:
             stair_type=stair_type, num_floors=num_floors, building_type=building_type,
             additional_components=self.additional_components, family_profile=family_profile,
         )
+        self.flats_per_floor = flats_per_floor
+        self._fixed_site = None              # a flat inside an apartment floor: plan exactly this rectangle
+        self._apartment_fallback = False
+        self._program_override = None        # a duplex floor: plan this room program instead of the BHK's
+        if "apartment" in (building_type or "").lower():
+            self.generation_params["flats_per_floor"] = flats_per_floor
+        self.lift_position = lift_position if lift_position in ("entrance", "side") else "inside"
+        if "apartment" in (building_type or "").lower() or "duplex" in (building_type or "").lower():
+            self.lift_position = "inside"            # flats share the core's lift; a duplex keeps it inside
+        if self.lift_position != "inside":
+            self.generation_params["lift_position"] = self.lift_position
+        try:
+            self.road_width = float(road_width or 9.0)
+        except (TypeError, ValueError):
+            self.road_width = 9.0
+        if abs(self.road_width - 9.0) > 1e-6:
+            self.generation_params["road_width"] = self.road_width
 
         self.wall = WallThickness()
         self.north_edge = north_edge_for_facing(self.orientation)
@@ -431,8 +470,34 @@ class LayoutEngine:
     # Main pipeline
     # =========================================================================
 
+    def _stack_mode(self) -> Optional[str]:
+        """
+        How the floors are stacked (floorplan_generator/apartment.py):
+          'apartment' — flats around a common stair + lift core;
+          'house'     — a house of 2+ floors: one home on every floor, each floor's main door on a stair
+                        lobby at the front (nobody walks through another floor's home);
+          'duplex'    — one home on two floors: living below, bedrooms above, the stair rising from the foyer;
+          None        — one floor (or a flat / unit planned inside a given rectangle).
+        """
+        if self._fixed_site is not None or self._apartment_fallback:
+            return None
+        bt = (self.building_type or "").lower()
+        if "apartment" in bt:
+            return "apartment"
+        if "duplex" in bt:
+            return "duplex"
+        if self.num_floors > 1:
+            return "house"
+        return None
+
+    def _apartment_mode(self) -> bool:
+        return self._stack_mode() is not None
+
     def generate(self) -> GeneratedFloorPlan:
         """Execute the full pipeline and return a complete floor plan."""
+        if self._apartment_mode():           # floors stacked round a stair core (apartment.py)
+            from floorplan_generator import apartment
+            return apartment.generate(self)
         ctx = self._solve_stage()
         return self._assemble(ctx, ctx["result"])
 
@@ -444,6 +509,9 @@ class LayoutEngine:
         user's wishes and what else had to move.
         """
         import copy as _copy
+        if self._apartment_mode():
+            from floorplan_generator import apartment
+            return apartment.generate(self, alternatives=k)
         ctx = self._solve_stage(alternatives=k)
         solver = ctx["solver"]
         options = ctx["alternatives"] or ([(ctx["result"], "Re-planned layout")] if ctx["result"] else [])
@@ -479,9 +547,14 @@ class LayoutEngine:
         from floorplan_generator.site_planner import SitePlanner
 
         # ── Stage 1: space program ────────────────────────────────────────
-        program = build_program(
-            self.bhk_name, self.family_profile, self.building_type, self.num_floors,
-            self.quality_level, self.has_lift, self.lift_capacity, self.stair_type)
+        if self._program_override is not None:          # one floor of a duplex
+            import copy as _copy
+            program = _copy.deepcopy(self._program_override)
+        else:
+            program = build_program(
+                self.bhk_name, self.family_profile, self.building_type, self.num_floors,
+                self.quality_level, self.has_lift, self.lift_capacity, self.stair_type,
+                lift_position=self.lift_position)
         members = 4
         fp_prof = self.family_profile
         if fp_prof is not None:
@@ -496,8 +569,28 @@ class LayoutEngine:
         n_bed = int(program.bhk[0])
         min_w = {1: 5.6, 2: 6.6, 3: 7.6, 4: 8.4}.get(n_bed, 6.6)
         min_d = 6.8
-        ext_len = program.external_stair.footprint_l if program.external_stair else 0.0
-        site = planner.plan_footprint(program.target_area * 1.12, program.min_area, min_w, min_d, ext_len)
+        if self._fixed_site is not None:    # a flat of an apartment floor: its rectangle is given
+            import copy as _copy
+            program.external_stair = None
+            site = _copy.deepcopy(self._fixed_site)
+        else:
+            ext_len = program.external_stair.footprint_l if program.external_stair else 0.0
+            lift_out = None
+            if program.lift_outside and program.lift:
+                lift_out = {"position": program.lift_outside, "w": program.lift.shaft_w,
+                            "d": program.lift.shaft_d, "door": 0.9}
+            site = planner.plan_footprint(program.target_area * 1.12, program.min_area, min_w, min_d, ext_len,
+                                          lift_out=lift_out)
+            if lift_out and site.lift_side is None:
+                # no yard can take the tower: the lift goes back inside, next to the stair
+                failed = [n for n in site.notes if n.startswith("The lift could not go outside")]
+                program = build_program(
+                    self.bhk_name, self.family_profile, self.building_type, self.num_floors,
+                    self.quality_level, self.has_lift, self.lift_capacity, self.stair_type)
+                planner = SitePlanner(self.plot_width, self.plot_height, self.orientation, self.vastu_enabled,
+                                      self.building_type, self.num_floors, dict(comps), members)
+                site = planner.plan_footprint(program.target_area * 1.12, program.min_area, min_w, min_d, ext_len)
+                site.notes.extend(failed)
 
         # User size wishes re-balance rooms inside the same envelope (footprint unchanged)
         intent_notes: List[str] = []
@@ -529,12 +622,35 @@ class LayoutEngine:
             relax_notes.extend(step)
             if not step and attempt > 2:
                 break
+        retry = getattr(self, "_lift_retry", False)
+        if getattr(program, "lift_outside", None) and result is None and self.lift_position != "inside" and not retry:
+            # the rooms cannot be laid out around the tower's yard: plan the lift inside, next to the stair
+            ctx = self._solve_lift_as("inside", alternatives)
+            ctx["site"].notes.append("The lift could not go outside the house on this plot: with the tower's yard "
+                                     "the rooms do not fit — it stays inside, next to the stair.")
+            return ctx
+        if program.lift and not getattr(program, "lift_outside", None) and result is None and not retry                 and self._fixed_site is None and "apartment" not in (self.building_type or "").lower():
+            # no layout keeps the stair and the lift inside: a tower beside the main door, rather than no lift
+            ctx = self._solve_lift_as("entrance", alternatives)
+            if ctx["result"] is not None and getattr(ctx["program"], "lift_outside", None):
+                ctx["site"].notes.append("The lift could not fit inside the house on this plot (with the stair the "
+                                         "rooms do not fit) — it stands outside, beside the main door.")
+                return ctx
         alts = []
         if alternatives and result is not None and hasattr(solver, "alternatives"):
             alts = solver.alternatives(alternatives)
         return {"program": program, "planner": planner, "site": site, "result": result, "solver": solver,
                 "alternatives": alts, "trim_notes": trim_notes, "relax_notes": relax_notes,
                 "intent_notes": intent_notes, "relax_level": relax_level}
+
+    def _solve_lift_as(self, position: str, alternatives: int = 0) -> Dict:
+        """Solve again with the lift at `position` (one retry, never recursive)."""
+        keep = self.lift_position
+        self.lift_position, self._lift_retry = position, True
+        try:
+            return self._solve_stage(alternatives)
+        finally:
+            self.lift_position, self._lift_retry = keep, False
 
     def _assemble(self, ctx: Dict, result) -> GeneratedFloorPlan:
         """Stages 4-9 for one solved layout: doors, amenities, walls, windows, audit, report."""
@@ -570,7 +686,17 @@ class LayoutEngine:
         # ── Stages 4-5: doors, arches, main entrance ─────────────────────
         doors, openings = self._place_doors(rooms, placed, door_x, site.footprint)
 
-        # ── Stage 6: site amenities ──────────────────────────────────────
+        # ── Stage 5b: a lift tower outside the house (beside the main door / against a side wall) ──
+        tower = None
+        if getattr(program, "lift_outside", None) and getattr(site, "lift_side", None) and result is not None:
+            tower = self._outside_lift(program, site, rooms, doors, door_x)
+            if tower is None:
+                notes.append("The lift tower could not be fitted outside the walls of this layout.")
+            else:
+                self._tower_into(tower, rooms, doors, site, notes)
+
+        # ── Stage 6: site amenities and gates ────────────────────────────
+        self._gate_brief(planner, site, rooms)
         planner.place_amenities(site, door_x[0], door_x[1], program.external_stair)
         for it in site.items:
             x, y, w, h = it.rect
@@ -579,6 +705,8 @@ class LayoutEngine:
 
         # ── Stage 7: walls with openings ─────────────────────────────────
         walls = self._generate_walls(rooms)
+        if tower is not None:                 # the tower's own 230 mm RCC walls
+            walls.extend(self._tower_walls(tower))
         cuts = [self._door_cut(d) for d in doors] + list(openings)
         top = self.plot_height
         cuts += [(g0, top, g1, top) for g0, g1 in site.gates]
@@ -586,6 +714,8 @@ class LayoutEngine:
 
         # ── Stage 8: windows ─────────────────────────────────────────────
         windows = self._place_windows(rooms, doors, site.footprint)
+        if tower is not None:
+            windows = self._clear_windows(windows, rooms, doors, tower["outer"])
 
         # Staircases (internal + external terrace stair)
         staircases = self._place_staircases(rooms, program)
@@ -593,7 +723,7 @@ class LayoutEngine:
         # ── Stage 9: dimensions, areas, Vastu audit, engineering notes ───
         dimensions = self._generate_dimensions(rooms)
         self._set_clear_areas(rooms, site.footprint)
-        lift_area = sum(r.w * r.h for r in rooms if r.category == RoomCategory.LIFT.value)
+        lift_area = sum(r.w * r.h for r in rooms if r.category == RoomCategory.LIFT.value and not _is_site_room(r))
         duct_area = sum(r.w * r.h for r in rooms if "Duct" in r.name)
         carpet = max(0.0, (fw - self.wall.external) * (fd - self.wall.external) - lift_area - duct_area)
         built_up = (fw + self.wall.external) * (fd + self.wall.external)
@@ -614,6 +744,11 @@ class LayoutEngine:
         plan.setbacks = {self.sides[k]: v for k, v in site.setbacks.items()}
 
         engineering = self._engineering_report(rooms, walls, program, site, carpet, built_up)
+        if engineering.get("lift"):
+            engineering["lift"]["position"] = "inside"
+            if tower is not None:
+                engineering["lift"].update(self._tower_info(tower))
+        self._gate_report(engineering, site, planner)
         plan.engineering = engineering
         notes = (program.notes + ctx["intent_notes"] + ctx["trim_notes"] + ctx["relax_notes"] + site.notes
                  + notes + engineering.pop("notes", []))
@@ -629,6 +764,233 @@ class LayoutEngine:
         plan.design_notes = notes
         plan.generation_params = dict(self.generation_params)
         return plan
+
+    def _gate_brief(self, planner, site, rooms) -> None:
+        """What the gate designer needs to know: the road, the design car, the stilt bays (gates.py)."""
+        planner.road, planner.quality = self.road_width, self.quality_level
+        if getattr(site, "car_mode", None) == "stilt":
+            from floorplan_generator import gates as _gates
+            info = _gates.stilt_plan(rooms, site.footprint, self.additional_components, self.quality_level,
+                                     self.building_type, _is_site_room)
+            planner.stilt_info = info
+            if info.get("note"):
+                site.notes.append(info["note"])
+
+    @staticmethod
+    def _gate_report(engineering: Dict, site, planner) -> None:
+        engineering["gates"] = [dict(g) for g in (getattr(site, "gate_specs", None) or [])]
+        engineering["road_m"] = getattr(site, "road", 9.0)
+        if getattr(site, "drive", None):
+            engineering["drive"] = site.drive
+        info = getattr(planner, "stilt_info", None)
+        if info and getattr(site, "car_mode", None) == "stilt":
+            engineering["stilt"] = {k: v for k, v in info.items() if k != "note"}
+
+    @staticmethod
+    def _tower_into(tower: Dict, rooms, doors, site, notes) -> None:
+        """Add a placed lift tower to the plan: its room, its door (+ side door), the yard it keeps."""
+        x, y, w, h = tower["rect"]
+        rooms.append(RoomRect(name=LIFT_TOWER, category=RoomCategory.LIFT.value, x=round(x, 3), y=round(y, 3),
+                              w=round(w, 3), h=round(h, 3), color="#38BDF8", role="LIFT"))
+        doors.append(tower["door"])
+        if tower["entry"] is not None:
+            doors.append(tower["entry"])
+        site.reserved = [tower["outer"], tower["apron"]]
+        notes.append(tower["note"])
+
+    def _tower_walls(self, tower: Dict) -> List[WallSegment]:
+        x0, y0, w, h = tower["rect"]
+        x1, y1 = x0 + w, y0 + h
+        t = self.wall.external
+        return [WallSegment(round(a, 3), round(b, 3), round(c, 3), round(d, 3), t, True, "external")
+                for a, b, c, d in ((x0, y0, x1, y0), (x1, y0, x1, y1), (x1, y1, x0, y1), (x0, y1, x0, y0))]
+
+    @staticmethod
+    def _tower_info(tower: Dict) -> Dict:
+        return {"position": "entrance" if tower["how"] == "entrance" else "side",
+                "layout": tower["how"], "side": tower["side"],
+                "tower": [round(v, 3) for v in tower["outer"]],
+                "landing": [round(v, 3) for v in tower["landing"]],
+                "entry": "side door" if tower["entry"] is not None else "main door"}
+
+    # Rooms a lift landing may open into through a side door (never a bedroom, bath or pooja)
+    _ENTRY_PREF = {"DINING": 3.0, "CORRIDOR": 3.0, "FOYER": 3.0, "LIVING": 2.6, "UTILITY": 1.8, "KITCHEN": 1.5}
+
+    def _outside_lift(self, program, site, rooms, doors, door_x, entry_rooms=None) -> Optional[Dict]:
+        """
+        Place the lift tower outside the house walls (230 mm RCC shaft) after the rooms are solved:
+          'top'  — beside the main door, its door facing the entrance landing (a porch at ground,
+                   a covered landing on every floor joining that floor's front door);
+          'left' / 'right' — against that side wall, its door facing the road, a 1.5 m landing in
+                   front with a side door into a living space (dining / passage / foyer / living,
+                   kitchen or utility as a service entry) — or, when that wall has none, at the
+                   front end of the side yard with a verandah along the facade to the main door.
+        Vastu: lift zones on the plot mandala (S / W / NW good, NE never).
+        """
+        from floorplan_generator.site_planner import MARGIN_PLOT
+        lift = program.lift
+        sw, sd, dw = lift.shaft_w, lift.shaft_d, 0.9
+        fx, fy, fw, fd = site.footprint
+        W, H = self.plot_width, self.plot_height
+        top = fy + fd
+        e = 0.115
+        plot_eng = VastuEngine.for_facing(W, H, self.orientation)
+
+        def vastu_at(cx, cy):
+            if not self.vastu_enabled:
+                return 0
+            return plot_eng.get_room_score("LIFT", plot_eng.get_zone_for_position(cx, cy).value)
+
+        def in_plot(o):
+            return (o[0] >= MARGIN_PLOT - 1e-6 and o[1] >= MARGIN_PLOT - 1e-6
+                    and o[2] <= W - MARGIN_PLOT + 1e-6 and o[3] <= H - MARGIN_PLOT + 1e-6)
+
+        def pack(rect, door, entry, landing, how, side, apron=None):
+            x0, y0, x1, y1 = rect
+            zone = plot_eng.get_zone_for_position((x0 + x1) / 2, (y0 + y1) / 2).value
+            where = {"entrance": "beside the main door",
+                     "side door": f"against the {ZONE_NAMES.get(self.sides.get(side, ''), 'side')} side wall",
+                     "verandah": f"at the front of the {ZONE_NAMES.get(self.sides.get(side, ''), 'side')} side"}[how]
+            host = entry.room_name if entry is not None else "house"
+            reach = {"entrance": "its landing is the entrance porch, and on every floor a covered landing joins "
+                                 "that floor's front door",
+                     "side door": f"a 1.5 m landing in front opens into the {host} through a side door on every floor",
+                     "verandah": "a 1.5 m verandah along the front joins the main door on every floor"}[how]
+            note = (f"Lift tower {where} ({ZONE_NAMES.get(zone, zone)} of the site): {sw:.1f} × {sd:.1f} m shaft in "
+                    f"230 mm RCC walls, door {dw:.1f} m — {reach}.")
+            return {"rect": (x0, y0, x1 - x0, y1 - y0), "outer": (x0 - e, y0 - e, x1 + e, y1 + e), "door": door,
+                    "entry": entry, "landing": landing, "apron": apron or landing, "how": how, "side": side,
+                    "note": note}
+
+        def entrance():
+            d0, d1 = door_x
+            depth = max(1.2, 0.23 + (sw + dw) / 2 + 0.15)
+            y0, y1 = top + 0.23, top + 0.23 + sw
+            best = None
+            for side in ("right", "left"):
+                if side == "right":
+                    x0 = d1 + 0.6 + e
+                    x1, face, ws = x0 + sd, x0, "W"
+                    landing = (d0 - 0.3, top, x0 - e, top + depth)
+                else:
+                    x1 = d0 - 0.6 - e
+                    x0, face, ws = x1 - sd, x1, "E"
+                    landing = (x1 + e, top, d1 + 0.3, top + depth)
+                if not in_plot((x0 - e, y0 - e, x1 + e, y1 + e)):
+                    continue
+                key = vastu_at((x0 + x1) / 2, (y0 + y1) / 2) + (0.1 if side == "right" else 0.0)
+                if best is None or key > best[0]:
+                    best = (key, (x0, y0, x1, y1), face, ws, landing)
+            if best is None:
+                return None
+            _, rect, face, ws, landing = best
+            door = DoorPlacement(x=round(face, 3), y=round(rect[1] + (sw - dw) / 2, 3), width=dw, wall_side=ws,
+                                 swing_direction="RIGHT", room_name=LIFT_TOWER)
+            apron = (min(landing[0], d0 - 0.45), top, max(landing[2], d1 + 0.45), top + depth + 0.9)
+            return pack(rect, door, None, landing, "entrance", "top", apron)
+
+        def side_door(side):
+            left = side == "left"
+            x1 = fx - 0.23 if left else fx + fw + 0.23 + sw
+            x0 = x1 - sw
+            wall_x = fx if left else fx + fw
+            ws_entry = "W" if left else "E"
+            lx = (x0 - e, fx - e) if left else (fx + fw + e, x1 + e)
+            edge = [r for r in rooms if not _is_site_room(r) and abs((r.x if left else r.right) - wall_x) < 0.03
+                    and "Dress" not in r.name and "Wardrobe" not in r.name
+                    and (entry_rooms is None or r.name in entry_rooms)]
+            taken = [(d.y, d.y + d.width) for d in doors if d.wall_side in ("E", "W") and abs(d.x - wall_x) < 0.03]
+            best = None
+            ty = fy
+            while ty + sd + e + 1.5 <= top + 1e-6:
+                ly0 = ty + sd + e
+                e0, e1 = ly0 + 0.3, ly0 + 1.2
+                host = next((r for r in edge if r.y + 0.12 <= e0 and e1 <= r.top - 0.12), None)
+                pref = self._ENTRY_PREF.get(host.category) if host is not None else None
+                if pref and not any(a < e1 + 0.3 and b > e0 - 0.3 for a, b in taken):
+                    key = 10 * pref + 0.5 * vastu_at((x0 + x1) / 2, ty + sd / 2) + 2.0 * (ty - fy) / max(fd, 1.0)
+                    if best is None or key > best[0]:
+                        best = (key, ty, host, e0)
+                ty = round(ty + 0.05, 3)
+            if best is None:
+                return None
+            _, ty, host, e0 = best
+            y0, y1 = ty, ty + sd
+            door = DoorPlacement(x=round((x0 + x1) / 2 - dw / 2, 3), y=round(y1, 3), width=dw, wall_side="N",
+                                 swing_direction="RIGHT", room_name=LIFT_TOWER)
+            entry = DoorPlacement(x=round(wall_x, 3), y=round(e0, 3), width=0.9, wall_side=ws_entry,
+                                  swing_direction="RIGHT", room_name=host.name)
+            landing = (lx[0], y1 + e, lx[1], y1 + e + 1.5)
+            apron = (lx[0], y1 + e, lx[1], min(H - MARGIN_PLOT, y1 + e + 2.4))
+            return pack((x0, y0, x1, y1), door, entry, landing, "side door", side, apron)
+
+        def verandah(side):
+            left = side == "left"
+            x1 = fx - 0.23 if left else fx + fw + 0.23 + sw
+            x0 = x1 - sw
+            y0, y1 = top - sd, top
+            d0, d1 = door_x
+            landing = (x0 - e, top, d1 + 0.3, top + 1.5) if left else (d0 - 0.3, top, x1 + e, top + 1.5)
+            if landing[2] - landing[0] > 9.0:
+                return None
+            door = DoorPlacement(x=round((x0 + x1) / 2 - dw / 2, 3), y=round(y1, 3), width=dw, wall_side="N",
+                                 swing_direction="RIGHT", room_name=LIFT_TOWER)
+            apron = (landing[0], top, landing[2], top + 2.4)
+            return pack((x0, y0, x1, y1), door, None, landing, "verandah", side, apron)
+
+        if site.lift_side == "top":
+            return entrance()
+        return side_door(site.lift_side) or verandah(site.lift_side) or entrance()
+
+    @staticmethod
+    def _clear_windows(windows, rooms, doors, outer) -> List:
+        """Windows the lift tower would cover slide along their wall (or go) — never glass into a shaft wall."""
+        bx0, by0, bx1, by1 = outer
+        by_name = {r.name: r for r in rooms}
+        out = []
+        for wd in windows:
+            horiz = wd.wall_side in ("N", "S")
+            o = {"N": (0, 1), "S": (0, -1), "E": (1, 0), "W": (-1, 0)}[wd.wall_side]
+            line = wd.y if horiz else wd.x
+            c = wd.x if horiz else wd.y
+            half = wd.width / 2
+            probe = line + (o[1] if horiz else o[0]) * 0.35
+            lo_b, hi_b = (bx0, bx1) if horiz else (by0, by1)
+            near = (by0 - 0.01 <= probe <= by1 + 0.01) if horiz else (bx0 - 0.01 <= probe <= bx1 + 0.01)
+            if not near or c + half <= lo_b or c - half >= hi_b:
+                out.append(wd)
+                continue
+            r = by_name.get(wd.room_name)
+            if r is None:
+                continue
+            lo_r, hi_r = (r.x, r.right) if horiz else (r.y, r.top)
+            busy = [(lo_b - 0.1, hi_b + 0.1)]
+            for d in doors:
+                if (d.wall_side in ("N", "S")) == horiz and abs((d.y if horiz else d.x) - line) < 0.05:
+                    a = d.x if horiz else d.y
+                    busy.append((a - 0.3, a + d.width + 0.3))
+            best = None
+            for width in (wd.width, max(0.6, wd.width * 0.75)):
+                h2 = width / 2
+                for cand in (lo_b - 0.1 - h2, hi_b + 0.1 + h2):
+                    if cand - h2 < lo_r + 0.25 or cand + h2 > hi_r - 0.25:
+                        continue
+                    if any(cand + h2 > a and cand - h2 < b for a, b in busy):
+                        continue
+                    if best is None or abs(cand - c) < abs(best[0] - c):
+                        best = (cand, width)
+                if best:
+                    break
+            if best is None:
+                continue
+            cand, width = best
+            if horiz:
+                out.append(WindowPlacement(x=round(cand, 3), y=wd.y, width=round(width, 2), height=wd.height,
+                                           wall_side=wd.wall_side, room_name=wd.room_name))
+            else:
+                out.append(WindowPlacement(x=wd.x, y=round(cand, 3), width=round(width, 2), height=round(width, 2),
+                                           wall_side=wd.wall_side, room_name=wd.room_name))
+        return out
 
     def _layout_state(self, result, program, footprint) -> Dict:
         """Solver arrangement + per-room geometry, the base an intent re-plan stays close to."""

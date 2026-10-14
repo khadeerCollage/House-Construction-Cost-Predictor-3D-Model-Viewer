@@ -128,6 +128,17 @@ def _changes_text(option: Dict, limit: int = 4) -> str:
 # =============================================================================
 
 def render_room_schedule(plan) -> None:
+    upper = getattr(plan, "upper_plan", None)
+    if upper is None:
+        _room_schedule(plan)
+        return
+    st.markdown("#### 🏠 Ground floor")              # a duplex: one home on two floors
+    _room_schedule(plan, "g")
+    st.markdown("#### 🛏️ First floor")
+    _room_schedule(upper, "u")
+
+
+def _room_schedule(plan, key: str = "") -> None:
     rs = hr.room_schedule(plan)
     t = rs["totals"]
     st.markdown(_CSS, unsafe_allow_html=True)
@@ -170,7 +181,8 @@ def render_room_schedule(plan) -> None:
     with st.expander("📋 Full room table & download"):
         st.dataframe(table, use_container_width=True, hide_index=True)
         st.download_button("⬇️ Download room schedule (.csv)", _csv(table),
-                           file_name=f"{plan.bhk_config}_room_schedule.csv", mime="text/csv")
+                           file_name=f"{plan.bhk_config}_room_schedule{'_' + key if key else ''}.csv", mime="text/csv",
+                           key=f"room_schedule_csv_{key}" if key else None)
 
 
 # =============================================================================

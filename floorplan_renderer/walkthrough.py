@@ -16,12 +16,32 @@ Walls are plan.walls (already cut at doors, arches and gates) split around every
 sill piece and a head piece, with lintels over doors/arches and corner posts at junctions (as
 the drafting poché). Door leaves keep the plan's hinge and swing (floorplan_renderer._common).
 
-Walking: two 0.1 m occupancy grids (walls, furniture, water, cars … grown by the walker's radius) —
+Floors: the engine designs one typical floor; a G+n house or an apartment block shows that floor —
+rooms, furniture, doors, windows — on every level (an apartment floor holds 1, 2 or 4 flats around a
+common core, see floorplan_generator/apartment.py), with the stair rising through all of them, a lift
+that rides between them, upper-floor balconies where the ground floor has an outside door, the
+light well open to the sky, and the terrace on top. Levels: [stilt,] the floors, terrace.
+
+A house of 2+ floors is a home on every floor around a front stair lobby (engineering['apartment']
+kind 'house'); a duplex is one home on two floors — plan.upper_plan is its first floor, built as its own
+template (scene['upper']: walls, doors, windows, rooms, furniture) with its own walking grid, and the guided
+tour climbs the stair to visit it.
+
+The lift (scene['lift']): shaft, door, stops and car measured from the plan and the engineering report —
+inside the home, in an apartment's common core, or a tower outside the walls (beside the main door or
+against a side wall, plan.engineering['lift']['position']) with a landing on every floor. walk.js turns
+it into a working lift: landing doors and call buttons on every floor, a car with its button panel,
+counterweight, ropes and machine, riding at the lift's real speed.
+
+Walking: 0.1 m occupancy grids (walls, furniture, water, cars … grown by the walker's radius) —
 the house / ground level and the level the stairs reach (the terrace of a one-storey house, else the
 first-floor slab) — go to the browser for collision and tap-to-walk; every stair is climbable and
 switches level half-way up. An outside terrace stair starts on the ground, so it is built to climb the
 plinth too, and arrives over a bridge through a gap in the parapet. The guided tour is planned here —
-road → gate → main door → every room, nearest one next — each stop with a plain-words note:
+road → gate → main door → every room, nearest one next — each stop with a plain-words note.
+Gates come from the engine's gate design (floorplan_generator/gates.py: width for what passes, swing /
+sliding / telescopic / bi-fold leaves, the design car's drive-in path → scene['drive']); stilt cars stand
+in the engine's stilt bays (engineering['stilt']); the road has the width the owner chose:
 inside size in metres and feet, Vastu zone, daylight and what furniture fits.
 
 Pure Python + numpy (no Streamlit).
@@ -37,6 +57,7 @@ import numpy as np
 from floorplan_generator.vastu_engine import VastuEngine, plan_sides_for_facing
 from floorplan_generator.house_report import room_schedule, ZONE_WORDS, good_zones
 from floorplan_generator.structure import building_footprint
+from floorplan_generator.space_program import lift_car
 from floorplan_renderer._common import door_span, north_angle
 from floorplan_renderer.drafting import build_drafting
 
@@ -179,13 +200,55 @@ def _gates(plan) -> List[Tuple[float, float]]:
     return gaps
 
 
+def _gate_list(plan) -> List[Dict]:
+    """
+    The gates in the compound wall: the engine's gate design (engineering['gates']) or, for a plan made
+    before it, the gaps in the compound wall with one or two swing leaves.
+    """
+    if not any(getattr(w, "wall_type", "") == "compound" for w in plan.walls):
+        return []
+    specs = ((getattr(plan, "engineering", None) or {}).get("gates") or [])
+    out = []
+    for g in specs:
+        out.append({"x0": _r(g["x0"]), "x1": _r(g["x1"]), "h": g.get("height", 1.5), "op": g.get("op", "swing"),
+                    "leaves": g.get("leaves") or [], "runback": g.get("runback"), "wicket": g.get("wicket"),
+                    "vehicle": g.get("vehicle"), "kind": g.get("kind", "walk"), "tag": g.get("tag", ""),
+                    "feet": g.get("feet", ""), "width": g.get("width", _r(g["x1"] - g["x0"]))})
+    if out:
+        return out
+    for a, b in _gates(plan):
+        w = b - a
+        leaves = ([{"type": "swing", "hinge": a, "len": _r(w / 2), "dir": 1},
+                   {"type": "swing", "hinge": b, "len": _r(w / 2), "dir": -1}] if w > 2.4 else
+                  [{"type": "swing", "hinge": a, "len": _r(w), "dir": 1}])
+        out.append({"x0": _r(a), "x1": _r(b), "h": 1.5, "op": "swing", "leaves": leaves, "runback": None,
+                    "wicket": None, "vehicle": None, "kind": "vehicle" if w > 2.4 else "walk", "tag": "",
+                    "feet": "", "width": _r(w)})
+    return out
+
+
+def _walk_gate(gates: List[Dict]) -> Optional[Tuple[float, float]]:
+    """Where people come in: the walking gate, else the wicket door of the car gate, else the widest gate."""
+    for g in gates:
+        if g["kind"] in ("walk", "two_wheeler"):
+            return g["x0"], g["x1"]
+    for g in gates:
+        if g.get("wicket"):
+            return tuple(g["wicket"])
+    return max(((g["x0"], g["x1"]) for g in gates), key=lambda t: t[1] - t[0], default=None)
+
+
 def _walls(plan, lv, windows, footprint) -> Tuple[Dict[str, List], List[Dict], List[Dict], List[Dict]]:
     """Wall boxes by kind, window openings, door leaves and arches."""
     z0, z1 = lv["ffl"], lv["ffl"] + lv["ceiling"]
     fx, fy, fw, fd = footprint
     rooms = [r for r in plan.rooms if not _is_site(r) and r.w > 0 and r.h > 0]
     by_name = {r.name: r for r in plan.rooms}
-    out: Dict[str, List] = {"ext": [], "int": [], "cmp": [], "post": [], "pillar": []}
+    out: Dict[str, List] = {"ext": [], "int": [], "cmp": [], "post": [], "pillar": [], "parapet": []}
+    tw = ((getattr(plan, "engineering", None) or {}).get("lift") or {}).get("tower")
+
+    def in_tower(x, y) -> bool:          # the outside lift tower is modelled by walk.js (full height)
+        return bool(tw) and tw[0] - 0.01 <= x <= tw[2] + 0.01 and tw[1] - 0.01 <= y <= tw[3] + 0.01
 
     # windows → cuts on their wall line
     wins: List[Dict] = []
@@ -208,8 +271,13 @@ def _walls(plan, lv, windows, footprint) -> Tuple[Dict[str, List], List[Dict], L
             continue
         lo, hi, line = _span(w)
         t = w.thickness
+        if in_tower((w.x1 + w.x2) / 2, (w.y1 + w.y2) / 2):
+            continue
         if kind == "compound":
             out["cmp"].append(_box(horiz, lo, hi, line, t, 0.0, COMPOUND_H))
+            continue
+        if kind == "parapet":                    # an apartment's open gallery: 1 m wall, the rest open air
+            out["parapet"].append(_box(horiz, lo, hi, line, t, z0, z0 + PARAPET_H))
             continue
         segs.append(w)
         key = "ext" if kind == "external" else "int"
@@ -253,10 +321,16 @@ def _walls(plan, lv, windows, footprint) -> Tuple[Dict[str, List], List[Dict], L
     if cmp_segs:
         for (px, py) in ((0, 0), (W, 0), (W, H), (0, H)):
             out["pillar"].append([_r(px - 0.15), _r(py - 0.15), _r(px + 0.15), _r(py + 0.15), 0.0, _r(COMPOUND_H + 0.1)])
-        for g0, g1 in _gates(plan):
-            for gx in (g0, g1):
-                if 0.2 < gx < W - 0.2:
-                    out["pillar"].append([_r(gx - 0.18), _r(H - 0.18), _r(gx + 0.18), _r(H + 0.18), 0.0, 1.85])
+        for g in _gate_list(plan):                # pillars just outside the opening (a car gate's are bigger)
+            big = g["kind"].startswith("vehicle")
+            s, ph = (0.45, 2.1) if big else (0.36, 1.85)
+            for a, b in ((g["x0"] - s, g["x0"]), (g["x1"], g["x1"] + s)):
+                if b > 0.05 and a < W - 0.05:
+                    out["pillar"].append([_r(max(a, -0.15)), _r(H - s / 2), _r(min(b, W + 0.15)), _r(H + s / 2), 0.0, ph])
+            wk, veh = g.get("wicket"), g.get("vehicle")
+            if wk and veh and not (wk[0] >= veh[0] - 1e-6 and wk[1] <= veh[1] + 1e-6):
+                bx = wk[0] if wk[0] > veh[0] else wk[1]          # a slim post between the car part and the wicket
+                out["pillar"].append([_r(bx - 0.08), _r(H - 0.12), _r(bx + 0.08), _r(H + 0.12), 0.0, 1.9])
 
     # doors: lintel over each, and a leaf that keeps the plan's hinge and swing
     doors = []
@@ -268,15 +342,18 @@ def _walls(plan, lv, windows, footprint) -> Tuple[Dict[str, List], List[Dict], L
                   (abs(line - fx) < 0.03 or abs(line - (fx + fw)) < 0.03)
         t = _wall_t(plan.walls, horiz, line, a, b, 0.23 if on_edge else 0.115)
         key = "ext" if on_edge else "int"
-        out[key].append(_box(horiz, a, b, line, t, z0 + DOOR_HEAD, z1))
         mid = ((a + b) / 2, line) if horiz else (line, (a + b) / 2)
+        if not in_tower(*mid):
+            out[key].append(_box(horiz, a, b, line, t, z0 + DOOR_HEAD, z1))
         nx, ny = INTO[d.wall_side]
         probe = (mid[0] - nx * (t / 2 + 0.25), mid[1] - ny * (t / 2 + 0.25))
         other = next((r.name for r in rooms if r.x < probe[0] < r.right and r.y < probe[1] < r.top), "Outside")
         room = by_name.get(d.room_name)
         cat = getattr(room, "category", "")
-        kind = ("main" if d.is_main_entrance else "lift" if cat == "LIFT" else "bath" if cat == "BATHROOM"
-                else "pooja" if cat == "POOJA" else "service" if on_edge else "internal")
+        other_room = by_name.get(other)
+        common = other_room is not None and             (getattr(room, "role", "") == "COMMON") != (getattr(other_room, "role", "") == "COMMON")
+        kind = ("main" if d.is_main_entrance else "lift" if cat == "LIFT" else "flatdoor" if common
+                else "bath" if cat == "BATHROOM" else "pooja" if cat == "POOJA" else "service" if on_edge else "internal")
         right = d.swing_direction != "LEFT"
         closed = (0.0 if right else 180.0) if horiz else (90.0 if right else 270.0)
         opened = {"N": 270.0, "S": 90.0, "E": 180.0, "W": 0.0}[d.wall_side]
@@ -428,7 +505,7 @@ def _stair(sc, base: float, storey: float, external: bool, top: Optional[float] 
         if s0 > 0.05:
             out["block1"].append(rect_of(P, 0, s0, 0, Wd))
         out.update(top=_r(z_top), n=n, riser=r, tread=tt)
-        return out
+        return _tag_halves(out, base, z_top)
 
     gap = 0.1
     fw = (Wd - gap) / 2
@@ -498,6 +575,14 @@ def _stair(sc, base: float, storey: float, external: bool, top: Optional[float] 
             a, b = ((piece[0], c), (piece[2], c)) if horiz else ((c, piece[1]), (c, piece[3]))
             rail([a + (z_top + 0.9,), b + (z_top + 0.9,)])
     out.update(top=_r(z_top), n=n, riser=r, tread=tt)
+    return _tag_halves(out, base, z_top)
+
+
+def _tag_halves(out: Dict, base: float, z_top: float) -> Dict:
+    """Seventh number of every stair box: 0 on the lower half of the climb, 1 on the upper half.
+    The walker belongs to the floor below on the lower half and to the floor above on the upper one."""
+    mid = (base + z_top) / 2
+    out["boxes"] = [b[:6] + [1 if b[5] > mid + 1e-6 else 0] for b in out["boxes"]]
     return out
 
 
@@ -843,21 +928,61 @@ def _room_story(r, row, vrow, wins_c, items, stair_info=None) -> Tuple[str, str]
 # Scene
 # =============================================================================
 
-def build_scene(plan, latitude: Optional[float] = None, state: Optional[str] = None) -> Dict:
-    """The JSON scene for the 3D walk-through (see the module docstring)."""
-    lv = levels(plan)
-    W, H = float(plan.plot_width), float(plan.plot_height)
-    rooms_all = list(plan.rooms)
-    building = [r for r in rooms_all if not _is_site(r) and r.w > 0 and r.h > 0]
-    fp = getattr(plan, "building_footprint", None)
-    footprint = tuple(fp) if fp and len(fp) == 4 and fp[2] > 0 else building_footprint(rooms_all)
-    fx, fy, fw, fd = footprint
-    df = build_drafting(plan)
-    walls, wins, doors, arches = _walls(plan, lv, df.windows, footprint)
-    sides = plan_sides_for_facing(getattr(plan, "orientation", "N"))
-    compass = {s: sides[p] for s, p in (("N", "top"), ("S", "bottom"), ("E", "right"), ("W", "left"))}
+def _side_t(walls, horiz: bool, line: float, a: float, b: float, default: float) -> float:
+    """Thickest wall lying on `line` across [a, b] (a lift shaft's side)."""
+    best = 0.0
+    for w in walls:
+        if getattr(w, "wall_type", "") == "compound" or _horiz(w) != horiz:
+            continue
+        lo, hi, ln = _span(w)
+        if abs(ln - line) < 0.03 and hi > a + 0.05 and lo < b - 0.05:
+            best = max(best, w.thickness)
+    return best or default
 
-    # rooms
+
+def _lift_scene(plan, doors: List[Dict], level_list: List[Dict], roof_z: float) -> Optional[Dict]:
+    """The working lift: shaft, door, stops, car and machine (walk.js builds and runs it)."""
+    lr = next((r for r in plan.rooms if r.category == "LIFT" and r.w > 0 and r.h > 0), None)
+    ld = next((d for d in doors if d["kind"] == "lift"), None)
+    if lr is None or ld is None:
+        return None
+    eng = getattr(plan, "engineering", None) or {}
+    info = eng.get("lift") or {}
+    tower = bool(info.get("tower")) and "External" in lr.name
+    persons = int(info.get("persons") or 4)
+    car = lift_car(persons)
+    x0, y0, x1, y1 = lr.x, lr.y, lr.right, lr.top
+    dflt = 0.23 if tower else 0.115
+    clear = [x0 + _side_t(plan.walls, False, x0, y0, y1, dflt) / 2, y0 + _side_t(plan.walls, True, y0, x0, x1, dflt) / 2,
+             x1 - _side_t(plan.walls, False, x1, y0, y1, dflt) / 2, y1 - _side_t(plan.walls, True, y1, x0, x1, dflt) / 2]
+    stops = []
+    for lvl in level_list:
+        if lvl["kind"] not in ("rooms", "stilt"):
+            continue
+        stilt = lvl["kind"] == "stilt"
+        stops.append({"L": lvl["i"], "z": 0.0 if (stilt and tower) else lvl["z"],
+                      "label": "P" if stilt else ("G" if lvl["i"] == 0 else str(lvl["i"])), "name": lvl["label"]})
+    if len(stops) < 2:
+        return None
+    overhead = 4.2
+    head = max(roof_z + 1.2, stops[-1]["z"] + overhead)
+    apt = eng.get("apartment")
+    return {
+        "room": _rect(x0, y0, x1, y1), "clear": [_r(v) for v in clear], "tower": tower,
+        "outer": [_r(v) for v in info["tower"]] if tower else None,
+        "door": {"mid": ld["mid"], "n": ld["n"], "w": ld["w"], "t": ld["t"], "horiz": ld["horiz"]},
+        "stops": stops, "roof": _r(roof_z), "head": _r(head), "pit": 1.5,
+        "persons": persons, "load": int(info.get("load_kg") or persons * 68),
+        "car": {"w": car["w"], "d": car["d"], "h": 2.2}, "door_clear": car["door"], "fits": car["fits"],
+        "words": car["words"], "speed": 1.0 if len(stops) >= 4 or apt else 0.7, "acc": 0.8,
+        "position": info.get("position") or ("core" if apt else "inside"), "layout": info.get("layout"),
+        "landing": info.get("landing"), "entry": info.get("entry"),
+        "movable": (not apt or apt.get("kind") == "house") and "duplex" not in (getattr(plan, "building_type", "") or "").lower(),
+    }
+
+
+def _rooms_scene(plan, building, wins, df, compass) -> List[Dict]:
+    """Room cards (size, Vastu zone, what fits, a spoken note) of one floor."""
     sched = {row["name"]: row for row in room_schedule(plan)["rows"]}
     vrows = {row["room"]: row for row in (getattr(plan, "vastu_breakdown", None) or {}).get("rooms", [])}
     wins_by_room: Dict[str, List[str]] = {}
@@ -881,6 +1006,61 @@ def build_scene(plan, latitude: Optional[float] = None, state: Optional[str] = N
             "zone": (vrow or {}).get("zone") or (row or {}).get("zone", ""),
             "zone_word": ZONE_WORDS.get((vrow or {}).get("zone") or (row or {}).get("zone", ""), ""),
             "vastu": rating, "windows": len(wins_by_room.get(r.name, [])), "say": say})
+    return rooms
+
+
+def _floor_grid(new_grid, walls, items, lifts, building, lv, tower_o=None) -> "_Grid":
+    """Walking grid of one floor plate: body-height walls, furniture, lift shafts, ducts."""
+    g = new_grid()
+    for kind in ("ext", "int", "post", "parapet"):
+        for bx in walls[kind]:
+            if bx[4] < lv["ffl"] + 1.2:                       # body-height walls only
+                g.block(bx[0], bx[1], bx[2], bx[3], BODY_R)
+    for it in items:
+        fr = _furniture_rect(it)
+        if fr:
+            g.block(fr[0], fr[1], fr[2], fr[3], 0.1 if fr[4] else 0.05)   # near plane 0.05 m: no clipping
+    for x0, y0, x1, y1 in lifts:
+        g.block(x0, y0, x1, y1, 0.05)
+    if tower_o:
+        g.block(tower_o[0], tower_o[1], tower_o[2], tower_o[3], BODY_R)
+    for r in building:
+        if "Duct" in r.name:
+            g.block(r.x, r.y, r.right, r.top, 0.05)
+    return g
+
+
+def build_scene(plan, latitude: Optional[float] = None, state: Optional[str] = None) -> Dict:
+    """The JSON scene for the 3D walk-through (see the module docstring)."""
+    lv = levels(plan)
+    W, H = float(plan.plot_width), float(plan.plot_height)
+    rooms_all = list(plan.rooms)
+    building = [r for r in rooms_all if not _is_site(r) and r.w > 0 and r.h > 0]
+    fp = getattr(plan, "building_footprint", None)
+    footprint = tuple(fp) if fp and len(fp) == 4 and fp[2] > 0 else building_footprint(rooms_all)
+    fx, fy, fw, fd = footprint
+    df = build_drafting(plan)
+    walls, wins, doors, arches = _walls(plan, lv, df.windows, footprint)
+    sides = plan_sides_for_facing(getattr(plan, "orientation", "N"))
+    compass = {s: sides[p] for s, p in (("N", "top"), ("S", "bottom"), ("E", "right"), ("W", "left"))}
+
+    # rooms
+    rooms = _rooms_scene(plan, building, wins, df, compass)
+
+    # a duplex's first floor: its own walls, doors, windows, rooms and furniture over the same footprint
+    up_plan = getattr(plan, "upper_plan", None)
+    up = None
+    if up_plan is not None:
+        ub = [r for r in up_plan.rooms if not _is_site(r) and r.w > 0 and r.h > 0]
+        udf = build_drafting(up_plan)
+        uwalls, uwins, udoors, uarches = _walls(up_plan, levels(plan), udf.windows, footprint)
+        for d in udoors:
+            d["upper"] = None
+        up = {"walls": {k: uwalls[k] for k in ("ext", "int", "post", "parapet")}, "windows": uwins,
+              "doors": udoors, "arches": uarches, "rooms": _rooms_scene(up_plan, ub, uwins, udf, compass),
+              "floors": [{"r": _rect(r.x, r.y, r.right, r.top), "cat": r.category, "name": r.name,
+                          "ground_only": False} for r in ub if r.category != "LIFT"],
+              "furniture": [_jsonable(it) for it in udf.items]}
 
     # stairs (each raised to the level it serves) and lift
     e = 0.115
@@ -898,7 +1078,7 @@ def build_scene(plan, latitude: Optional[float] = None, state: Optional[str] = N
         ys = [b[1] for b in g["boxes"]] + [b[3] for b in g["boxes"]]
         g.update({"name": sc.name, "r": _rect(sc.x, sc.y, sc.x + sc.w, sc.y + sc.h), "external": external,
                   "steps": int(g.pop("n")), "riser_mm": round(g.pop("riser") * 1000), "tread_mm": round(g.pop("tread") * 1000),
-                  "low": _r(base), "mid": _r((base + g["top"]) / 2),
+                  "low": _r(base), "mid": _r((base + g["top"]) / 2), "ls": 0 if external else (1 if lv["stilt"] else 0),
                   "wr": [_r(min(xs)), _r(min(ys)), _r(max(xs)), _r(max(ys))]})
         stairs.append(g)
     lifts = [_rect(r.x, r.y, r.right, r.top) for r in building if r.category == "LIFT"]
@@ -908,7 +1088,8 @@ def build_scene(plan, latitude: Optional[float] = None, state: Optional[str] = N
     roof_z = lv["ffl"] + lv["storey"] * n_floors
     bridges = [s["bridge"] for s in stairs if s.get("bridge")] if n_floors == 1 else []
     parapet = [pc + [_r(roof_z), _r(roof_z + PARAPET_H)] for b in _ring(outer, 0.15) for pc in _minus(b, bridges)]
-    shell = {"outer": [_r(v) for v in outer], "slab": _minus(outer, internal_stairs),
+    wells = [_rect(r.x, r.y, r.right, r.top) for r in building if "OTS" in r.name]
+    shell = {"outer": [_r(v) for v in outer], "slab": _minus(outer, internal_stairs + lifts + wells),
              "slab_z": [_r(lv["ffl"] + lv["ceiling"]), _r(lv["ffl"] + lv["storey"])],
              "roof_z": _r(roof_z), "floors": n_floors, "parapet": parapet,
              "mumty": internal_stairs[0] if internal_stairs else None}
@@ -921,7 +1102,8 @@ def build_scene(plan, latitude: Optional[float] = None, state: Optional[str] = N
         shell["mumty_roof"] = [_r(m[0] - 0.2), _r(m[1] - 0.2), _r(m[2] + 0.2), _r(m[3] + 0.2), _r(roof_z + 2.4), _r(roof_z + 2.52)]
 
     # floors and ceilings by room
-    floors = [{"r": _rect(r.x, r.y, r.right, r.top), "cat": r.category, "name": r.name} for r in building]
+    floors = [{"r": _rect(r.x, r.y, r.right, r.top), "cat": r.category, "name": r.name,
+               "ground_only": r.category == "LIFT" or "OTS" in r.name} for r in building]
 
     # site
     site, cars, bikes, trees = [], [], [], []
@@ -936,114 +1118,237 @@ def build_scene(plan, latitude: Optional[float] = None, state: Optional[str] = N
         elif r.category == "GARDEN":
             trees += _trees(r)
     stilt = None
+    eng_all = getattr(plan, "engineering", None) or {}
     if lv["stilt"]:
         cols = [list(map(_r, c)) for c in (df.grid.columns if df.grid else [])]
-        slots = int((getattr(plan, "additional_components", {}) or {}).get("car_parking", {}).get("slots", 1) or 1)
-        bay = (fx + 0.4, fy + fd - min(fd - 0.8, 5.2), fx + fw - 0.4, fy + fd - 0.4)
         stilt_cars = []
-        width = (bay[2] - bay[0]) / max(1, slots)
-        for i in range(slots):
-            stilt_cars.append({"c": [_r(bay[0] + (i + 0.5) * width), _r((bay[1] + bay[3]) / 2)], "along": "y",
-                               "L": _r(min(4.5, bay[3] - bay[1] - 0.3)), "W": _r(min(1.8, width * 0.7)), "i": i,
-                               "stilt": True})
+        bays = (eng_all.get("stilt") or {}).get("bays")
+        if bays is not None:                     # the engine's stilt bays: clear of the core and the columns
+            from floorplan_generator.gates import CARS
+            dims = CARS.get((eng_all.get("stilt") or {}).get("car", "suv"), CARS["suv"])
+            for i, b in enumerate(bays):
+                stilt_cars.append({"c": [_r((b[0] + b[2]) / 2), _r((b[1] + b[3]) / 2)], "along": "y",
+                                   "L": _r(dims["L"]), "W": _r(dims["W"]), "i": i, "stilt": True})
+        else:
+            slots = int((getattr(plan, "additional_components", {}) or {}).get("car_parking", {}).get("slots", 1) or 1)
+            bay = (fx + 0.4, fy + fd - min(fd - 0.8, 5.2), fx + fw - 0.4, fy + fd - 0.4)
+            width = (bay[2] - bay[0]) / max(1, slots)
+            for i in range(slots):
+                stilt_cars.append({"c": [_r(bay[0] + (i + 0.5) * width), _r((bay[1] + bay[3]) / 2)], "along": "y",
+                                   "L": _r(min(4.5, bay[3] - bay[1] - 0.3)), "W": _r(min(1.8, width * 0.7)), "i": i,
+                                   "stilt": True})
         cars += stilt_cars
         stilt = {"h": _r(lv["ffl"] - 0.15), "columns": cols}
 
-    gates = [[_r(a), _r(b)] for a, b in _gates(plan)]
+    gates = _gate_list(plan)
+    road_w = float(eng_all.get("road_m") or ROAD_W)
+    drive = None
+    dv = eng_all.get("drive")
+    if dv and dv.get("path") and gates:
+        px, py = dv["park"]
+        near = min(range(len(cars)), key=lambda i: math.hypot(cars[i]["c"][0] - px, cars[i]["c"][1] - py), default=None)
+        if near is not None and math.hypot(cars[near]["c"][0] - px, cars[near]["c"][1] - py) < 1.6:
+            cars[near]["drive"] = True           # walk.js parks the drive-in car here instead
+        gi = next((i for i, g in enumerate(gates) if g["kind"].startswith("vehicle")), None)
+        drive = {"path": dv["path"], "dims": dv["dims"], "label": dv.get("label", ""), "gate": gi,
+                 "park": dv["park"], "stilt": bool(lv["stilt"])}
     main = next((d for d in plan.doors if d.is_main_entrance), None)
     steps = []
     landing_foot = None
+    lift_eng = (getattr(plan, "engineering", None) or {}).get("lift") or {}
+    lift_land = lift_eng.get("landing") if lift_eng.get("tower") else None
     if main is not None and not lv["stilt"]:
         a, b = door_span(main)
         ox, oy = OUT[main.wall_side]
         line = main.y if main.wall_side in ("N", "S") else main.x
         horiz = main.wall_side in ("N", "S")
         lo, hi = a - 0.3, b + 0.3
+        plat, plo, phi = 1.2, lo, hi
+        if lift_land and lift_eng.get("entry") == "main door" and main.wall_side == "N":
+            plat = _r(max(1.2, lift_land[3] - line))               # the porch reaches the lift door
+            plo, phi = min(lo, lift_land[0]), max(hi, lift_land[2])
         rises = [lv["ffl"]] + [lv["ffl"] * (1 - k / 4) for k in (1, 2, 3)]
-        depth = [(0.0, 1.2)] + [(1.2 + (k - 1) * 0.3, 1.2 + k * 0.3) for k in (1, 2, 3)]
-        for z, (d0, d1) in zip(rises, depth):
+        depth = [(0.0, plat)] + [(plat + (k - 1) * 0.3, plat + k * 0.3) for k in (1, 2, 3)]
+        for k, (z, (d0, d1)) in enumerate(zip(rises, depth)):
             s0, s1 = (line + d0, line + d1) if (ox + oy) > 0 else (line - d1, line - d0)
-            steps.append((_rect(lo, s0, hi, s1) if horiz else _rect(s0, lo, s1, hi)) + [0.0, _r(z)])
-        far = 1.2 + 3 * 0.3 + 0.6
+            l0, l1 = (plo, phi) if k == 0 else (lo, hi)
+            steps.append((_rect(l0, s0, l1, s1) if horiz else _rect(s0, l0, s1, l1)) + [0.0, _r(z)])
+        far = plat + 3 * 0.3 + 0.6
         mid = (a + b) / 2
         landing_foot = (mid, line + oy * far) if horiz else (line + ox * far, mid)
+    if lift_land and lift_eng.get("entry") == "side door" and not lv["stilt"]:
+        lx0, ly0, lx1, ly1 = lift_land                             # side landing: a porch at floor level
+        rises = [lv["ffl"]] + [lv["ffl"] * (1 - k / 4) for k in (1, 2, 3)]
+        spans = [(ly0, ly1)] + [(ly1 + (k - 1) * 0.3, ly1 + k * 0.3) for k in (1, 2, 3)]
+        for z, (s0, s1) in zip(rises, spans):
+            steps.append(_rect(lx0, s0, lx1, s1) + [0.0, _r(z)])
 
-    # walking grid
-    grid = _Grid(-1.0, -1.0, W + 1.0, H + VERGE + 4.0)
-    for kind in ("ext", "int", "post", "cmp", "pillar"):
-        for bx in walls[kind]:
-            if bx[4] < 1.2 + (lv["ffl"] if kind in ("ext", "int", "post") else 0):   # body-height walls only
-                grid.block(bx[0], bx[1], bx[2], bx[3], BODY_R)
-    for it in df.items:
-        fr = _furniture_rect(it)
-        if fr:
-            grid.block(fr[0], fr[1], fr[2], fr[3], 0.1 if fr[4] else 0.05)   # near plane 0.05 m: no clipping
-    for x0, y0, x1, y1 in lifts:
-        grid.block(x0, y0, x1, y1, 0.05)
-    for r in building:
-        if "Duct" in r.name:
-            grid.block(r.x, r.y, r.right, r.top, 0.05)
-    for s in site:
-        x0, y0, x1, y1 = s["r"]
-        if s["cat"] == "POOL":
-            grid.block(x0, y0, x1, y1, 0.15)
-        elif s["cat"] in ("GENERATOR", "SECURITY"):
-            grid.block(x0, y0, x1, y1, BODY_R)
-    for c in cars:
-        if c.get("stilt"):          # parked on the floor below the house
+    # levels: [stilt,] the designed floor repeated n times, terrace
+    apt = (getattr(plan, "engineering", None) or {}).get("apartment")
+    stilt_on = bool(lv["stilt"])
+    r0 = 1 if stilt_on else 0
+    top_level = r0 + n_floors
+    base0 = 0.15 if stilt_on else lv["ffl"]
+    level_list = []
+    for L in range(top_level + 1):
+        kind = "stilt" if (stilt_on and L == 0) else ("terrace" if L == top_level else "rooms")
+        label = ("Stilt parking" if kind == "stilt" else "Terrace" if kind == "terrace"
+                 else "Ground floor" if L == 0 else f"Floor {L}")
+        level_list.append({"i": L, "kind": kind, "z": _r(base0 + L * lv["storey"]), "label": label,
+                           "plan": 1 if (up is not None and kind == "rooms" and L > r0) else 0})
+
+    # above the ground an outside door opens onto a balcony; a building entrance becomes wall or parapet
+    balconies = []
+    for d in doors:
+        d["upper"] = None
+        if d["kind"] not in ("main", "service") or up is not None:     # a duplex: the first floor has its own plan
             continue
-        hl, hw = (c["L"] / 2, c["W"] / 2) if c["along"] == "x" else (c["W"] / 2, c["L"] / 2)
-        grid.block(c["c"][0] - hl, c["c"][1] - hw, c["c"][0] + hl, c["c"][1] + hw, 0.15)
-    for bk in bikes:
-        hl, hw = (bk["L"] / 2, 0.35) if bk["along"] == "x" else (0.35, bk["L"] / 2)
-        grid.block(bk["c"][0] - hl, bk["c"][1] - hw, bk["c"][0] + hl, bk["c"][1] + hw, 0.05)
-    for tx, ty, _ in trees:
-        grid.block(tx - 0.15, ty - 0.15, tx + 0.15, ty + 0.15, 0.1)
-    # stay on the plot (the road strip in front stays walkable)
-    grid.block(-5, -5, 0.0, H + 50, BODY_R)
-    grid.block(W, -5, W + 5, H + 50, BODY_R)
-    grid.block(-5, -5, W + 5, 0.0, BODY_R)
-    if lv["stilt"]:
-        grid.keep_only(fx, fy, fx + fw, fy + fd)
+        ox, oy = -d["n"][0], -d["n"][1]                       # out of the house
+        if lift_land and lift_land[0] - 0.05 <= d["mid"][0] + ox * 0.4 <= lift_land[2] + 0.05 and \
+                lift_land[1] - 0.05 <= d["mid"][1] + oy * 0.4 <= lift_land[3] + 0.05:
+            rc = [_r(v) for v in lift_land]                    # the lift landing on every floor
+            d["upper"] = "balcony"
+            d["balcony"] = rc
+            balconies.append(rc)
+            continue
+        if apt and d["kind"] == "main":
+            d["upper"] = "wall" if apt.get("flats_per_floor") == 1 and apt.get("kind") != "house" else "parapet"
+            continue
+        ca = math.radians(d["closed"])
+        hx, hy = d["hinge"]
+        ex, ey = hx + round(math.cos(ca)) * d["w"], hy + round(math.sin(ca)) * d["w"]
+        if d["horiz"]:
+            a, b = sorted((hx, ex))
+            y0, y1 = sorted((hy, hy + oy * 1.2))
+            rc = _rect(a - 0.3, y0, b + 0.3, y1)
+        else:
+            a, b = sorted((hy, ey))
+            x0, x1 = sorted((hx, hx + ox * 1.2))
+            rc = _rect(x0, a - 0.3, x1, b + 0.3)
+        d["upper"] = "balcony"
+        d["balcony"] = rc
+        balconies.append(rc)
 
-    # walking grids for the browser: the house / ground level with climbable stairs, and the level above
-    walk0 = grid.like()
-    for s in stairs:
-        for rc in s["barrier"]:
-            walk0.set(rc, False, 0.12, clip=s["r"])
-        for rc in s["block0"]:
-            walk0.set(rc, False, clip=s["r"])
-    walk1 = grid.like(free=False)
-    keep = (0.15 if n_floors == 1 else 0.23) + BODY_R                 # parapet / upper-floor outline
+    # walking grids: the designed floor (walls, furniture, lift, ducts) …
+    def new_grid():
+        return _Grid(-1.0, -1.0, W + 1.0, H + VERGE + 4.0)
+
+    tower_o = lift_eng.get("tower") if lift_land else None
+    house = _floor_grid(new_grid, walls, df.items, lifts, building, lv, tower_o)
+    house_up = house
+    if up is not None:
+        house_up = _floor_grid(new_grid, up["walls"], udf.items, lifts, ub, lv, tower_o)
+
+    def outdoors(g, under_house: bool):
+        for kind in ("cmp", "pillar"):
+            for bx in walls[kind]:
+                g.block(bx[0], bx[1], bx[2], bx[3], BODY_R)
+        for st_ in site:
+            x0, y0, x1, y1 = st_["r"]
+            if st_["cat"] == "POOL":
+                g.block(x0, y0, x1, y1, 0.15)
+            elif st_["cat"] in ("GENERATOR", "SECURITY"):
+                g.block(x0, y0, x1, y1, BODY_R)
+        for c in cars:
+            if c.get("stilt") and not under_house:
+                continue
+            hl, hw = (c["L"] / 2, c["W"] / 2) if c["along"] == "x" else (c["W"] / 2, c["L"] / 2)
+            g.block(c["c"][0] - hl, c["c"][1] - hw, c["c"][0] + hl, c["c"][1] + hw, 0.15)
+        for bk in bikes:
+            hl, hw = (bk["L"] / 2, 0.35) if bk["along"] == "x" else (0.35, bk["L"] / 2)
+            g.block(bk["c"][0] - hl, bk["c"][1] - hw, bk["c"][0] + hl, bk["c"][1] + hw, 0.05)
+        for tx, ty, _ in trees:
+            g.block(tx - 0.15, ty - 0.15, tx + 0.15, ty + 0.15, 0.1)
+        g.block(-5, -5, 0.0, H + 50, BODY_R)                   # stay on the plot (the road in front is open)
+        g.block(W, -5, W + 5, H + 50, BODY_R)
+        g.block(-5, -5, W + 5, 0.0, BODY_R)
+
+    # … the ground level (house + yard, or the stilt with its columns and cars) …
+    if stilt_on:
+        g0 = new_grid()
+        outdoors(g0, True)
+        for c in (stilt or {}).get("columns", []):
+            g0.block(c[0], c[1], c[2], c[3], 0.15)
+        for x0, y0, x1, y1 in lifts:
+            g0.block(x0, y0, x1, y1, 0.05)
+        if tower_o:
+            g0.block(tower_o[0], tower_o[1], tower_o[2], tower_o[3], BODY_R)
+    else:
+        g0 = house.like()
+        outdoors(g0, False)
+    # … every upper floor with rooms: the floor plate and its balconies only …
+    gt = house_up.like()
+    gt.keep_only(fx - 0.01, fy - 0.01, fx + fw + 0.01, fy + fd + 0.01)
+    for rc in balconies:
+        gt.set(rc, True, 0.01)
+    for d in doors:
+        if d.get("upper") in ("wall", "parapet"):             # the opening is closed up there
+            ca = math.radians(d["closed"])
+            hx, hy = d["hinge"]
+            ex, ey = hx + round(math.cos(ca)) * d["w"], hy + round(math.sin(ca)) * d["w"]
+            t2 = d["t"] / 2
+            if d["horiz"]:
+                gt.block(min(hx, ex), hy - t2, max(hx, ex), hy + t2, BODY_R)
+            else:
+                gt.block(hx - t2, min(hy, ey), hx + t2, max(hy, ey), BODY_R)
+    for x0, y0, x1, y1 in balconies:                            # railing round the balcony
+        gt.set([x0, y0, x1, y1], False, 0.0)
+        gt.set([x0 + 0.2, y0 + 0.2, x1 - 0.2, y1 - 0.2], True, 0.01)
+    if tower_o:
+        gt.block(tower_o[0], tower_o[1], tower_o[2], tower_o[3], BODY_R)
+    for d in doors:
+        if d.get("balcony"):
+            gt.set([d["mid"][0] - 0.35, d["mid"][1] - 0.35, d["mid"][0] + 0.35, d["mid"][1] + 0.35], True, 0.0)
+    # stairs: climbable on every floor, the arrival closed on the ground, the foot closed on the terrace
+    for st_ in stairs:
+        for g in (g0, gt):
+            for rc in st_["barrier"]:
+                g.set(rc, False, 0.12, clip=st_["r"])
+        for rc in st_["block0"]:
+            g0.set(rc, False, clip=st_["r"])
+    walk1 = g0.like(free=False)
+    keep = 0.15 + BODY_R                                         # the terrace parapet
     walk1.set([outer[0] + keep, outer[1] + keep, outer[2] - keep, outer[3] - keep], True)
-    if n_floors == 1:
-        for b in shell.get("mumty_walls", []):
-            walk1.set(b, False, BODY_R)
-    for s in stairs:
-        sl = walk1.span(s["r"], 0.01)            # +1 cm: cells centred exactly on an edge belong to both sides
+    for b in shell.get("mumty_walls", []):
+        walk1.set(b, False, BODY_R)
+    for rc in wells + lifts:
+        walk1.set(rc, False, 0.3)
+    for st_ in stairs:
+        src = g0 if (st_["external"] or n_floors == 1) else gt
+        sl = walk1.span(st_["r"], 0.01)            # +1 cm: cells centred exactly on an edge belong to both sides
         if sl:
-            walk1.free[sl] = walk0.free[sl]
-        for rc in s["block1"]:
-            walk1.set(rc, False, clip=s["r"])
-        for rc in s["free1"]:
+            walk1.free[sl] = src.free[sl]
+        for rc in st_["block1"]:
+            walk1.set(rc, False, clip=st_["r"])
+        for rc in st_["free1"]:
             walk1.set(rc, True, 0.01)
-        for rc in s["barrier"]:
-            walk1.set(rc, False, 0.12, clip=s["r"])
-        for rc in s["ring"]:
+        for rc in st_["barrier"]:
+            walk1.set(rc, False, 0.12, clip=st_["r"])
+        for rc in st_["ring"]:
             walk1.set(rc, False, 0.12)
-    # the tour stays on the ground floor: stairs are only looked at
-    for s in stairs:
-        x0, y0, x1, y1 = s["r"]
-        grid.block(x0, y0, x1, y1, 0.05)
-    for s in stairs:
+    # the guided tour stays on the designed floor: stairs are only looked at
+    tg = (gt if stilt_on else g0).like()
+    for st_ in stairs:
+        x0, y0, x1, y1 = st_["r"]
+        tg.block(x0, y0, x1, y1, 0.05)
+    for st_ in stairs:
         for k in ("block0", "block1", "free1", "barrier", "ring"):
-            s.pop(k, None)
+            st_.pop(k, None)
+    walk0 = g0
+    grid = tg
 
-    # ground heights the walker stands on (max of the rectangles under the feet)
-    ground = [[_r(fx - 0.12), _r(fy - 0.12), _r(fx + fw + 0.12), _r(fy + fd + 0.12), lv["ffl"]]]
-    ground += [s[:4] + [s[5]] for s in steps]
+    # ground heights the walker stands on at the ground level (max of the rectangles under the feet)
+    if stilt_on:
+        ground = [[_r(fx - 0.12), _r(fy - 0.12), _r(fx + fw + 0.12), _r(fy + fd + 0.12), 0.15]]
+    else:
+        ground = [[_r(fx - 0.12), _r(fy - 0.12), _r(fx + fw + 0.12), _r(fy + fd + 0.12), lv["ffl"]]]
+        ground += [st_[:4] + [st_[5]] for st_ in steps]
 
-    tour = _tour(plan, grid, lv, rooms, building, doors, gates, landing_foot, stairs, footprint, compass, main)
+    wg = _walk_gate(gates)
+    tour = _tour(plan, grid, lv, rooms, building, doors, [wg] if wg else [], landing_foot, stairs, footprint,
+                 compass, main, apt)
+    if up is not None:
+        tour = _tour_upstairs(tour, gt, stairs, up, ub, r0 + 1)
 
     # Vastu mandala over the building (3×3) for the overlay
     eng = VastuEngine.for_plan(plan, scope="building")
@@ -1071,14 +1376,22 @@ def build_scene(plan, latitude: Optional[float] = None, state: Optional[str] = N
         "rooms": rooms, "floors": floors, "walls": walls, "windows": wins, "doors": doors, "arches": arches,
         "stairs": stairs, "lifts": lifts, "shell": shell, "furniture": [_jsonable(it) for it in df.items],
         "site": site, "cars": cars, "bikes": bikes, "trees": trees, "gates": gates, "steps": steps,
+        "drive": drive,
         "stilt": stilt, "ground": ground, "mandala": mandala,
         "brahmasthan": [_r(v) for v in df.brahmasthan] if df.brahmasthan else None,
-        "road": {"y0": _r(H + VERGE), "y1": _r(H + VERGE + ROAD_W)},
+        "road": {"y0": _r(H + VERGE), "y1": _r(H + VERGE + road_w), "w": _r(road_w)},
         "nav": {"x0": walk0.x0, "y0": walk0.y0, "nx": walk0.nx, "ny": walk0.ny, "cell": CELL, "r": BODY_R,
                 "bits": walk0.encode()},
         "nav1": {"x0": walk1.x0, "y0": walk1.y0, "nx": walk1.nx, "ny": walk1.ny, "cell": CELL, "r": BODY_R,
                  "bits": walk1.encode()},
-        "upper": {"z": _r(upper_z), "kind": "terrace" if n_floors == 1 else "floor"},
+        "nav_typ": ({"x0": gt.x0, "y0": gt.y0, "nx": gt.nx, "ny": gt.ny, "cell": CELL, "r": BODY_R, "bits": gt.encode()}
+                    if top_level > 1 else None),
+        "levels_list": level_list, "r0": r0, "top": top_level, "balconies": balconies, "tour_level": r0,
+        "upper": up and {k: v for k, v in up.items()},
+        "duplex": (getattr(plan, "engineering", None) or {}).get("duplex"),
+        "lift": _lift_scene(plan, doors, level_list, roof_z),
+        "apartment": apt,
+        "upper_level": {"z": _r(upper_z), "kind": "terrace" if n_floors == 1 else "floor"},
         "tour": tour,
     }
 
@@ -1099,7 +1412,8 @@ def _jsonable(it: Dict) -> Dict:
 # Guided tour
 # =============================================================================
 
-def _tour(plan, grid: _Grid, lv, rooms, building, doors, gates, landing_foot, stairs, footprint, compass, main) -> List[Dict]:
+def _tour(plan, grid: _Grid, lv, rooms, building, doors, gates, landing_foot, stairs, footprint, compass, main,
+          apt: Optional[Dict] = None) -> List[Dict]:
     W, H = plan.plot_width, plan.plot_height
     fx, fy, fw, fd = footprint
     clear = grid.clearance()
@@ -1129,9 +1443,12 @@ def _tour(plan, grid: _Grid, lv, rooms, building, doors, gates, landing_foot, st
 
     # a viewpoint in every room: roomy free spot near the centre, else peek in from its door
     stops = []
+    first_flat = ((apt or {}).get("labels") or [""])[0]
     for r in building:
         if r.category in NOT_STOPS or "Duct" in r.name or r.w * r.h < 1.2:
             continue
+        if apt and first_flat and " · " in r.name and not r.name.startswith(first_flat + " · "):
+            continue                     # one flat is shown; the others on the floor have the same plan
         best = None
         i0, j0 = grid.cell(r.x + 0.15, r.y + 0.15)
         i1, j1 = grid.cell(r.right - 0.15, r.top - 0.15)
@@ -1176,6 +1493,19 @@ def _tour(plan, grid: _Grid, lv, rooms, building, doors, gates, landing_foot, st
     if lv["stilt"]:
         intro = (f"Welcome to your new home on a {cents:.1f} cent plot. The car parks on the stilt floor below; "
                  "the house starts one floor up. You are standing inside, at the main door.")
+    if apt:
+        n, floors = apt.get("flats_per_floor", 1), max(1, int(getattr(plan, "num_floors", 1) or 1))
+        intro = (f"Welcome. This apartment building stands on a {cents:.1f} cent plot facing {facing_word}: "
+                 f"{floors} floor{'s' if floors > 1 else ''} with {n} flat{'s' if n > 1 else ''} on each — "
+                 f"{n * floors} homes, every one a {apt.get('flat_bhk', plan.bhk_config)} of "
+                 f"{apt.get('flat_carpet_m2', 0):.0f} square metres.")
+        if apt.get("kind") == "house":
+            intro = (f"Welcome. This house stands on a {cents:.1f} cent plot facing {facing_word}: {floors} floors, "
+                     f"a {apt.get('flat_bhk', plan.bhk_config)} home on each, every one with its own front door on the "
+                     "stair lobby — so each floor can be its own family's home. We walk through the ground-floor home; "
+                     "the floors above are the same.")
+        if lv["stilt"]:
+            intro += " Cars park on the stilt floor; we start on the first floor."
     target_main = None
     m = next((d for d in doors if d["kind"] == "main"), None)
     if m is not None:
@@ -1197,7 +1527,15 @@ def _tour(plan, grid: _Grid, lv, rooms, building, doors, gates, landing_foot, st
             if bd.get("entrance_pada"):
                 say += f", in pada {bd['entrance_pada']} — {vtxt}" if vtxt else f", in pada {bd['entrance_pada']}"
             say += f". Three steps take you up {int(lv['plinth'] * 100)} centimetres to the floor level."
-            tour.append({"kind": "door", "title": "Main door", "say": say,
+            title = "Main door"
+            if apt:
+                lobby = apt.get("lobby", "lobby").lower()
+                lift_txt = "the lift, " if any(r.category == "LIFT" for r in building) else ""
+                who = "every floor's home" if apt.get("kind") == "house" else "every flat"
+                say = (f"This is the building's entrance. The stair, {lift_txt}and the front door of {who} open "
+                       f"onto the {lobby}. Three steps take you up {int(lv['plinth'] * 100)} centimetres.")
+                title = "Building entrance"
+            tour.append({"kind": "door", "title": title, "say": say,
                          "path": [pt(c) for c in grid.smooth(grid.path(par, target_main))], "look": look_main, "pan": 0})
             cur = target_main
 
@@ -1245,6 +1583,70 @@ def _tour(plan, grid: _Grid, lv, rooms, building, doors, gates, landing_foot, st
                  "say": "That was the whole house. Now see it from above — every room at once.",
                  "path": [], "look": None, "pan": 0})
     return tour
+
+
+def _tour_upstairs(tour: List[Dict], gt: "_Grid", stairs, up: Dict, ub, level: int) -> List[Dict]:
+    """A duplex: after the ground floor, climb the stair and visit every room of the first floor."""
+    inner = next((s for s in stairs if not s["external"]), None)
+    if inner is None:
+        return tour
+    tg = gt.like()
+    x0, y0, x1, y1 = inner["r"]
+    tg.block(x0, y0, x1, y1, 0.05)
+    ex = inner.get("exit")
+    arr = None
+    if ex:
+        cx, cy = (ex[0] + ex[2]) / 2, (ex[1] + ex[3]) / 2
+        arr = tg.nearest_free(cx, cy, 1.6)
+    if arr is None:
+        arr = tg.nearest_free((x0 + x1) / 2, (y0 + y1) / 2, 2.5)
+    if arr is None:
+        return tour
+    reach = tg.bfs(arr)
+    clear = tg.clearance()
+    info = {rm["name"]: rm for rm in up["rooms"]}
+    stops = []
+    for r in ub:
+        if r.category in NOT_STOPS or r.w * r.h < 1.2:
+            continue
+        best = None
+        i0, j0 = tg.cell(r.x + 0.15, r.y + 0.15)
+        i1, j1 = tg.cell(r.right - 0.15, r.top - 0.15)
+        for j in range(max(0, j0), min(tg.ny, j1 + 1)):
+            for i in range(max(0, i0), min(tg.nx, i1 + 1)):
+                if (i, j) not in reach:
+                    continue
+                x, y = tg.centre(i, j)
+                sc = min(int(clear[j, i]), 6) * 0.1 - 0.35 * math.hypot(x - r.cx, y - r.cy)
+                if best is None or sc > best[0]:
+                    best = (sc, (i, j))
+        if best:
+            stops.append((r, best[1]))
+    out = [t for t in tour if t["kind"] != "end"]
+    end = [t for t in tour if t["kind"] == "end"]
+    cur = arr
+    left = {c: r for r, c in stops}
+    first = True
+    while left:
+        par = tg.bfs(cur, set(left))
+        got = [c for c in left if c in par]
+        if not got:
+            break
+        nxt = min(got, key=lambda c: len(tg.path(par, c)))
+        r = left.pop(nxt)
+        x, y = tg.centre(*nxt)
+        rm = info.get(r.name, {})
+        say = rm.get("say", "")
+        if first:
+            say = "Upstairs. " + say
+            first = False
+        out.append({"kind": "room", "title": r.name, "room": r.name, "say": say, "path": [],
+                    "target": [_r(x, 2), _r(y, 2)], "level": level, "look": [_r(r.cx, 2), _r(r.cy, 2)],
+                    "pan": 300 if r.w * r.h >= 9 else 100})
+        cur = nxt
+    for t in end:
+        t["say"] = "That was the whole home, both floors. Now see it from above — every room at once."
+    return out + end
 
 
 def shell_floors(plan) -> int:

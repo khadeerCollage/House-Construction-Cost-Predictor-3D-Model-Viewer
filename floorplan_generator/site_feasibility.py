@@ -87,7 +87,7 @@ class _Ctx:
     """Inputs shared by all simulations of one form state."""
 
     def __init__(self, plot_w, plot_h, facing, bhk, family, building_type, num_floors,
-                 quality, vastu, has_lift, lift_capacity, stair_type):
+                 quality, vastu, has_lift, lift_capacity, stair_type, lift_position="inside"):
         self.W, self.H = float(plot_w), float(plot_h)
         self.facing = (facing or "N").upper()[0]
         self.bhk = bhk
@@ -97,6 +97,7 @@ class _Ctx:
         self.quality = quality or "Standard"
         self.vastu = bool(vastu)
         self.has_lift, self.lift_capacity, self.stair_type = has_lift, lift_capacity, stair_type
+        self.lift_position = lift_position or "inside"
         self.members = 4
         if family is not None:
             self.members = max(1, getattr(family, "adults", 2) + getattr(family, "children", 0)
@@ -106,7 +107,8 @@ class _Ctx:
 
     def program(self, bhk: str, quality: Optional[str] = None, family="same"):
         return build_program(bhk, self.family if family == "same" else family, self.btype, self.floors,
-                             quality or self.quality, self.has_lift, self.lift_capacity, self.stair_type)
+                             quality or self.quality, self.has_lift, self.lift_capacity, self.stair_type,
+                             lift_position=self.lift_position)
 
     def scaled(self, k: float) -> "_Ctx":
         c = _Ctx.__new__(_Ctx)
@@ -145,7 +147,8 @@ def _simulate(ctx: _Ctx, program, comps: Dict, place: bool = True):
     planner = SitePlanner(ctx.W, ctx.H, ctx.facing, ctx.vastu, ctx.btype, ctx.floors, c, ctx.members)
     min_w, min_d = _min_wd(program.bhk)
     ext = program.external_stair.footprint_l if program.external_stair else 0.0
-    site = planner.plan_footprint(program.target_area * 1.12, program.min_area, min_w, min_d, ext)
+    site = planner.plan_footprint(program.target_area * 1.12, program.min_area, min_w, min_d, ext,
+                                  lift_out=_lift_out(program))
     placed = set()
     if place:
         d0, d1 = _nominal_door(site, planner)
@@ -154,6 +157,13 @@ def _simulate(ctx: _Ctx, program, comps: Dict, place: bool = True):
         if site.car_mode == "stilt":
             placed.add("PARKING")
     return site, placed
+
+
+def _lift_out(program) -> Optional[Dict]:
+    """The engine's lift-tower reservation for a program with the lift outside (else None)."""
+    if not getattr(program, "lift_outside", None) or not program.lift:
+        return None
+    return {"position": program.lift_outside, "w": program.lift.shaft_w, "d": program.lift.shaft_d, "door": 0.9}
 
 
 def _house(site) -> float:
@@ -279,14 +289,15 @@ def check_site(plot_w: float, plot_h: float, facing: str = "N", bhk: str = "2BHK
                family=None, building_type: str = "Independent House", num_floors: int = 1,
                quality: str = "Standard", vastu: bool = True, has_lift: bool = False,
                lift_capacity: str = "4 Person", stair_type: str = "dog_leg",
-               components: Optional[Dict] = None, unlock_hints: bool = True) -> SiteFit:
+               components: Optional[Dict] = None, unlock_hints: bool = True,
+               lift_position: str = "inside") -> SiteFit:
     """
     Feasibility of every BHK and site amenity for the form state. `components` is the
     design form's additional_components dict (what is switched on now); amenities are judged
     in planner priority order, each on top of the ones before it that are on and fit.
     """
     ctx = _Ctx(plot_w, plot_h, facing, bhk, family, building_type, num_floors, quality, vastu,
-               has_lift, lift_capacity, stair_type)
+               has_lift, lift_capacity, stair_type, lift_position)
     components = components or {}
     chk = _Checker(ctx)
     bhk_fit = _bhk_options(ctx)
@@ -460,3 +471,60 @@ def _lifestyle_dropped(ctx: _Ctx, house: float) -> List[str]:
     before = {g.primary.name for g in prog.groups}
     trim_program(prog, house)
     return [n for n in sorted(before - {g.primary.name for g in prog.groups})]
+
+
+LIFT_WHERE = {"inside": "Inside the home", "entrance": "Outside, beside the main door",
+              "side": "Outside, at the side of the house"}
+
+
+def lift_options(plot_w: float, plot_h: float, facing: str = "N", bhk: str = "2BHK", family=None,
+                 building_type: str = "Independent House", num_floors: int = 2, vastu: bool = True,
+                 lift_capacity: str = "4 Person", stair_type: str = "dog_leg") -> Dict[str, Fit]:
+    """
+    Where a house's lift can stand (the engine's own reservation, judged with the comfort rule):
+      inside   — always: next to the stair, opens into the home on every floor;
+      entrance — a tower in the front yard beside the main door (deeper front yard);
+      side     — a tower in a side yard with a landing and a side door (a wider side yard).
+    An outside tower that would leave the house below COMFORT × its comfortable size is 'no'.
+    """
+    ctx = _Ctx(plot_w, plot_h, facing, bhk, family, building_type, num_floors, "Standard", vastu,
+               True, lift_capacity, stair_type)
+    floorwise = "independent" in (building_type or "").lower() and int(num_floors or 1) > 1
+    out = {"inside": Fit("inside", "ok", "opens onto the stair lobby on every floor, next to the stair" if floorwise
+                         else "opens into the home on every floor, next to the stair")}
+    inside = ctx.program(bhk)
+    if not inside.lift:
+        return out
+    base = _house(_simulate(ctx, inside, {}, place=False)[0])
+    from floorplan_generator.vastu_engine import plan_sides_for_facing
+    sides = plan_sides_for_facing(ctx.facing)
+    words = {"N": "North", "E": "East", "S": "South", "W": "West"}
+    for pos in ("entrance", "side"):
+        c2 = _Ctx.__new__(_Ctx)
+        c2.__dict__.update(ctx.__dict__)
+        c2.lift_position = pos
+        prog = c2.program(bhk)
+        site = _simulate(c2, prog, {}, place=False)[0]
+        if site.lift_side is None or (pos == "side" and site.lift_side == "top"):
+            why = ("the front yard cannot take the lift tower and its landing" if pos == "entrance"
+                   else "no side yard is wide enough for the lift tower (about "
+                        f"{SitePlanner.lift_side_need(_lift_out(prog)):.1f} m)")
+            out[pos] = Fit(pos, "no", why)
+            continue
+        m2 = _house(site)
+        comfy = prog.target_area * 1.12
+        shaft = prog.lift.shaft_w * prog.lift.shaft_d          # the inside lift's floor space the rooms get back
+        loss = max(0.0, base - shaft - m2)
+        if m2 < prog.min_area or (loss > LOSS * base and m2 < COMFORT * comfy):
+            out[pos] = Fit(pos, "no", f"the tower's yard would take {_sqft(loss)} from the house — every room "
+                                      "would be smaller than comfortable", house_m2=m2, loss_m2=loss)
+            continue
+        where = ("in the front yard, beside the main door" if pos == "entrance"
+                 else f"in the {words.get(sides.get(site.lift_side, ''), '')} side yard")
+        if loss > LOSS * base and m2 < TIGHT * comfy:
+            out[pos] = Fit(pos, "tight", f"fits {where}, but the house gets {_sqft(loss)} smaller",
+                           house_m2=m2, loss_m2=loss)
+        else:
+            out[pos] = Fit(pos, "ok", f"fits {where} — each floor reached without passing through another",
+                           house_m2=m2, loss_m2=loss)
+    return out

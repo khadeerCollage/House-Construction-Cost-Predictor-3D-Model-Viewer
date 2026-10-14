@@ -65,6 +65,7 @@ class Drafting:
     notes: List[str] = field(default_factory=list)
     # furniture as objects: {kind, room, o, u, v (wall frame, plan metres) | x, y, W, D, …}
     items: List[Dict] = field(default_factory=list)
+    gates: List = field(default_factory=list)       # gate leaves, swings, sliding tracks (engineering['gates'])
 
 
 def _overlap(a: Rect, b: Rect) -> bool:
@@ -903,6 +904,53 @@ def _schedule(plan, rooms_by_name, windows, footprint):
     return tags, rows
 
 
+def _gate_symbols(plan):
+    """Gates in the compound wall (floorplan_generator/gates.py): leaves drawn open with their swing, a
+    sliding leaf on its track with the wall it runs behind, bi-fold panels; tags G1… and schedule rows."""
+    gates = ((getattr(plan, "engineering", None) or {}).get("gates") or [])
+    H = plan.plot_height
+    prims, tags, rows = [], [], []
+
+    def arc(cx, cy, r, a0, a1, n=12):
+        return [(cx + r * math.cos(a0 + (a1 - a0) * k / n), cy + r * math.sin(a0 + (a1 - a0) * k / n)) for k in range(n + 1)]
+
+    for g in gates:
+        for lf in g.get("leaves") or []:
+            t = lf.get("type")
+            if t in ("swing", "wicket"):
+                hx, L, s = lf["hinge"], lf["len"], lf.get("dir", 1)
+                prims.append(("line", (hx, H), (hx, H - L), "gate"))                       # the leaf, open
+                a0, a1 = (0.0, -math.pi / 2) if s > 0 else (math.pi, 3 * math.pi / 2)
+                prims.append(("poly", arc(hx, H, L, a0, a1), False, "gate_d"))            # its swing (inward)
+            elif t == "slide":
+                x0, x1, y = lf["x0"], lf["x1"], H - 0.16
+                prims.append(("poly", [(x0, y - 0.03), (x1, y - 0.03), (x1, y + 0.03), (x0, y + 0.03)], True, "gate"))
+            elif t == "fold":
+                hx, L, s = lf["hinge"], lf["len"], lf.get("dir", 1)
+                prims.append(("poly", [(hx, H), (hx + s * 0.25 * L, H - L * 0.97), (hx + s * 0.5 * L, H - 0.05)],
+                              False, "gate"))
+                prims.append(("poly", arc(hx, H, L, 0.0 if s > 0 else math.pi, -math.pi / 2 if s > 0 else 3 * math.pi / 2),
+                              False, "gate_d"))
+        rb = g.get("runback")
+        if rb:                                                   # the wall the sliding leaf runs behind
+            y = H - 0.16
+            prims.append(("poly", [(rb[0], y - 0.05), (rb[1], y - 0.05), (rb[1], y + 0.05), (rb[0], y + 0.05)], True, "gate_d"))
+            to = 1 if rb[0] >= g["x1"] - 0.05 else -1
+            ax0 = (g["x0"] + g["x1"]) / 2
+            ax1 = rb[0] + 0.3 if to > 0 else rb[1] - 0.3
+            prims.append(("line", (ax0, y - 0.32), (ax1, y - 0.32), "gate_d"))
+            prims.append(("poly", [(ax1 - to * 0.18, y - 0.22), (ax1, y - 0.32), (ax1 - to * 0.18, y - 0.42)], False, "gate"))
+        cx = (g["x0"] + g["x1"]) / 2
+        tags.append((cx, H + 0.55, g.get("tag", "G"), "gate"))
+        what = {"walk": "people", "two_wheeler": "people + bikes", "vehicle": "car", "vehicle_wicket": "car + wicket"}.get(
+            g.get("kind"), "gate")
+        op = {"swing": "swing", "sliding": "sliding", "telescopic": "telescopic", "bifold": "bi-fold"}.get(g.get("op"), "")
+        rows.append({"kind": "gate", "tag": g.get("tag", "G"),
+                     "size": f"{round(g['width'] * 1000)} × {round(g.get('height', 1.5) * 1000)}", "sill": "-", "nos": 1,
+                     "spec": f"MS {op} gate · {what} · {g.get('feet', '')}"})
+    return prims, tags, rows
+
+
 # =============================================================================
 # Public entry point
 # =============================================================================
@@ -1074,6 +1122,8 @@ def _build_drafting(plan, label_size: Optional[Callable], out: Drafting) -> Draf
             out.levels.append((main.x + ox * 1.9, main.y + main.width + 1.6, "GL ±0.000"))
 
     out.tags, out.schedule = _schedule(plan, rooms_by_name, windows, footprint)
+    g_prims, g_tags, g_rows = _gate_symbols(plan)
+    out.gates, out.tags, out.schedule = g_prims, out.tags + g_tags, out.schedule + g_rows
 
     fx, fy, fw, fd = footprint
     if fw > 0 and fd > 0:

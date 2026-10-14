@@ -12,6 +12,8 @@ Plot-level engineering that happens *around* the house:
      terrace stair) — enlarging the right setback only while the house still fits
   5. Collision-free placement of amenities in the open strips, keeping a clear
      entrance path from the gate to the main door
+  6. Gates sized for what passes through them (gates.py): people, two-wheelers, or the
+     design car's swept path from the road; leaves that can open on this plot; stilt bays
 
 Plan frame: +x right, +y up, road/entrance side = top edge (y = plot_height).
 All dimensions in metres.
@@ -100,6 +102,12 @@ class SitePlan:
     coverage: float = 0.0
     # x-range of the road facade the main door must keep clear of (a corner car bay sits in front of it)
     door_exclusion: Optional[Tuple[float, float]] = None
+    # a lift tower outside the house: 'top' (beside the main door) | 'left' | 'right' (against a side wall)
+    lift_side: Optional[str] = None
+    reserved: List[Rect] = field(default_factory=list)   # placed before the amenities (lift tower + landing)
+    gate_specs: List[Dict] = field(default_factory=list)  # gates.Gate.as_dict() for each gate, left → right
+    drive: Optional[Dict] = None                           # the design car's path from the road to its bay
+    road: float = 9.0                                      # road width in front (m)
 
 
 class SitePlanner:
@@ -121,6 +129,9 @@ class SitePlanner:
         self.side_of = {c: s for s, c in self.sides.items()}     # compass -> plan side
         self.multi_level = (self.floors > 1 or "apartment" in self.building_type.lower()
                             or "duplex" in self.building_type.lower())
+        self.road = 9.0                 # set by the engine: road width in front of the plot (m)
+        self.quality = "Standard"       # set by the engine: picks the design car for the car gate
+        self.stilt_info = None          # set by the engine: stilt bays clear of the core and the columns
 
     # ------------------------------------------------------------------ utils
     def _enabled(self, key: str) -> Dict:
@@ -148,8 +159,21 @@ class SitePlanner:
         return x, y
 
     # ----------------------------------------------------------- stage 1: plan
+    @staticmethod
+    def lift_front_need(lift_out: Dict) -> float:
+        """Front setback for a lift tower beside the main door: landing in front of the lift door + 3 steps."""
+        sw, dw = lift_out["w"], lift_out.get("door", 0.9)
+        landing = max(1.2, 0.23 + (sw + dw) / 2 + 0.15)
+        return round(landing + 0.9 + 0.3, 2)
+
+    @staticmethod
+    def lift_side_need(lift_out: Dict) -> float:
+        """Side setback for a lift tower against the side wall (tower + its walls + clearance to the compound)."""
+        return round(0.23 + lift_out["w"] + 0.115 + MARGIN_PLOT + 0.05, 2)
+
     def plan_footprint(self, target_area: float, min_area: float,
-                       min_w: float, min_d: float, ext_stair_len: float = 0.0) -> SitePlan:
+                       min_w: float, min_d: float, ext_stair_len: float = 0.0,
+                       lift_out: Optional[Dict] = None) -> SitePlan:
         plot_area = self.W * self.H
         f, r, s = bylaw_setbacks(plot_area, self.floors)
         if "apartment" in self.building_type.lower() and plot_area > 200:
@@ -215,6 +239,47 @@ class SitePlanner:
             notes.append("No setback can take an external terrace stair — provide an internal "
                          "ladder/hatch or a compact internal stair to the terrace.")
 
+        # Lift tower outside the house: beside the main door (deeper front yard) or against a side wall
+        lift_side = None
+        if lift_out and lift_out.get("position") in ("entrance", "side"):
+            front = self.lift_front_need(lift_out)
+            if lift_out["position"] == "entrance":
+                cand = dict(sb)
+                cand["top"] = max(cand["top"], front)
+                if feasible(cand):
+                    sb, lift_side = cand, "top"
+            else:
+                from floorplan_generator.vastu_engine import VastuEngine
+                plot_eng = VastuEngine.for_facing(self.W, self.H, self.facing)
+                need = self.lift_side_need(lift_out)
+                best = None
+                for side in ("left", "right"):
+                    cand = dict(sb)
+                    cand[side] = max(cand[side], need)
+                    cand["top"] = max(cand["top"], front)       # the landing may join the entrance instead
+                    if not feasible(cand):
+                        continue
+                    av = self._available(cand)
+                    cx = need / 2 if side == "left" else self.W - need / 2
+                    zone = plot_eng.get_zone_for_position(cx, av[1] + av[3] * 0.6).value
+                    vs = plot_eng.get_room_score("LIFT", zone) if self.vastu else 0
+                    key = vs + 0.4 * av[2] * av[3]
+                    if best is None or key > best[0]:
+                        best = (key, side, cand)
+                if best:
+                    sb, lift_side = best[2], best[1]
+                else:                                    # no side yard is wide enough: beside the main door
+                    cand = dict(sb)
+                    cand["top"] = max(cand["top"], front)
+                    if feasible(cand):
+                        sb, lift_side = cand, "top"
+                        notes.append("No side yard is wide enough for the lift tower — it stands beside the "
+                                     "main door instead.")
+            if lift_side is None:
+                notes.append("The lift could not go outside the house on this plot (the "
+                             + ("front yard" if lift_out["position"] == "entrance" else "side yards")
+                             + " would leave too little house) — it stays inside, next to the stair.")
+
         # Car parking reservation
         car_mode = None
         door_exclusion = None
@@ -242,8 +307,11 @@ class SitePlanner:
                 options.append(("front_parallel", cand))
             # side parking (tandem along the depth)
             for side in ("left", "right"):
+                if side == lift_side:
+                    continue
                 cand = dict(sb)
-                cand[side] = max(cand[side], 3.25)
+                # the outside terrace stair hugs the house in this yard too: the car lane goes beside it
+                cand[side] = max(cand[side], 3.25 + (1.15 if side == ext_side else 0.0))
                 if slots * 5.2 <= self.H - cand["top"] - 0.4:
                     options.append((side, cand))
             def front_free(cand) -> float:
@@ -377,7 +445,7 @@ class SitePlanner:
 
         return SitePlan(plot_w=self.W, plot_h=self.H, facing=self.facing, setbacks=final_sb,
                         footprint=(fx, fy, fw, fd), car_mode=car_mode, ext_stair_side=ext_side,
-                        notes=notes, coverage=coverage, door_exclusion=door_exclusion)
+                        notes=notes, coverage=coverage, door_exclusion=door_exclusion, lift_side=lift_side)
 
     def _car_corner_side(self, bay: float, facade: Rect) -> str:
         """
@@ -510,10 +578,24 @@ class SitePlanner:
         items: List[SiteItem] = []
         notes = site.notes
 
+        # Gates (gates.py): the walking gate's width follows who uses it, so it is sized first
+        import importlib
+        _gates = importlib.import_module("floorplan_generator.gates")
+        car_cfg0, bike_cfg0 = self._enabled("car_parking"), self._enabled("bike_parking")
+        vehicle = bool(car_cfg0) and site.car_mode in ("front", "front_parallel", "left", "right", "stilt")
+        n_cars = max(1, int(car_cfg0.get("slots", 1) or 1)) if vehicle else 0
+        n_bikes = max(2, int(bike_cfg0.get("slots", 2) or 2)) if bike_cfg0 else 0
+        designer = _gates.GateDesigner(self.W, self.H, self.facing, self.vastu, self.road, self.quality,
+                                       self.building_type, self.floors, stilt=site.car_mode == "stilt",
+                                       cars=n_cars, bikes=n_bikes)
+        walk = designer.walk_gate(door_x0, door_x1, vehicle)
+
         # Clear entrance path: gate → landing → main door
-        path = (door_x0 - 0.45, fy + fd, (door_x1 - door_x0) + 0.9, self.H - (fy + fd))
+        px0, px1 = min(door_x0 - 0.45, walk.x0), max(door_x1 + 0.45, walk.x1)
+        path = (px0, fy + fd, px1 - px0, self.H - (fy + fd))
         occupied.append(path)
-        gates = [(_snap(door_x0 - 0.15), _snap(door_x1 + 0.15))]
+        occupied.extend(getattr(site, "reserved", None) or [])      # an outside lift tower and its landing
+        gates = []
 
         from floorplan_generator.vastu_engine import VastuEngine
         plot_eng = VastuEngine.for_facing(self.W, self.H, self.facing)
@@ -593,12 +675,60 @@ class SitePlanner:
                 car_rect = put("car", f"Car Parking ({slots} Bays)", "PARKING", w, h, [site.car_mode],
                                front_corner, "#334155", rotate=False, min_score=-25)
             if car_rect:
-                gates.append((_snap(car_rect[0]), _snap(car_rect[0] + min(car_rect[2], 3.6))))
                 zone = self._zone_of(car_rect)
                 notes.append(f"Car parking: {slots} bay(s) of 2.6 × 5.0 m in the {zone} of the site "
                              "(NBC parking bay; Vastu prefers NW/SE for vehicles).")
             else:
                 notes.append("Car parking could not be placed clear of the entrance path.")
+
+        # 2b. The car gate: sized for the car's swept path from the road, clear of the walking gate
+        car_gate, drive = None, None
+        lanes, mode, parked = [], None, []
+        door_mid = (door_x0 + door_x1) / 2
+        porch = (door_mid - 1.2, fy + fd, door_mid + 1.2, fy + fd + 0.115 + 2.2)
+        if car_rect:
+            x, y, w, h = car_rect
+            slots = max(1, int(car_cfg.get("slots", 1) or 1))
+            throat = max(0.0, self.H - (y + h))
+            if site.car_mode in ("front", "front_parallel") and h >= 4.5:
+                per = w / slots
+                for i in range(slots):
+                    ax = x + (i + 0.5) * per
+                    lanes.append({"axis": ax, "throat": throat, "lo": ax - per / 2, "hi": ax + per / 2,
+                                  "park_y": y + h / 2, "stop_y": y + h})
+                mode = "front"
+            elif site.car_mode in ("front", "front_parallel"):
+                lanes.append({"axis": x + w / 2, "throat": throat, "lo": x, "hi": x + w,
+                              "park_y": y + h / 2, "stop_y": y + h})
+                mode = "parallel"
+            else:
+                lanes.append({"axis": x + w / 2, "throat": throat, "lo": x, "hi": x + w,
+                              "park_y": y + h - 2.6, "stop_y": y + h})
+                mode = "side"
+            parked = [(x, y, x + w, y + h)]
+        elif vehicle and site.car_mode == "stilt":
+            info = self.stilt_info or _gates.stilt_bays(site.footprint, [], [], [], n_cars, designer.car_key)
+            self.stilt_info = info
+            front = info["front"]
+            for b in (b for b in info["bays"] if not b[4]):
+                ax = (b[0] + b[2]) / 2
+                # straight between the columns at the front edge: no turning under the building
+                lanes.append({"axis": ax, "throat": max(0.0, self.H - front), "lo": b[5], "hi": b[6],
+                              "park_y": (b[1] + b[3]) / 2, "stop_y": front, "exact": True})
+            if lanes:
+                mode = "stilt"
+                parked = [(fx - 0.115, fy - 0.115, fx + fw + 0.115, fy + fd + 0.115)]
+        if not lanes and designer.height_m >= _gates.FIRE_H:
+            mode = "fire"                             # a tall building: the fire engine's gate all the same
+            lanes = [{"axis": self.W / 2, "throat": 0.0, "lo": 0.0, "hi": self.W, "park_y": fy + fd,
+                      "stop_y": fy + fd}]
+        if lanes:
+            blocked = [(r[0], r[1], r[0] + r[2], r[1] + r[3]) for r in (getattr(site, "reserved", None) or [])]
+            blocked += [(it.rect[0], it.rect[1], it.rect[0] + it.rect[2], it.rect[1] + it.rect[3])
+                        for it in items if it.key == "ext_stair"]
+            house = (fx - 0.115, fy - 0.115, fx + fw + 0.115, fy + fd + 0.115)
+            car_gate, drive, reserve = designer.vehicle_gate(lanes, walk, blocked, parked + [porch], house, mode)
+            occupied.extend(reserve)
 
         # 3. Security cabin beside the vehicle gate (NW / SE)
         if self._enabled("security_cabin"):
@@ -706,6 +836,19 @@ class SitePlanner:
                              "laid out in the North/East open strips; keep tall trees to the S/W.")
             else:
                 notes.append("Garden skipped: no open strip ≥ 1.2 m wide is left.")
+
+        # the gates, left to right: G1, G2 …
+        specs = [g for g in (walk, car_gate) if g is not None]
+        if car_gate is not None and car_gate.kind == "vehicle_wicket":
+            specs = [car_gate]                       # people use the wicket door in the car gate
+        specs.sort(key=lambda g: g.x0)
+        for i, g in enumerate(specs, 1):
+            g.tag = f"G{i}"
+        gates += [(g.x0, g.x1) for g in specs]
+        site.gate_specs = [g.as_dict() for g in specs]
+        site.drive = drive
+        site.road = designer.road
+        notes.append(_gates.summary(site.gate_specs, designer.road))
 
         site.items = items
         site.gates = gates

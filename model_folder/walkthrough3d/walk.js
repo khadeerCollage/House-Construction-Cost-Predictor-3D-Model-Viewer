@@ -248,9 +248,18 @@ const MAT_DEF = {
   ghost: [{ c: 0x1B3A5C, o: 0.22 }, { c: 0xF2EDE4, o: 0.38 }],
   manhole: [{ c: 0x061426 }, { c: 0x4A4A4A, m: 0.6, r: 0.5 }],
   arrow: [{ c: 0x00FFFF, e: 0x006666 }, { c: 0xC0392B, r: 0.6 }],
+  lift_car: [{ c: 0x1E4570 }, { c: 0xC9CED3, m: 0.75, r: 0.3 }],
+  lift_floor: [{ c: 0x0E2A4A }, { map: "granite", uv: 1, r: 0.4 }],
+  lift_light: [{ c: 0xE6FFFF, e: 0x66CCCC }, { c: 0xFFFFFF, e: 0xFFF2D6 }],
+  lift_frame: [{ c: 0x00DDFF, e: 0x003344 }, { c: 0x9AA4AE, m: 0.85, r: 0.25 }],
+  lift_door: [{ c: 0x15466F }, { c: 0xB4BCC4, m: 0.6, r: 0.45 }],
+  lift_tower: [{ c: 0x24588A }, { c: 0xD3D6DA, r: 0.9 }],
+  machine: [{ c: 0x2A5C8C }, { c: 0x3A4048, m: 0.6, r: 0.5 }],
+  cwt: [{ c: 0x1B5A8C }, { c: 0x5A5F66, m: 0.4, r: 0.7 }],
+  buffer: [{ c: 0xFFC857, e: 0x332200 }, { c: 0xE0B000, r: 0.5 }],
 };
 const NO_SHADOW = new Set(["glass", "frost", "water", "ghost", "grass", "land", "yard", "road", "verge", "roadline", "paver", "fl_tile",
-  "fl_bed", "fl_wet", "fl_marble", "lamp", "flame", "arrow", "ceiling"]);
+  "fl_bed", "fl_wet", "fl_marble", "lamp", "flame", "arrow", "ceiling", "lift_light"]);
 const MATS = { bp: {}, real: {} };
 function makeMat(spec, theme) {
   const p = { color: spec.map ? 0xffffff : spec.c, roughness: spec.r ?? (theme === "bp" ? 0.92 : 0.85), metalness: spec.m ?? 0 };
@@ -381,16 +390,19 @@ class Builder {           // batches by role + edge lines by kind, emitted into 
 
 // ───────────────────────────── state
 const state = {
-  theme: "bp", mode: "outside", furn: true, vastu: false, sunOpen: false,
-  sunMin: 540, day: dayOfYear(new Date()), voice: true, started: false,
+  theme: "bp", mode: "outside", furn: true, vastu: false, sunOpen: false, view: 0, explode: false,
+  sunMin: 540, day: dayOfYear(new Date()), voice: true, started: false, xray: false, sound: true,
 };
 const registry = { meshes: [], edges: [], pick: [], doors: [], gates: [], fans: [], labels: [], lamps: [] };
 let S = null;            // scene data
 let SID = null;
 let canWish = false;
 let G = {};              // groups
-let nav = null, vis = null, navs = [null, null];     // walking grids: 0 = house / ground, 1 = terrace / first floor
-const walker = { x: 0, y: 0, yaw: 0, pitch: -0.05, eye: 1.6, h: 2.0, path: [], lastLook: 0, room: null, level: 0 };
+let nav = null, vis = null, navs = { g0: null, typ: null, top: null };   // walking grids by kind of level
+let levelGroups = [];    // [{L, root, ceil, furn}] — one per level with rooms (and the stilt)
+let segCells = null;     // per walking cell: -1 off the stairs, 0 lower half of a flight, 1 upper half
+const GAP = 2.8;         // exploded view: extra space between floors
+const walker = { x: 0, y: 0, yaw: 0, pitch: -0.05, eye: 1.6, h: 2.0, path: [], lastLook: 0, room: null, level: 0, seg: null };
 const orbit = { target: new THREE.Vector3(), r: 20, theta: 0, phi: 1.0, auto: false };
 const trans = { on: false, t: 0, dur: 1, fromP: new THREE.Vector3(), fromT: new THREE.Vector3(), toP: new THREE.Vector3(), toT: new THREE.Vector3(), done: null };
 const keys = new Set();
@@ -401,20 +413,26 @@ function dayOfYear(d) { return Math.floor((d - new Date(d.getFullYear(), 0, 0)) 
 
 // ───────────────────────────── build the house from the scene JSON
 function clearScene() {
-  for (const k of Object.keys(G)) {
-    G[k].traverse((o) => { if (o.geometry) o.geometry.dispose(); });
-    scene.remove(G[k]);
-  }
+  const seen = new Set();
+  const drop = (g) => { g.traverse((o) => { if (o.geometry && !seen.has(o.geometry)) { seen.add(o.geometry); o.geometry.dispose(); } }); scene.remove(g); };
+  for (const k of Object.keys(G)) drop(G[k]);
+  for (const lg of levelGroups) drop(lg.root);
+  levelGroups = [];
   registry.meshes = []; registry.edges = []; registry.pick = []; registry.doors = []; registry.gates = []; registry.fans = []; registry.lamps = [];
   for (const l of registry.labels) l.el.remove();
   registry.labels = [];
 }
 
-function roomAt(x, y) {
+const planOf = (L) => (S && S.levels_list && S.levels_list[L] ? (S.levels_list[L].plan || 0) : 0);
+const PL = (p) => (p === 1 && S.upper ? S.upper : S);          // the floor plan a level shows (a duplex has two)
+function roomAt(x, y, p = planOf(walker.level)) {
   if (!S) return null;
-  for (const r of S.rooms) { const [x0, y0, x1, y1] = r.r; if (x > x0 && x < x1 && y > y0 && y < y1) return r; }
+  for (const r of PL(p).rooms) { const [x0, y0, x1, y1] = r.r; if (x > x0 && x < x1 && y > y0 && y < y1) return r; }
   return null;
 }
+const ORD = (n) => n + (["th", "st", "nd", "rd"][(n % 100 > 10 && n % 100 < 14) ? 0 : Math.min(n % 10, 4) % 4] || "th");
+const homeName = (L) => (L - R0() <= 0 ? "Ground-floor home" : `${ORD(L - R0() + (R0() ? 1 : 0))}-floor home`);
+const houseKind = () => (S && S.apartment && S.apartment.kind === "house");
 function inFootprint(x, y, pad = 0) {
   const [fx, fy, fw, fd] = S.footprint;
   return x > fx - pad && x < fx + fw + pad && y > fy - pad && y < fy + fd + pad;
@@ -429,142 +447,260 @@ function paintFor(room) {
 }
 const FLOOR = { BEDROOM: "fl_bed", BATHROOM: "fl_wet", UTILITY: "fl_wet", POOJA: "fl_marble", LIFT: "black" };
 
+// level helpers (levels: [stilt,] floors with rooms, terrace)
+const R0 = () => (S && S.r0) || 0;
+const TOP = () => (S && S.top !== undefined ? S.top : 1);
+const zf = (L) => (S.levels_list && S.levels_list[L] ? S.levels_list[L].z : S.levels.ffl + L * S.levels.storey);
+const levelKind = (L) => (S.levels_list && S.levels_list[L] ? S.levels_list[L].kind : (L === 0 ? "rooms" : "terrace"));
+const levelLabel = (L) => (S.levels_list && S.levels_list[L] ? S.levels_list[L].label : (L === 0 ? "Ground floor" : "Terrace"));
+const hasRooms = (L) => levelKind(L) === "rooms";
+function activeLevel() {
+  if (state.mode === "walk") return walker.level;
+  if (state.mode === "outside" && !state.explode) return R0();
+  return state.view;
+}
+
 function build(data) {
   clearScene();
   S = data;
-  const lv = S.levels, ffl = lv.ffl;
-  G = { shell: new THREE.Group(), ceil: new THREE.Group(), furn: new THREE.Group(), doors: new THREE.Group(),
-    site: new THREE.Group(), vastu: new THREE.Group() };
+  const lv = S.levels, ffl = lv.ffl, H = lv.storey, r0 = R0(), top = TOP();
+  G = { site: new THREE.Group(), roof: new THREE.Group(), dyn: new THREE.Group(), dyn2: new THREE.Group(),
+    vastu: new THREE.Group(), lift: new THREE.Group(), ghost: new THREE.Group(), core: new THREE.Group() };
+  liftReset();
   for (const g of Object.values(G)) scene.add(g);
-  const pickRoles = new Set(["fl_tile", "fl_bed", "fl_wet", "fl_marble", "black", "yard", "grass", "paver", "road", "verge", "land", "stair"]);
+  levelGroups = [];
+  const pickRoles = new Set(["fl_tile", "fl_bed", "fl_wet", "fl_marble", "black", "yard", "grass", "paver", "road", "verge", "land", "stair", "concrete"]);
 
-  // —— walls (exterior faces painted outside, interior faces take the room's colour)
-  const shell = new Builder();
-  const route = (f) => {
-    if (f.bottom) return null;
-    if (f.top) return "wall_in";
-    const px = f.c[0] + f.pn[0] * 0.2, py = f.c[1] + f.pn[1] * 0.2;
-    if (!inFootprint(px, py, -0.01)) return "wall_out";
-    return paintFor(roomAt(px, py));
+  // ════ the designed floor, built once at level r0, then repeated on every floor with rooms (a duplex: two plans)
+  const makeTemplate = (P, p) => {
+    const body = new Builder(), stairsB = new Builder(), furnB = new Builder(), ceilB = new Builder();
+    const groundX = new Builder(), upperX = new Builder();
+    const route = (f) => {
+      if (f.bottom) return null;
+      if (f.top) return "wall_in";
+      const px = f.c[0] + f.pn[0] * 0.2, py = f.c[1] + f.pn[1] * 0.2;
+      if (!inFootprint(px, py, -0.01)) return "wall_out";
+      return paintFor(roomAt(px, py, p));
+    };
+    const cuts = { x: [...new Set(P.rooms.flatMap((r) => [r.r[0], r.r[2]]))].sort((a, b) => a - b),
+      y: [...new Set(P.rooms.flatMap((r) => [r.r[1], r.r[3]]))].sort((a, b) => a - b) };
+    for (const k of ["ext", "int", "post"]) for (const b of P.walls[k] || []) body.wall(b, "wall", route, cuts);
+    for (const b of P.walls.parapet || []) body.box(b, "parapet", "wall");
+    for (const f of P.floors) {
+      if (f.cat === "LIFT" && S.lift) continue;             // the car is the lift's floor
+      const [x0, y0, x1, y1] = f.r;
+      (f.ground_only ? groundX : body).quadUp(x0, y0, x1, y1, ffl + 0.002, FLOOR[f.cat] || "fl_tile");
+    }
+    for (const st of S.stairs) {
+      if (st.external) continue;
+      stairParts(stairsB, st);
+    }
+    for (const w of P.windows) windowParts(body, w);
+    for (const d of P.doors) {
+      if (d.upper === "wall" || d.upper === "parapet") { doorFrame(groundX, d, ffl); upperFill(upperX, d, ffl); }
+      else doorFrame(body, d, ffl);
+    }
+    if (p === 0) for (const b of S.balconies || []) balcony(upperX, b, ffl);
+    for (const it of P.furniture) { try { furniture(furnB, it, ffl); } catch (e) { console.warn("furniture", it.kind, e); } }
+    const sz = S.shell.slab_z;
+    for (const r of S.shell.slab) ceilB.box([r[0], r[1], r[2], r[3], sz[0], sz[1]], null, "wall", (f) => (f.bottom ? "ceiling" : "slab"));
+    for (const r of P.rooms) {
+      if (r.cat === "STAIRS" || r.cat === "LIFT" || r.name.includes("Duct")) continue;
+      const [x0, y0, x1, y1] = r.r, cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+      const fan = hasFan(r), off = fan ? Math.min(0.9, Math.max(x1 - x0, y1 - y0) / 4) : 0;
+      const lx = (x1 - x0) >= (y1 - y0) ? cx + off : cx, ly = (x1 - x0) >= (y1 - y0) ? cy : cy + off;
+      ceilB.cyl(lx, ly, 0.16, ffl + lv.ceiling - 0.035, ffl + lv.ceiling - 0.005, "lamp", 20);
+    }
+    const tpl = new THREE.Group();
+    const part = (name, bld, pick) => { const g = new THREE.Group(); g.name = name; bld.emit(g, pick); tpl.add(g); return g; };
+    part("body", body, pickRoles); part("stairs", stairsB, pickRoles); part("furn", furnB, null); part("ceil", ceilB, new Set(["slab"]));
+    const gx = new THREE.Group(); groundX.emit(gx, pickRoles);
+    const ux = new THREE.Group(); upperX.emit(ux, pickRoles);
+    for (const o of [tpl, gx, ux]) o.traverse((c) => { if (c.isMesh && registry.pick.includes(c)) c.userData.pick = true; });
+    return { tpl, gx, ux, used: false, gxUsed: false, uxUsed: false };
   };
-  const cuts = { x: [...new Set(S.rooms.flatMap((r) => [r.r[0], r.r[2]]))].sort((a, b) => a - b),
-    y: [...new Set(S.rooms.flatMap((r) => [r.r[1], r.r[3]]))].sort((a, b) => a - b) };
-  for (const k of ["ext", "int", "post"]) for (const b of S.walls[k] || []) shell.wall(b, "wall", route, cuts);
-  for (const b of S.walls.cmp || []) {
-    shell.box(b, "compound", "site");
-    shell.box([b[0] - 0.04, b[1] - 0.04, b[2] + 0.04, b[3] + 0.04, b[5], b[5] + 0.06], "pillar", null);
+  const T = [makeTemplate(S, 0)];
+  if (S.upper) T.push(makeTemplate(S.upper, 1));
+  const registerClone = (o, L) => o.traverse((c) => {
+    c.userData = Object.assign({}, c.userData, { level: L });
+    if (c.isMesh) { registry.meshes.push(c); if (c.userData.pick) registry.pick.push(c); }
+    if (c.isLineSegments) registry.edges.push(c);
+  });
+  const useOnce = (t, key, o, L) => {                    // the first use takes the original, later ones a clone
+    const c = t[key] ? o.clone(true) : o;
+    if (t[key]) registerClone(c, L); else c.traverse((q) => { q.userData = Object.assign({}, q.userData, { level: L }); });
+    t[key] = true;
+    return c;
+  };
+  for (let L = 0; L < top; L++) {
+    const root = new THREE.Group(); root.userData.level = L;
+    if (hasRooms(L)) {
+      const t = T[Math.min(planOf(L), T.length - 1)];
+      const fl = useOnce(t, "used", t.tpl, L);
+      fl.position.y = (L - r0) * H; root.add(fl);
+      const extra = L === 0 ? useOnce(t, "gxUsed", t.gx, L) : useOnce(t, "uxUsed", t.ux, L);
+      extra.position.y = (L - r0) * H; root.add(extra);
+      levelGroups.push({ L, root, ceil: fl.getObjectByName("ceil"), furn: fl.getObjectByName("furn") });
+    } else {                                             // stilt: columns, the lift shaft, the stair up
+      const sb = new Builder();
+      const o = S.shell.outer;
+      sb.box([o[0], o[1], o[2], o[3], 0, 0.15], "concrete", "site");
+      for (const c of (S.stilt && S.stilt.columns) || []) sb.box([c[0], c[1], c[2], c[3], 0.15, ffl - 0.15], "column", "wall");
+      if (!S.lift) for (const lr of S.lifts) sb.box([lr[0], lr[1], lr[2], lr[3], 0.15, ffl - 0.15], "wall_out", "wall");
+      for (const r of S.shell.slab) sb.box([r[0], r[1], r[2], r[3], ffl - 0.15, ffl], null, "wall", (f) => (f.bottom ? "ceiling" : "slab"));
+      const sg = new THREE.Group(); sb.emit(sg, pickRoles); root.add(sg);
+      const fl = T[0].tpl.getObjectByName("stairs").clone(true); registerClone(fl, L);
+      fl.position.y = -H; root.add(fl);
+      levelGroups.push({ L, root, ceil: null, furn: null });
+    }
+    scene.add(root);
   }
-  for (const b of S.walls.pillar || []) shell.box(b, "pillar", "site");
 
-  // —— plinth / stilt
-  const [fx, fy, fw, fd] = S.footprint, o = S.shell.outer;
-  if (S.stilt) {
-    shell.box([o[0], o[1], o[2], o[3], 0, 0.15], "concrete", "site");
-    shell.box([o[0], o[1], o[2], o[3], ffl - 0.15, ffl], "slab", "wall");
-    for (const c of S.stilt.columns) shell.box([c[0], c[1], c[2], c[3], 0.15, ffl - 0.15], "column", "wall");
-  } else {
-    shell.box([o[0] - 0.08, o[1] - 0.08, o[2] + 0.08, o[3] + 0.08, 0, ffl], "plinth", "wall");
+  // ════ roof: parapet (open where an outside stair arrives) and the stair head-room
+  const roofB = new Builder();
+  const roofZ = S.shell.roof_z;
+  for (const b of S.shell.parapet || perimeter(S.shell.outer, 0.15, roofZ, roofZ + lv.parapet)) roofB.box(b, "parapet", "wall");
+  if (S.shell.mumty_walls) {
+    for (const b of S.shell.mumty_walls) roofB.box(b, "wall_out", "wall");
+    roofB.box(S.shell.mumty_roof, "slab", "wall");
   }
-  // —— floors
-  for (const f of S.floors) {
-    const [x0, y0, x1, y1] = f.r;
-    shell.quadUp(x0, y0, x1, y1, ffl + 0.002, FLOOR[f.cat] || "fl_tile");
+  roofB.emit(G.roof);
+
+  // ════ moving parts follow the floor you look at: door leaves, ceiling fans, labels, Vastu grid
+  for (const d of S.doors) if (!(d.kind === "lift" && S.lift)) doorLeaf(d, ffl);
+  for (const r of S.rooms) if (hasFan(r)) fanAt(r, ffl + lv.ceiling);
+  if (S.upper) {                                         // a duplex's first floor: its own doors and fans
+    for (const d of S.upper.doors) if (d.kind !== "lift") doorLeaf(d, ffl, G.dyn2, 1);
+    for (const r of S.upper.rooms) if (hasFan(r)) fanAt(r, ffl + lv.ceiling, G.dyn2);
   }
-  // —— stairs
-  for (const st of S.stairs) {
-    for (const b of st.boxes) shell.box(b, "stair", "stair");
-    for (const rail of st.rails) {
-      for (let i = 0; i + 1 < rail.length; i++) rod(shell, rail[i], rail[i + 1], 0.022, "rail");
-      for (const p of rail) rod(shell, [p[0], p[1], p[2] - 0.9], p, 0.014, "rail");
+
+  // ════ site: ground, plinth, entrance steps, road, yard, amenities, cars, trees, gates, outside stair
+  buildSite(pickRoles);
+  buildDrive();
+  buildVastu(ffl);
+  buildGhosts();
+  buildLift();
+  $("btnLift").style.display = lift.ok ? "" : "none";
+  if (!lift.ok) state.xray = false;
+
+  // ════ labels
+  const flatOf = (name) => (name.includes(" · ") ? name.split(" · ")[0] : "");
+  for (const p of S.upper ? [0, 1] : [0]) {
+    for (const r of PL(p).rooms) {
+      if (r.cat === "LIFT" || r.name.includes("Duct")) continue;
+      const [x0, y0, x1, y1] = r.r;
+      const nm = r.name.includes(" · ") ? r.name.split(" · ")[1] : r.name;
+      addLabel(`${esc(nm)}<small>${r.size} · ${r.ft}</small>`, [(x0 + x1) / 2, (y0 + y1) / 2, ffl + 0.3], "lbl",
+        () => ["dollhouse", "top"].includes(state.mode) && !state.explode && hasRooms(activeLevel()) && planOf(activeLevel()) === p,
+        { lvl: true, plan: p });
     }
   }
-  // —— entrance steps
-  for (const b of S.steps) shell.box(b, "stair", "stair");
-  // —— windows: frames, glass, external sill and sunshade (chajja)
-  for (const w of S.windows) windowParts(shell, w);
-  // —— door frames (fixed); leaves are animated groups
-  for (const d of S.doors) doorFrame(shell, d, ffl);
-  shell.emit(G.shell, pickRoles);
-  for (const d of S.doors) doorLeaf(d, ffl);
-
-  // —— ceiling slab, roof, parapet, upper floors, mumty
-  const ceil = new Builder();
-  const sz = S.shell.slab_z;
-  for (const r of S.shell.slab) ceil.box([r[0], r[1], r[2], r[3], sz[0], sz[1]], null, "wall", (f) => (f.bottom ? "ceiling" : "slab"));
-  const floors = S.shell.floors, H = lv.storey;
-  for (let k = 1; k < floors; k++) {
-    const z0 = ffl + k * H, z1 = z0 + lv.ceiling, t = 0.23;
-    for (const b of perimeter(o, t, z0, z1)) ceil.box(b, "ghost", "ghost");
-    ceil.box([o[0], o[1], o[2], o[3], z0 + lv.ceiling, z0 + H], "ghost", "ghost");
+  if (S.apartment) {
+    S.apartment.slots.forEach((sl, i) => {
+      const lab = S.apartment.labels[i] || "";
+      addLabel("", [sl[0] + sl[2] / 2, sl[1] + sl[3] / 2, ffl + 2.0], "lbl flat",
+        () => state.mode !== "walk" && hasRooms(activeLevel()) && !state.explode, { lvl: true, flat: lab });
+    });
   }
-  const roofZ = S.shell.roof_z;
-  for (const b of S.shell.parapet || perimeter(o, 0.15, roofZ, roofZ + lv.parapet)) ceil.box(b, "parapet", "wall");
-  if (S.shell.mumty_walls) {
-    for (const b of S.shell.mumty_walls) ceil.box(b, "wall_out", "wall");
-    ceil.box(S.shell.mumty_roof, "slab", "wall");
-  } else if (S.shell.mumty) {
-    const m = S.shell.mumty, mh = 2.4, t = 0.115;
-    const walls = perimeter([m[0] - t / 2, m[1] - t / 2, m[2] + t / 2, m[3] + t / 2], t, roofZ, roofZ + mh);
-    walls.forEach((b, i) => { if (i !== 1) ceil.box(b, "wall_out", "wall"); });   // one side open: the terrace door
-    ceil.box([m[0] - 0.2, m[1] - 0.2, m[2] + 0.2, m[3] + 0.2, roofZ + mh, roofZ + mh + 0.12], "slab", "wall");
+  // the stair and lift run through every floor: in the pulled-apart view they bridge the gaps
+  const core = [...S.stairs.filter((q) => !q.external).map((q) => ["stair", q.r]), ...(S.lift ? [["lift", S.lift.room]] : [])];
+  for (let L = 0; L + 1 < top && core.length; L++) {
+    for (const [kind, rc] of core) {
+      const g = new THREE.BoxGeometry(rc[2] - rc[0], GAP, rc[3] - rc[1]);
+      g.translate((rc[0] + rc[2]) / 2, zf(L + 1) + L * GAP + GAP / 2, -(rc[1] + rc[3]) / 2);
+      const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: kind === "lift" ? 0xFFC857 : 0x00E5FF, transparent: true,
+        opacity: 0.14, depthWrite: false, side: THREE.DoubleSide }));
+      const e = new THREE.LineSegments(new THREE.EdgesGeometry(g), new THREE.LineBasicMaterial({ color: kind === "lift" ? 0xFFC857 : 0x00E5FF,
+        transparent: true, opacity: 0.6 }));
+      G.core.add(m, e);
+    }
   }
-  // ceiling lights
-  for (const r of S.rooms) {
-    if (r.cat === "STAIRS" || r.cat === "LIFT" || r.name.includes("Duct")) continue;
-    const [x0, y0, x1, y1] = r.r, cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
-    const fan = hasFan(r), off = fan ? Math.min(0.9, Math.max(x1 - x0, y1 - y0) / 4) : 0;
-    const lx = (x1 - x0) >= (y1 - y0) ? cx + off : cx, ly = (x1 - x0) >= (y1 - y0) ? cy : cy + off;
-    ceil.cyl(lx, ly, 0.16, ffl + lv.ceiling - 0.035, ffl + lv.ceiling - 0.005, "lamp", 20);
+  if (core.length && top >= 2) {
+    const [, rc] = core[0], mid = Math.max(0, Math.floor((top - 1) / 2));
+    addLabel(S.lift ? "🪜 Stair + 🛗 lift<small>the same on every floor</small>" : "🪜 Stair<small>the same on every floor</small>",
+      [(rc[0] + rc[2]) / 2, (rc[1] + rc[3]) / 2, zf(mid + 1) + mid * GAP + GAP / 2], "lbl xr",
+      () => state.explode && state.mode !== "walk" && !state.xray);
   }
-  ceil.emit(G.ceil, new Set(["slab"]));          // the terrace floor can be tapped to walk there
-
-  // —— furniture + ceiling fans
-  const furn = new Builder();
-  for (const it of S.furniture) { try { furniture(furn, it, ffl); } catch (e) { console.warn("furniture", it.kind, e); } }
-  furn.emit(G.furn);
-  for (const r of S.rooms) if (hasFan(r)) fanAt(r, ffl + lv.ceiling);
-
-  // —— site: ground, road, yard, amenities, cars, trees, gates, walkway
-  buildSite(pickRoles);
-
-  // —— Vastu mandala on the floor
-  buildVastu(ffl);
-
-  // —— labels
-  for (const r of S.rooms) {
-    if (r.cat === "LIFT" || r.name.includes("Duct")) continue;
-    const [x0, y0, x1, y1] = r.r;
-    addLabel(`${esc(r.name)}<small>${r.size} · ${r.ft}</small>`, [(x0 + x1) / 2, (y0 + y1) / 2, ffl + 0.3], "lbl", () => ["dollhouse", "top"].includes(state.mode));
-  }
-  for (const d of S.doors) {
-    if (d.kind === "lift") continue;
-    for (const side of [1, -1]) {
-      const to = side === 1 ? d.other : d.room;     // the room side reads where the door goes
-      if (!to) continue;
-      const px = d.mid[0] + d.n[0] * side * 0.12, py = d.mid[1] + d.n[1] * side * 0.12;
-      addLabel(`→ ${esc(to === "Outside" ? "Outside" : to)}`, [px, py, ffl + 2.32], "sign", () => state.mode === "walk" && walker.level === 0, { door: d, side });
+  for (const p of S.upper ? [0, 1] : [0]) {
+    for (const d of PL(p).doors) {
+      if (d.kind === "lift") continue;
+      for (const side of [1, -1]) {
+        const to = side === 1 ? d.other : d.room;     // the room side reads where the door goes
+        if (!to) continue;
+        const px = d.mid[0] + d.n[0] * side * 0.12, py = d.mid[1] + d.n[1] * side * 0.12;
+        const shown = to === "Outside" ? "Outside" : (to.includes(" · ") ? to.split(" · ")[1] : to);
+        addLabel(`→ ${esc(shown)}`, [px, py, ffl + 2.32], "sign",
+          () => state.mode === "walk" && hasRooms(walker.level) && planOf(walker.level) === p && !lift.rider &&
+            !(walker.level > 0 && d.upper && d.upper !== "balcony"),
+          { door: d, side, lvl: true, to, flatTo: flatOf(to), plan: p });
+      }
     }
   }
   for (const g of S.mandala) addLabel(`${g.word}`, [(g.r[0] + g.r[2]) / 2, (g.r[1] + g.r[3]) / 2, ffl + 0.05], "lbl zone",
-    () => state.vastu && state.mode !== "outside");
-  // north arrow on the ground (front-left corner of the plot)
-  const nx = S.north[0], ny = S.north[1], ax = 1.0 + 0.0, ay = S.plot.h - 1.0;
+    () => state.vastu && state.mode !== "outside" && hasRooms(activeLevel()), { lvl: true });
+  const nx = S.north[0], ny = S.north[1], ax = 1.0, ay = S.plot.h - 1.0;
   addLabel("N", [ax + nx * 1.25, ay + ny * 1.25, 0.15], "north", () => state.mode !== "walk");
-  if (floors > 1) addLabel(`Upper floor${floors > 2 ? "s" : ""} — shell only (rooms not designed yet)`,
-    [fx + fw / 2, fy + fd / 2, ffl + H * (floors - 0.4)], "lbl", () => state.mode === "outside");
+  for (const l of S.levels_list || []) {
+    addLabel(`${esc(l.label)}`, [S.shell.outer[0] - 0.5, S.shell.outer[3] + 0.3, l.z + (l.kind === "terrace" ? 0.6 : 1.3)], "lbl floor",
+      () => state.mode !== "walk" && (state.explode || state.xray), { floorLabel: l.i });
+  }
 
-  navs = [decodeNav(S.nav), S.nav1 ? decodeNav(S.nav1) : null];
-  nav = navs[0];
-  if (walker.level === 1 && !navs[1]) walker.level = 0;
+  navs = { g0: decodeNav(S.nav), typ: S.nav_typ ? decodeNav(S.nav_typ) : null, top: S.nav1 ? decodeNav(S.nav1) : null };
+  nav = navs.g0;
+  segCells = new Int8Array(nav.nx * nav.ny).fill(-1);       // which half of a flight each stair cell is on
+  for (const st of S.stairs) {
+    const w = st.wr || st.r;
+    const i0 = Math.max(0, Math.floor((w[0] - nav.x0) / nav.cell)), i1 = Math.min(nav.nx - 1, Math.floor((w[2] - nav.x0) / nav.cell));
+    const j0 = Math.max(0, Math.floor((w[1] - nav.y0) / nav.cell)), j1 = Math.min(nav.ny - 1, Math.floor((w[3] - nav.y0) / nav.cell));
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      const b = stairBoxAt(nav.x0 + (i + 0.5) * nav.cell, nav.y0 + (j + 0.5) * nav.cell);
+      if (b) segCells[j * nav.nx + i] = b.seg;
+    }
+  }
+  walker.level = clamp(walker.level, 0, top);
+  state.view = clamp(state.view || r0, 0, top);
   vis = buildVis();
   drawMinimapBase();
+  buildFloorBar();
   applyTheme();
   applySun();
   setVastu(state.vastu);
-  G.furn.visible = state.furn;
+  setFurniture(state.furn);
+  applyLevelView();
   $("startMeta").textContent = `${S.meta.title} · ${S.meta.cents} cents · carpet ${S.meta.carpet} m² · Vastu ${S.meta.vastu}/100`;
   $("msg").style.display = "none";
   poke(1500);
+}
+
+function stairParts(bld, st) {
+  for (const b of st.boxes) bld.box(b.slice(0, 6), "stair", "stair");
+  for (const rail of st.rails) {
+    for (let i = 0; i + 1 < rail.length; i++) rod(bld, rail[i], rail[i + 1], 0.022, "rail");
+    for (const p of rail) rod(bld, [p[0], p[1], p[2] - 0.9], p, 0.014, "rail");
+  }
+}
+function doorSpan(d) {
+  const ca = d.closed * DEG, ex = d.hinge[0] + Math.round(Math.cos(ca)) * d.w, ey = d.hinge[1] + Math.round(Math.sin(ca)) * d.w;
+  return d.horiz ? [Math.min(d.hinge[0], ex), Math.max(d.hinge[0], ex), d.hinge[1]] : [Math.min(d.hinge[1], ey), Math.max(d.hinge[1], ey), d.hinge[0]];
+}
+function upperFill(bld, d, ffl) {        // above the ground the building's entrance is closed: wall + window, or parapet
+  const [a, b, line] = doorSpan(d), t = d.t / 2;
+  const box = (z0, z1, role, edge) => bld.box(d.horiz ? [a, line - t, b, line + t, z0, z1] : [line - t, a, line + t, b, z0, z1], role, edge);
+  if (d.upper === "parapet") { box(ffl, ffl + S.levels.parapet, "parapet", "wall"); return; }
+  box(ffl, ffl + 0.9, "wall_out", "wall"); box(ffl + 2.1, ffl + S.levels.ceiling, "wall_out", "wall");
+  box(ffl + 0.9, ffl + 2.1, "glass", "win");
+}
+function balcony(bld, b, ffl) {          // upper-floor balcony where the ground floor has an outside door
+  const [x0, y0, x1, y1] = b;
+  bld.box([x0, y0, x1, y1, ffl - 0.15, ffl], "slab", "wall", (f) => (f.top ? "fl_tile" : f.bottom ? "ceiling" : "slab"));
+  const z = ffl + 1.0, c = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+  for (let i = 0; i < 4; i++) {
+    const p = c[i], q = c[(i + 1) % 4];
+    if (inFootprint((p[0] + q[0]) / 2, (p[1] + q[1]) / 2, 0.05)) continue;     // the house wall side
+    rod(bld, [p[0], p[1], z], [q[0], q[1], z], 0.025, "rail");
+    const L = Math.hypot(q[0] - p[0], q[1] - p[1]), n = Math.max(2, Math.round(L / 0.15));
+    for (let k = 0; k <= n; k++) { const f = k / n, x = p[0] + (q[0] - p[0]) * f, y = p[1] + (q[1] - p[1]) * f; rod(bld, [x, y, ffl], [x, y, z], 0.01, "rail"); }
+  }
 }
 
 function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
@@ -621,8 +757,8 @@ function doorFrame(bld, d, ffl) {
   bld.box([head[0], head[1], head[2], head[3], ffl + d.h - 0.06, ffl + d.h], "dframe", "door");
 }
 
-function doorLeaf(d, ffl) {
-  const role = { main: "door_main", bath: "door_bath", lift: "door_steel", service: "door_steel" }[d.kind] || "door_int";
+function doorLeaf(d, ffl, grp = G.dyn, plan = 0) {
+  const role = { main: "door_main", flatdoor: "door_main", bath: "door_bath", lift: "door_steel", service: "door_steel" }[d.kind] || "door_int";
   const pivot = new THREE.Group();
   pivot.position.set(d.hinge[0], 0, -d.hinge[1]);
   pivot.rotation.y = d.closed * DEG;
@@ -638,9 +774,10 @@ function doorLeaf(d, ffl) {
       const hm = new THREE.Mesh(hg, mat("handle")); hm.userData.role = "handle"; pivot.add(hm); registry.meshes.push(hm);
     }
   }
-  G.doors.add(pivot);
+  grp.add(pivot);
   let delta = ((d.open - d.closed + 540) % 360) - 180;
-  registry.doors.push({ d, pivot, cur: 0, target: 0, delta: delta * DEG, still: d.kind === "lift" });
+  registry.doors.push({ d, pivot, cur: 0, target: 0, delta: delta * DEG, still: d.kind === "lift",
+    groundOnly: d.upper === "wall" || d.upper === "parapet", plan });
 }
 
 // ───────────────────────────── furniture (the drawing's own pieces, given height)
@@ -804,7 +941,7 @@ function furniture(bld, it, ffl) {
   }
 }
 
-function fanAt(r, ceilZ) {
+function fanAt(r, ceilZ, grp = G.dyn) {
   const [x0, y0, x1, y1] = r.r, cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
   const g = new THREE.Group(); g.position.set(cx, ceilZ - 0.4, -cy);
   const add = (geo, role) => { const m = new THREE.Mesh(geo, mat(role)); m.userData.role = role; m.castShadow = true; g.add(m); registry.meshes.push(m); return m; };
@@ -813,12 +950,20 @@ function fanAt(r, ceilZ) {
   for (let i = 0; i < 3; i++) {
     const b = new THREE.BoxGeometry(0.55, 0.012, 0.11); b.translate(0.36, -0.01, 0); b.rotateY(i * 2 * Math.PI / 3); add(b, "fan");
   }
-  G.ceil.add(g); registry.fans.push(g);
+  grp.add(g); registry.fans.push(g);
 }
 
 // ───────────────────────────── site
 function buildSite(pickRoles) {
   const bld = new Builder(), W = S.plot.w, H = S.plot.h, rd = S.road;
+  for (const b of S.walls.cmp || []) {
+    bld.box(b, "compound", "site");
+    bld.box([b[0] - 0.04, b[1] - 0.04, b[2] + 0.04, b[3] + 0.04, b[5], b[5] + 0.06], "pillar", null);
+  }
+  for (const b of S.walls.pillar || []) bld.box(b, "pillar", "site");
+  if (!S.stilt) { const o = S.shell.outer; bld.box([o[0] - 0.08, o[1] - 0.08, o[2] + 0.08, o[3] + 0.08, 0, S.levels.ffl], "plinth", "wall"); }
+  for (const b of S.steps) bld.box(b, "stair", "stair");
+  for (const st of S.stairs) if (st.external) stairParts(bld, st);
   bld.quadUp(-60, -60, W + 60, H + 60, -0.02, "land");
   bld.quadUp(0, 0, W, H, 0.0, "yard");
   bld.quadUp(-60, H, W + 60, rd.y0, 0.003, "verge");
@@ -852,7 +997,7 @@ function buildSite(pickRoles) {
     }
   }
   const stiltBase = S.stilt ? 0.15 : 0;
-  for (const c of S.cars) car(bld, c, c.stilt ? stiltBase : 0.0);
+  for (const c of S.cars) if (!c.drive) car(bld, c, c.stilt ? stiltBase : 0.0);
   for (const b of S.bikes) bike(bld, b);
   for (const t of S.trees) tree(bld, t);
   // walkway pavers along the guided path from the gate to the steps
@@ -925,20 +1070,119 @@ function tree(bld, t) {
     bld.B(k % 2 ? "leaf2" : "leaf").geom(g);
   }
 }
-function gate(g) {
-  const [g0, g1] = g, H = S.plot.h, width = g1 - g0;
-  const leaves = width > 2.4 ? [[g0, 0, -90, width / 2], [g1, 180, 90, width / 2]] : [[g0, 0, -90, width]];
-  for (const [hx, closed, delta, len] of leaves) {
-    const pivot = new THREE.Group(); pivot.position.set(hx, 0, -H); pivot.rotation.y = closed * DEG;
-    const bld = new Builder(), L = len - 0.06;
-    const bar = (x0, x1, z0, z1) => bld.box([x0, -0.02, x1, 0.02, z0, z1], "gate", "gate");
-    bar(0.03, L, 0.08, 0.13); bar(0.03, L, 1.42, 1.47); bar(0.03, L, 0.75, 0.79); bar(0.03, 0.08, 0.08, 1.47); bar(L - 0.05, L, 0.08, 1.47);
-    for (let x = 0.2; x < L - 0.08; x += 0.13) bar(x, x + 0.022, 0.13, 1.42);
-    bld.emit(pivot);            // leaf built along local +x from its hinge
-    G.site.add(pivot);
-    registry.gates.push({ pivot, closed: closed * DEG, cur: 0, target: 0, delta: delta * DEG, mid: [(g0 + g1) / 2, H] });
-  }
+// a gate leaf along local +x from 0 to len (MS frame, rails, pickets; a wicket door drawn in it)
+function gateLeaf(len, h, wk = null) {
+  const bld = new Builder(), L = len - 0.04;
+  const bar = (x0, x1, z0, z1) => bld.box([x0, -0.02, x1, 0.02, z0, z1], "gate", "gate");
+  bar(0.02, L, 0.08, 0.13); bar(0.02, L, h - 0.08, h - 0.03); bar(0.02, L, h / 2, h / 2 + 0.04);
+  bar(0.02, 0.07, 0.08, h - 0.03); bar(L - 0.05, L, 0.08, h - 0.03);
+  for (let x = 0.2; x < L - 0.08; x += 0.13) bar(x, x + 0.022, 0.13, h - 0.08);
+  if (wk) { const [a, b] = wk; bld.box([a, 0.02, b, 0.04, 0.05, 1.95 < h ? 1.95 : h - 0.05], "frame", "gate"); }
+  return bld;
 }
+function gate(g) {
+  if (Array.isArray(g)) g = { x0: g[0], x1: g[1], h: 1.5, leaves: [] };
+  const H = S.plot.h, width = g.x1 - g.x0, gh = g.h || 1.5;
+  let leaves = (g.leaves || []).filter((lf) => lf.type !== "wicket");
+  if (!leaves.length) leaves = width > 2.4 ? [{ type: "swing", hinge: g.x0, len: width / 2, dir: 1 }, { type: "swing", hinge: g.x1, len: width / 2, dir: -1 }]
+    : [{ type: "swing", hinge: g.x0, len: width, dir: 1 }];
+  const mid = g.wicket ? [(g.wicket[0] + g.wicket[1]) / 2, H] : [(g.x0 + g.x1) / 2, H];
+  const rec = { cur: 0, target: 0, mid, gmid: [(g.x0 + g.x1) / 2, H], parts: [], g };
+  for (const lf of leaves) {
+    const h = lf.wicket ? Math.min(gh, 1.5) : gh;
+    if (lf.type === "swing") {                       // hinge on the pillar, opens inward (never over the road)
+      const pivot = new THREE.Group(); pivot.position.set(lf.hinge, 0, -H);
+      const c = lf.dir > 0 ? 0 : Math.PI; pivot.rotation.y = c;
+      gateLeaf(lf.len, h).emit(pivot); G.site.add(pivot);
+      rec.parts.push((e) => { pivot.rotation.y = c - lf.dir * (Math.PI / 2) * e; });
+    } else if (lf.type === "slide") {                // rolls on a ground track just inside the wall
+      const grp = new THREE.Group(), z = -H + 0.16 + (rec.parts.length % 2) * 0.07;
+      grp.position.set(lf.x0, 0, z);
+      const len = lf.x1 - lf.x0, inner = g.wicket && g.vehicle && g.wicket[0] >= g.vehicle[0] - 1e-6 && g.wicket[1] <= g.vehicle[1] + 1e-6;
+      const wk = inner && rec.parts.length === 0 ? [Math.max(0.1, g.wicket[0] - lf.x0), Math.min(len - 0.1, g.wicket[1] - lf.x0)] : null;
+      gateLeaf(len, h, wk && wk[1] > wk[0] + 0.5 ? wk : null).emit(grp);
+      G.site.add(grp);
+      rec.parts.push((e) => { grp.position.x = lf.x0 + lf.to * lf.travel * e; });
+    } else if (lf.type === "fold") {                 // bi-fold: two panels folding back against the pillar
+      const pa = new THREE.Group(); pa.position.set(lf.hinge, 0, -H);
+      const c = lf.dir > 0 ? 0 : Math.PI; pa.rotation.y = c;
+      gateLeaf(lf.len, h).emit(pa);
+      const pb = new THREE.Group(); pb.position.set(lf.len, 0, 0.05); gateLeaf(lf.len, h).emit(pb); pa.add(pb);
+      G.site.add(pa);
+      rec.parts.push((e) => { pa.rotation.y = c - lf.dir * (Math.PI / 2) * e; pb.rotation.y = lf.dir * Math.PI * 0.97 * e; });
+    }
+  }
+  // the track and the wall the sliding leaf runs behind
+  if (g.runback) {
+    const tb = new Builder(), a = Math.min(g.x0, g.runback[0]), b = Math.max(g.x1, g.runback[1]);
+    tb.box([a, H - 0.2, b, H - 0.12, 0, 0.03], "steel", "gate");
+    tb.emit(G.site);
+  }
+  registry.gates.push(rec);
+  const what = { walk: "walking gate", two_wheeler: "walk + bike gate", vehicle: "car gate", vehicle_wicket: "car gate + wicket" }[g.kind] || "gate";
+  const op = { sliding: " · sliding", telescopic: " · telescopic", bifold: " · bi-fold" }[g.op] || "";
+  if (g.tag) addLabel(`🚪 ${g.tag} · ${g.feet || width.toFixed(2) + " m"} ${what}${op}`, [(g.x0 + g.x1) / 2, H + 0.3, gh + 0.55], "lbl",
+    () => state.mode === "outside" && !state.xray && !state.explode && !lift.rider);
+}
+
+// ───────────────────────────── drive in: the design car from the road, through its gate, to its bay
+const drive = { on: false, s: 0, grp: null, cum: null, len: 0, trail: null, n: 0 };
+function buildDrive() {
+  drive.on = false; drive.grp = null;
+  $("btnDrive").style.display = S.drive ? "" : "none";
+  if (!S.drive) return;
+  const d = S.drive.dims, bld = new Builder();
+  car(bld, { c: [0, 0], along: "x", L: d.L, W: d.W, i: 1 }, 0);
+  drive.grp = new THREE.Group(); bld.emit(drive.grp); G.site.add(drive.grp);
+  const P = S.drive.path; drive.cum = [0];
+  for (let i = 1; i < P.length; i++) drive.cum.push(drive.cum[i - 1] + Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1]));
+  drive.len = drive.cum[drive.cum.length - 1];
+  // the swept path: the body's four corners traced on the ground (as engineers check a gate)
+  const pos = [];
+  const hl = d.L / 2, hw = d.W / 2;
+  const corner = (p, su, sv) => [p[0] + su * hl * Math.cos(p[2]) - sv * hw * Math.sin(p[2]), p[1] + su * hl * Math.sin(p[2]) + sv * hw * Math.cos(p[2])];
+  for (let i = 1; i < P.length; i++) for (const [su, sv] of [[1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+    const a = corner(P[i - 1], su, sv), b = corner(P[i], su, sv);
+    pos.push(a[0], 0.03, -a[1], b[0], 0.03, -b[1]);
+  }
+  const geo = new THREE.BufferGeometry().setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  drive.trail = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0xFFB020, transparent: true, opacity: 0.9 }));
+  drive.trail.visible = false; drive.n = (P.length - 1) * 8; G.site.add(drive.trail);
+  drivePose(drive.len);                                 // parked in its bay until asked
+}
+function drivePose(s) {
+  const P = S.drive.path, c = drive.cum;
+  let i = 1; while (i < c.length - 1 && c[i] < s) i++;
+  const t = clamp((s - c[i - 1]) / Math.max(1e-6, c[i] - c[i - 1]), 0, 1), a = P[i - 1], b = P[i];
+  const x = a[0] + (b[0] - a[0]) * t, y = a[1] + (b[1] - a[1]) * t;
+  let hd = b[2] - a[2]; while (hd > Math.PI) hd -= 2 * Math.PI; while (hd < -Math.PI) hd += 2 * Math.PI;
+  const h = a[2] + hd * t;
+  const f = S.footprint, under = S.drive.stilt && x > f[0] && x < f[0] + f[2] && y > f[1] && y < f[1] + f[3];
+  drive.grp.position.set(x, under ? 0.15 : 0, -y); drive.grp.rotation.y = h;
+  drive.at = [x, y];
+  if (drive.trail) drive.trail.geometry.setDrawRange(0, Math.max(0, Math.round(i * 8)));
+}
+function startDrive() {
+  if (!S || !S.drive) return;
+  tourInterrupt(); hideStart();
+  if (state.mode !== "outside" && state.mode !== "top") setMode("outside");
+  const g = S.gates[S.drive.gate] || S.gates[0];
+  if (g) { orbit.target.set((g.x0 + g.x1) / 2, 1.0, -(S.plot.h - 1.0)); orbit.r = 21; orbit.phi = 0.72; orbit.theta = frontTheta();
+    flyTo(orbitPos(), orbit.target.clone(), 0.9); }
+  drive.on = true; drive.s = 0; drive.trail.visible = true; drivePose(0);
+  const wd = g ? `${g.feet || g.width.toFixed(2) + " m"} ${g.tag}` : "";
+  toast(`🚗 A ${S.drive.label || "car"} turns in from the ${Math.round((S.road.w || (S.road.y1 - S.road.y0)) / 0.3048 / 5) * 5} ft road through the ${wd} gate — the orange lines trace its four corners.`, 7000);
+}
+function driveUpdate(dt) {
+  if (!drive.on) return false;
+  const H = S.plot.h, y = drive.at ? drive.at[1] : H + 5, left = drive.len - drive.s;
+  const v = left < 3 ? Math.max(0.35, left * 0.7) : (Math.abs(y - H) < 3.5 ? 1.4 : 3.2);
+  drive.s = Math.min(drive.len, drive.s + v * dt);
+  drivePose(drive.s);
+  if (drive.s >= drive.len - 1e-3) { drive.on = false; setTimeout(() => { if (!drive.on && drive.trail) { drive.trail.visible = false; poke(); } }, 6000); }
+  return true;
+}
+$("btnDrive").addEventListener("click", startDrive);
 
 // ───────────────────────────── Vastu overlay
 const ZONE_COL = { NE: 0x2E86DE, E: 0xF6C343, SE: 0xE67E22, S: 0xC0392B, SW: 0x8E5B3A, W: 0x95A5A6, NW: 0xB8E0F6, N: 0x27AE60, CENTER: 0xF1C40F };
@@ -947,7 +1191,7 @@ function buildVastu(ffl) {
     const [x0, y0, x1, y1] = g.r;
     const m = new THREE.Mesh(new THREE.PlaneGeometry(x1 - x0 - 0.04, y1 - y0 - 0.04),
       new THREE.MeshBasicMaterial({ color: ZONE_COL[g.zone] || 0xffffff, transparent: true, opacity: 0.22, depthWrite: false }));
-    m.rotation.x = -Math.PI / 2; m.position.set((x0 + x1) / 2, ffl + 0.012, -(y0 + y1) / 2); G.vastu.add(m);
+    m.rotation.x = -Math.PI / 2; m.position.set((x0 + x1) / 2, ffl + 0.012, -(y0 + y1) / 2); G.vastu.add(m);   // moves with the floor
   }
   if (S.brahmasthan) {
     const [x0, y0, x1, y1] = S.brahmasthan, l = new Lines(), z = ffl + 0.02;
@@ -975,7 +1219,12 @@ function updateLabels(w, h) {
       const d = l.door, dx = walker.x - d.mid[0], dy = walker.y - d.mid[1], dist = Math.hypot(dx, dy);
       ok = dist < 5 && dist > 0.35 && (dx * d.n[0] + dy * d.n[1]) * l.side > 0.05 && losClear(walker.x, walker.y, l.plan[0], l.plan[1]);
     }
-    if (ok) { _v.copy(l.pos).project(camera); ok = _v.z < 1 && Math.abs(_v.x) < 1.1 && Math.abs(_v.y) < 1.1; }
+    if (ok) {
+      _v.copy(l.pos);
+      if (l.lvl) _v.y += G.dyn.position.y;
+      if (l.floorLabel !== undefined && state.explode) _v.y += l.floorLabel * GAP;
+      _v.project(camera); ok = _v.z < 1 && Math.abs(_v.x) < 1.1 && Math.abs(_v.y) < 1.1;
+    }
     let sx = 0, sy = 0;
     if (ok) {
       sx = (_v.x + 1) / 2 * w; sy = (1 - _v.y) / 2 * h;
@@ -999,8 +1248,9 @@ function decodeNav(n) {
   return Object.assign({}, n, { free });
 }
 const cellOf = (x, y) => [Math.floor((x - nav.x0) / nav.cell), Math.floor((y - nav.y0) / nav.cell)];
+const gridOf = (L) => (L <= 0 ? navs.g0 : L >= TOP() ? (navs.top || navs.g0) : (navs.typ || navs.g0));
 const okCell = (i, j, L = walker.level) => {
-  const g = navs[L] || nav;
+  const g = gridOf(L);
   return i >= 0 && j >= 0 && i < g.nx && j < g.ny && g.free[j * g.nx + i] === 1;
 };
 const freeAt = (x, y, L = walker.level) => { const [i, j] = cellOf(x, y); return okCell(i, j, L); };
@@ -1032,6 +1282,7 @@ function astar(sx, sy, gx, gy, L = walker.level) {
       const a = x + dx, b = y + dy; if (!okCell(a, b, L)) continue;
       if (dx && dy && !(okCell(a, y, L) && okCell(x, b, L))) continue;
       const j = b * nx + a; if (closed[j]) continue;
+      if (segCells && segCells[i] >= 0 && segCells[j] >= 0 && segCells[i] !== segCells[j]) continue;   // that step changes floor
       const ng = gs[i] + (dx && dy ? 1.414 : 1);
       if (ng < gs[j]) { gs[j] = ng; came[j] = i; push([ng + hf(j), j]); }
     }
@@ -1046,7 +1297,13 @@ function astar(sx, sy, gx, gy, L = walker.level) {
 }
 function losCells(a, b, L = walker.level) {
   const n = Math.ceil(Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1])) * 2) + 1;
-  for (let k = 0; k <= n; k++) { const f = k / n; if (!okCell(Math.round(a[0] + (b[0] - a[0]) * f), Math.round(a[1] + (b[1] - a[1]) * f), L)) return false; }
+  let half = -1;
+  for (let k = 0; k <= n; k++) {
+    const f = k / n, i = Math.round(a[0] + (b[0] - a[0]) * f), j = Math.round(a[1] + (b[1] - a[1]) * f);
+    if (!okCell(i, j, L)) return false;
+    const sg = segCells ? segCells[j * nav.nx + i] : -1;
+    if (sg >= 0) { if (half >= 0 && sg !== half) return false; half = sg; }      // never cut across a flight's halves
+  }
   return true;
 }
 function buildVis() {              // full-height walls only: what blocks the eye
@@ -1067,26 +1324,35 @@ function losClear(x0, y0, x1, y1) {
   }
   return true;
 }
-function stairAt(x, y) {          // the step / landing under the feet, if any
+function stairServes(st, L) { return st.external ? L <= 1 : L >= 0 && L <= TOP(); }
+function stairBoxAt(x, y) {          // the step / landing box under (x, y), whatever floor it belongs to
   for (const st of S.stairs) {
     const w = st.wr || st.r; if (x < w[0] || x > w[2] || y < w[1] || y > w[3]) continue;
-    let h = null;
-    for (const b of st.boxes) if (x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]) h = h === null ? b[5] : Math.max(h, b[5]);
-    if (h !== null) return { h, st };
+    for (const b of st.boxes) if (x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]) return { st, b, seg: b[6] || 0 };
   }
   return null;
 }
+function stairAt(x, y, L = walker.level) {   // the step under the feet on level L (lower half: up from L; upper: into L)
+  const r = stairBoxAt(x, y);
+  if (!r || !stairServes(r.st, L)) return null;
+  const f = r.seg === 0 ? L : L - 1;                              // the flight starts on level f
+  if (f < 0 || f > (r.st.external ? 0 : TOP() - 1)) return null;  // no flight there
+  return { h: r.st.low + (f - (r.st.ls || 0)) * S.levels.storey + (r.b[5] - r.st.low), st: r.st, seg: r.seg };
+}
 function groundAt(x, y, L = walker.level) {
-  const s = stairAt(x, y); if (s) return s.h;
-  if (L === 1 && S.upper) return S.upper.z;
+  const s = stairAt(x, y, L); if (s) return s.h;
+  if (L > 0) return zf(L);
   let z = 0;
   for (const g of S.ground) if (x >= g[0] && x <= g[2] && y >= g[1] && y <= g[3]) z = Math.max(z, g[4]);
   return z;
 }
-function updateLevel() {           // half-way up a flight you belong to the floor above
-  if (!navs[1]) return;
-  const s = stairAt(walker.x, walker.y);
-  if (s) walker.level = s.h > s.st.mid + 0.01 ? 1 : 0;
+function updateLevel() {           // crossing from the lower half of a flight to the upper half changes the floor
+  const s = stairBoxAt(walker.x, walker.y);
+  if (!s) { walker.seg = null; return; }
+  if (walker.seg === 0 && s.seg === 1 && walker.level < TOP()) walker.level++;
+  else if (walker.seg === 1 && s.seg === 0 && walker.level > 0) walker.level--;
+  walker.seg = s.seg;
+  if (walker.level !== hudLevel) applyLevelView();
 }
 
 // ───────────────────────────── modes & camera
@@ -1096,37 +1362,60 @@ function setMode(m, opts = {}) {
   if (!S) return;
   const prev = state.mode; state.mode = m;
   document.querySelectorAll("#modes .b[data-mode]").forEach((b) => b.classList.toggle("on", b.dataset.mode === m));
-  G.ceil.visible = m === "walk" || m === "outside";
+  if (m === "dollhouse" || m === "top") state.view = prev === "walk" ? walker.level : (state.view || R0());
+  if (m === "dollhouse" && opts.all !== undefined) state.explode = opts.all;
+  if (m === "top") state.explode = false;
+  $("btnExplode").classList.toggle("on", state.explode);
   $("pad").style.display = m === "walk" ? "block" : "none";
   $("hud").style.display = m === "walk" ? "block" : "none";
   if (m !== "walk") closeWish();
   const [fx, fy, fw, fd] = S.footprint;
-  const centre = new THREE.Vector3(fx + fw / 2, S.levels.ffl + 0.5, -(fy + fd / 2));
+  applyLevelView();
+  if (m === "dollhouse" && state.explode && !state.xray && !floorTip && multiFloor()) {
+    floorTip = true;
+    setTimeout(() => toast("Every floor, pulled apart so you can look into each one — the stair" + (S.lift ? " and lift run" : " runs") +
+      " through all of them. Tap a floor on the left to open just that floor.", 7000), 900);
+  }
+  const vz = state.explode ? zf(activeLevel()) + activeLevel() * GAP : zf(activeLevel());
+  const centre = new THREE.Vector3(fx + fw / 2, (m === "outside" ? S.levels.ffl : vz) + 0.5, -(fy + fd / 2));
+  const bh = S.shell.roof_z + (state.explode ? TOP() * GAP : 0);
+  showCop((m === "walk" && lift.rider) || state.xray);
   if (m === "walk") {
-    if (opts.at) { walker.x = opts.at[0]; walker.y = opts.at[1]; walker.level = opts.level || 0; }
-    else if (prev !== "walk") { placeWalkerDefault(); walker.level = 0; }
+    if (lift.rider || lift.anim) { /* still in the lift car */ }
+    else if (opts.at) { walker.x = opts.at[0]; walker.y = opts.at[1]; walker.level = opts.level ?? R0(); }
+    else if (prev !== "walk") {
+      const L = (prev === "dollhouse" || prev === "top") && hasRooms(state.view) ? state.view : R0();
+      placeWalkerDefault(L); walker.level = L;
+    }
+    walker.seg = null;
     if (opts.yaw !== undefined) walker.yaw = opts.yaw;
-    walker.pitch = -0.05; walker.h = groundAt(walker.x, walker.y) + walker.eye; walker.path = [];
+    walker.pitch = -0.05; walker.h = (lift.rider || lift.anim ? lift.z : groundAt(walker.x, walker.y)) + walker.eye; walker.path = [];
     const toP = new THREE.Vector3(walker.x, walker.h, -walker.y);
     const toT = toP.clone().add(lookDir());
     flyTo(toP, toT, prev === "walk" ? 0.01 : 1.1);
   } else {
     orbit.target.copy(centre);
     const span = Math.max(S.plot.w, S.plot.h);
-    if (m === "outside") { orbit.phi = 1.1; orbit.theta = frontTheta(); orbit.r = fitRadius(span) * 1.3; orbit.target.y = 1.5;
-      orbit.target.z -= 1.5; }
-    if (m === "dollhouse") { orbit.phi = 0.72; orbit.theta = frontTheta(); orbit.r = fitRadius(Math.max(fw, fd)) * 1.35; }
+    if (m === "outside") { orbit.phi = 1.1; orbit.theta = frontTheta(); orbit.r = fitRadius(Math.max(span, bh * 1.3)) * 1.3;
+      orbit.target.y = Math.max(1.5, bh * 0.4); orbit.target.z -= 1.5; }
+    if (m === "dollhouse" && !state.explode) { orbit.phi = 0.72; orbit.theta = frontTheta(); orbit.r = fitRadius(Math.max(fw, fd)) * 1.35; }
+    if (m === "dollhouse" && state.explode) {            // frame the whole stack
+      const z0 = zf(0), z1 = zf(TOP()) + TOP() * GAP;
+      orbit.target.set(fx + fw / 2, (z0 + z1) / 2, -(fy + fd / 2));
+      orbit.phi = 1.0; orbit.theta = frontTheta(); orbit.r = fitRadius(Math.max(fw, fd, (z1 - z0) * 1.15)) * 1.2;
+    }
     if (m === "top") { orbit.phi = 0.012; orbit.theta = 0; orbit.r = fitRadius(span) * 1.25; }
     const toP = orbitPos(), toT = orbit.target.clone();
     flyTo(toP, toT, opts.instant ? 0.01 : 1.0);
   }
   poke(1500);
 }
-function placeWalkerDefault() {
+let floorTip = false;
+function placeWalkerDefault(L = R0()) {
   const main = S.doors.find((d) => d.kind === "main");
   let p = null;
-  if (main) { const c = nearestFree(main.mid[0] + main.n[0] * 0.9, main.mid[1] + main.n[1] * 0.9, 1.2); if (c) p = centreOf(c); }
-  if (!p) { const lr = S.rooms.find((r) => r.cat === "LIVING") || S.rooms[0]; const c = nearestFree((lr.r[0] + lr.r[2]) / 2, (lr.r[1] + lr.r[3]) / 2, 2); if (c) p = centreOf(c); }
+  if (main) { const c = nearestFree(main.mid[0] + main.n[0] * 0.9, main.mid[1] + main.n[1] * 0.9, 1.5, L); if (c) p = centreOf(c); }
+  if (!p) { const lr = S.rooms.find((r) => r.cat === "LIVING") || S.rooms[0]; const c = nearestFree((lr.r[0] + lr.r[2]) / 2, (lr.r[1] + lr.r[3]) / 2, 2, L); if (c) p = centreOf(c); }
   if (!p) p = [S.plot.w / 2, S.plot.h / 2];
   walker.x = p[0]; walker.y = p[1];
   walker.yaw = main ? Math.atan2(main.n[1], main.n[0]) : 0;
@@ -1195,7 +1484,8 @@ canvas.addEventListener("wheel", (e) => {
 }, { passive: false });
 window.addEventListener("keydown", (e) => {
   if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(e.key)) e.preventDefault();
-  keys.add(e.key.toLowerCase()); if (state.mode === "walk" && /^(arrow|w|a|s|d)/.test(e.key.toLowerCase())) tourInterrupt();
+  keys.add(e.key.toLowerCase());
+  if (state.mode === "walk" && /^(arrow|w|a|s|d)/.test(e.key.toLowerCase())) { tourInterrupt(); if (lift.auto && !lift.rider) lift.auto = null; }
   poke();
 });
 window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
@@ -1215,13 +1505,27 @@ function tap(cx, cy) {
   ray.setFromCamera(ndc, camera);
   const hits = ray.intersectObjects(registry.pick.filter((m) => m.visible && m.parent && m.parent.visible), false)
     .filter((h) => !h.face || h.face.normal.y > 0.5);                 // floors, steps and the terrace — not ceilings
+  if (lift.ok) {
+    if (state.mode === "walk" && (lift.rider || lift.anim)) { if (lift.rider) stepOut(); return; }
+    const shown = (o) => { for (let q = o; q; q = q.parent) if (!q.visible) return false; return true; };
+    const lh = ray.intersectObjects(lift.hits.filter(shown), false)[0];
+    if (lh && (!hits.length || lh.distance <= hits[0].distance + 0.05)) {
+      const info = lh.object.userData.lift;
+      if (state.mode !== "walk") { if (info.L !== undefined) { liftCall(stopOf(info.L), "remote"); toast(`🛗 Calling the lift to ${levelLabel(info.L)}…`, 1800); } return; }
+      if (canBoard() && (info.kind === "car" || info.L === walker.level)) { boardLift(); return; }
+      if (info.L === walker.level && Math.hypot(walker.x - S.lift.door.mid[0], walker.y - S.lift.door.mid[1]) < 3.5) {
+        liftCall(stopOf(info.L), "hall"); toast("🔔 Lift called — it is coming.", 1800); return;
+      }
+    }
+  }
   if (!hits.length) return;
   const p = hits[0].point, x = p.x, y = -p.z;
-  const st = stairAt(x, y);
-  let L = st ? (st.h > st.st.mid + 0.01 ? 1 : 0) : (navs[1] && S.upper && Math.abs(p.y - S.upper.z) < 0.35 ? 1 : 0);
-  if (!navs[1]) L = 0;
+  let L = hits[0].object.userData.level ?? 0;
+  if (hits[0].object.userData.role === "slab") L = Math.min(TOP(), L + 1);         // a slab top is the floor above
+  if (hits[0].object.userData.role === "stair" && p.y > zf(L) + S.levels.storey / 2) L = Math.min(TOP(), L + 1);
+  if (state.explode && state.mode !== "walk") L = clamp(Math.round((p.y - zf(0)) / (S.levels.storey + GAP)), 0, TOP());
   if (state.mode === "walk") { tourInterrupt(); walkTo(x, y, L); }
-  else if (inFootprint(x, y) || L === 1) {
+  else if (inFootprint(x, y) || L > 0) {
     const c = nearestFree(x, y, 1.2, L);
     if (c) { const q = centreOf(c); setMode("walk", { at: q, level: L, yaw: Math.atan2(S.footprint[1] + S.footprint[3] / 2 - q[1], S.footprint[0] + S.footprint[2] / 2 - q[0]) }); }
   }
@@ -1229,15 +1533,22 @@ function tap(cx, cy) {
 function walkTo(x, y, L = walker.level) {
   let path = null;
   if (L === walker.level) path = astar(walker.x, walker.y, x, y, L);
-  else {                            // to the other floor: walk to the half-way step of a stair, then on from there
-    let best = null;
-    for (const st of S.stairs) {
-      const b = st.boxes.reduce((m, q) => (Math.abs(q[5] - st.mid) < Math.abs(m[5] - st.mid) ? q : m), st.boxes[0]);
-      const T = [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2];
-      const a = astar(walker.x, walker.y, T[0], T[1], walker.level), c = a && astar(T[0], T[1], x, y, L);
-      if (a && c && (!best || a.length + c.length < best.length)) best = a.concat(c.slice(1));
+  else {                            // another floor: up or down the stairs, one flight at a time
+    let cur = [walker.x, walker.y], lvl = walker.level, pts = [cur];
+    while (lvl !== L && pts) {
+      const up = L > lvl;
+      const st = S.stairs.find((q) => stairServes(q, lvl) && stairServes(q, up ? lvl + 1 : lvl - 1));
+      if (!st) { pts = null; break; }
+      const lowHalf = st.boxes.filter((b) => !(b[6] || 0)), highHalf = st.boxes.filter((b) => b[6]);
+      const a = lowHalf.reduce((m, q) => (q[5] > m[5] ? q : m), lowHalf[0]), b = highHalf.reduce((m, q) => (q[5] < m[5] ? q : m), highHalf[0]);
+      const ca = [(a[0] + a[2]) / 2, (a[1] + a[3]) / 2], cb = [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2];
+      const [p0, p1] = up ? [ca, cb] : [cb, ca];
+      const leg = astar(cur[0], cur[1], p0[0], p0[1], lvl);
+      if (!leg) { pts = null; break; }
+      pts = pts.concat(leg.slice(1)); pts.push(p1);
+      cur = p1; lvl += up ? 1 : -1;
     }
-    path = best;
+    if (pts) { const last = astar(cur[0], cur[1], x, y, L); path = last ? pts.concat(last.slice(1)) : null; }
   }
   if (path && path.length) { walker.path = path.slice(1); if (!walker.path.length) walker.path = [path[0]]; poke(); }
   else toast(L !== walker.level ? "No way up there from here." : "Can't walk there — that spot is inside a wall or furniture.");
@@ -1275,8 +1586,8 @@ function tourStart() {
   hideStart(); tour.on = true; tour.paused = false; tour.i = -1;
   $("cap").style.display = "block"; $("tPause").textContent = "⏸ Pause";
   const st0 = S.tour[0];
-  walker.level = 0;
-  setMode("walk", { at: st0.path[0], level: 0, yaw: yawTo(st0.path[0], st0.look) });
+  walker.level = S.tour_level || 0;
+  setMode("walk", { at: st0.path[0], level: S.tour_level || 0, yaw: yawTo(st0.path[0], st0.look) });
   setTimeout(tourNext, 1150);
 }
 function yawTo(from, to) { return to ? Math.atan2(to[1] - from[1], to[0] - from[0]) : walker.yaw; }
@@ -1287,6 +1598,12 @@ function tourNext() {
   const st = S.tour[tour.i];
   $("capN").textContent = `${tour.i + 1} / ${S.tour.length}`;
   if (st.kind === "end") { caption(st); tour.phase = "end"; tour.t = 0; return; }
+  if (st.level !== undefined && st.target) {           // upstairs: the walker plans the climb flight by flight
+    walkTo(st.target[0], st.target[1], st.level);
+    tour.phase = walker.path.length ? "walk" : "turn"; tour.t = 0; tour.from = walker.yaw; tour.to = walker.yaw;
+    $("capT").textContent = `Walking to: ${st.title}`; $("capS").textContent = "";
+    return;
+  }
   if (st.kind === "start" || !st.path.length) { caption(st); tour.phase = "wait"; tour.t = 0; return; }
   walker.path = st.path.slice(1); tour.phase = "walk"; tour.t = 0;
   $("capT").textContent = `Walking to: ${st.title}`; $("capS").textContent = "";
@@ -1404,11 +1721,16 @@ function applyTheme() {
   renderer.toneMappingExposure = bp ? 1.05 : 1.0;
   $("themeTx").textContent = bp ? "Blueprint" : "Real colours";
   $("btnTheme").classList.toggle("on", bp);
-  applySun(); drawMinimapBase(); poke();
+  applySun(); drawMinimapBase(mm.plan || 0); poke();
 }
 $("btnTheme").addEventListener("click", () => { state.theme = state.theme === "bp" ? "real" : "bp"; applyTheme(); });
 $("btnVastu").addEventListener("click", () => setVastu(!state.vastu));
-$("btnFurn").addEventListener("click", () => { state.furn = !state.furn; G.furn.visible = state.furn; $("btnFurn").classList.toggle("on", state.furn); poke(); });
+function setFurniture(on) {
+  state.furn = on;
+  for (const lg of levelGroups) if (lg.furn) lg.furn.visible = on;
+  $("btnFurn").classList.toggle("on", on); poke();
+}
+$("btnFurn").addEventListener("click", () => setFurniture(!state.furn));
 $("btnShot").addEventListener("click", () => {
   renderer.render(scene, camera);
   canvas.toBlob((b) => { const a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = "my-house-3d.png"; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000); });
@@ -1419,46 +1741,730 @@ $("btnFull").addEventListener("click", () => {
 });
 $("btnHelp").addEventListener("click", () => { $("help").style.display = "block"; });
 $("helpClose").addEventListener("click", () => { $("help").style.display = "none"; });
-document.querySelectorAll("#modes .b[data-mode]").forEach((b) => b.addEventListener("click", () => { hideStart(); tourInterrupt(); setMode(b.dataset.mode); }));
+document.querySelectorAll("#modes .b[data-mode]").forEach((b) => b.addEventListener("click", () => {
+  hideStart(); tourInterrupt(); if (state.xray) { state.xray = false; $("btnLift").classList.remove("on"); }
+  setMode(b.dataset.mode, b.dataset.mode === "dollhouse" && multiFloor() ? { all: true } : {});
+}));
+$("btnLift").addEventListener("click", () => setXray(!state.xray));
 
 function hideStart() { if (!state.started) { state.started = true; $("start").style.display = "none"; orbit.auto = false; } }
 $("sTour").addEventListener("click", tourStart);
 $("sWalk").addEventListener("click", () => { hideStart(); setMode("walk"); setTimeout(() => toast("Drag to look around · tap the floor to walk there"), 1200); });
-$("sDoll").addEventListener("click", () => { hideStart(); setMode("dollhouse"); });
+$("sDoll").addEventListener("click", () => { hideStart(); setMode("dollhouse", multiFloor() ? { all: true } : {}); });
 
 // ───────────────────────────── HUD + "change this room" wishes → Smart Re-Plan
-let hudRoom;
+let hudRoom, hudLevel = -1;
+const flatNo = (L, lab) => { const i = lab ? "ABCD".indexOf(lab) + 1 : 1; return L === 0 ? `G0${i}` : `${L}0${i}`; };
+function nearLift() {
+  if (!lift.ok || stopOf(walker.level) < 0) return false;
+  return Math.hypot(walker.x - S.lift.door.mid[0], walker.y - S.lift.door.mid[1]) < 2.6;
+}
+function liftRow(L) {
+  const st = S.lift.stops, here = stopOf(L), [lab, dir] = (lift.disp || "|0").split("|");
+  const arrow = +dir > 0 ? "▲ " : +dir < 0 ? "▼ " : "";
+  const openHere = lift.at === here && (lift.phase === "open" || lift.phase === "opening");
+  const called = lift.queue.has(here) || (lift.auto && lift.auto.stage === "call");
+  const btn = openHere ? '<button class="b go" data-lin="1">🚶 Step in</button>'
+    : `<button class="b go" data-lcall="1">${called ? "⏳ Coming…" : "🔔 Call the lift"}</button>`;
+  const to = st.map((s, i) => (i === here ? "" : `<button class="b" data-lift="${s.L}" title="${esc(s.name)}">${esc(s.label)}</button>`)).join("");
+  const mv = S.lift.movable ? '<button class="b" data-lmove="1" title="Put the lift somewhere else">✏️ Move the lift</button>' : "";
+  return `<div class="row">🛗 Lift at <b>${esc(arrow + lab)}</b> ${btn}</div><div class="row">Ride to: ${to} ${mv}</div>`;
+}
 function updateHud() {
-  if (walker.level === 1) {
-    if (hudRoom === "upper") return;
-    hudRoom = "upper";
-    const z = S.upper.z, ft = Math.round(z / 0.3048);
-    $("hud").innerHTML = S.upper.kind === "terrace"
-      ? `<b>🏙️ On the terrace</b><div class="sub">${z.toFixed(2)} m (${ft} ft) above the ground · parapet ${S.levels.parapet.toFixed(1)} m high</div>`
-      : `<b>🏢 First floor</b><div class="sub">Only the outline — the rooms of this floor are not designed yet</div>`;
+  if (lift.anim) return;
+  if (lift.rider) {
+    const st = S.lift.stops, [lab, dir] = (lift.disp || "|0").split("|"), key = `ride|${lift.disp}|${lift.phase}|${lift.queue.size}`;
+    if (key === hudRoom) return;
+    hudRoom = key;
+    const what = lift.phase === "moving" ? `Going to ${esc(st[lift.target].name)} · ${S.lift.speed.toFixed(1)} m/s`
+      : lift.phase === "open" ? (lift.queue.size ? "Doors closing…" : "Press a floor on the panel — or walk out")
+        : lift.phase === "closing" ? "Doors closing…" : lift.phase === "opening" ? "Doors opening…" : "";
+    $("hud").innerHTML = `<b>🛗 In the lift · ${+dir > 0 ? "▲ " : +dir < 0 ? "▼ " : ""}${esc(lab)}</b><div class="sub">${what}</div>`;
     return;
   }
-  const rr = roomAt(walker.x, walker.y), r = rr && rr.cat === "STAIRS" ? null : rr;     // on a stair: show the steps
-  const sa = r ? null : stairAt(walker.x, walker.y) ||
-    (rr ? { st: S.stairs.find((q) => q.name === rr.name) || S.stairs[0], h: 0 } : null);
-  const key = r || (sa ? "stair:" + sa.st.name : inFootprint(walker.x, walker.y) ? "in" : "out");
+  const L = walker.level, nearL = nearLift();
+  const rr = hasRooms(L) ? roomAt(walker.x, walker.y) : null, r = rr && rr.cat === "STAIRS" ? null : rr;
+  const sa = r ? null : stairAt(walker.x, walker.y) || (rr ? { st: S.stairs.find((q) => q.name === rr.name) || S.stairs[0], h: 0 } : null);
+  const key = `${L}|${r ? r.name : sa ? "stair:" + sa.st.name : inFootprint(walker.x, walker.y) ? "in" : "out"}|${nearL ? lift.disp + lift.phase + lift.at + lift.queue.size + (lift.auto ? lift.auto.stage : "") : 0}|${canWish}`;
   if (key === hudRoom) return;
   hudRoom = key;
   const lv = S.levels, ch = lv.ceiling, ft = Math.round(ch / 0.3048 * 12);
-  if (!r) {
-    $("hud").innerHTML = sa ? `<b>🪜 ${esc(sa.st.name)}</b><div class="sub">${sa.st.steps} steps of ${sa.st.riser_mm} mm, ` +
-      `treads ${sa.st.tread_mm} mm · goes up to the ${S.upper && S.upper.kind === "terrace" ? "terrace" : "first floor"}</div>`
-      : `<b>${inFootprint(walker.x, walker.y) ? "Inside" : "Outside the house"}</b>`;
+  const floorTxt = TOP() > 1 ? `<span class="fl">${esc(levelLabel(L))}</span> ` : "";
+  const liftHtml = nearL ? liftRow(L) : "";
+  let html;
+  if (levelKind(L) === "terrace") {
+    const z = zf(L), fz = Math.round(z / 0.3048);
+    html = `<b>🏙️ On the terrace</b><div class="sub">${z.toFixed(2)} m (${fz} ft) above the ground · parapet ${lv.parapet.toFixed(1)} m high</div>`;
+  } else if (levelKind(L) === "stilt") {
+    html = `<b>🚗 Stilt parking</b><div class="sub">Under the building — the stair${S.lifts.length ? " and the lift" : ""} go up to the homes</div>`;
+  } else if (!r && nearL && !sa) {
+    html = `<b>🛗 Lift landing</b><div class="sub">${floorTxt}${esc(S.lift.words)}</div>`;
+  } else if (!r) {
+    html = sa ? `<b>🪜 ${esc(sa.st.name)}</b><div class="sub">${floorTxt}${sa.st.steps} steps of ${sa.st.riser_mm} mm, ` +
+      `treads ${sa.st.tread_mm} mm · goes up to the ${levelKind(L + 1) === "terrace" || TOP() <= 1 ? "terrace" : "next floor"}</div>`
+      : `<b>${inFootprint(walker.x, walker.y) ? "Inside" : "Outside the building"}</b><div class="sub">${floorTxt}</div>`;
+  } else {
+    const flat = r.name.includes(" · ") ? r.name.split(" · ")[0] : (S.apartment ? "" : null);
+    const nm = r.name.includes(" · ") ? r.name.split(" · ")[1] : r.name;
+    const flatTxt = S.apartment && flat !== null && r.role !== "COMMON"
+      ? `<span class="fl">🏠 ${houseKind() ? homeName(L) : "Flat " + flatNo(L, flat)}</span> ` : "";
+    const badge = { best: "🟢 best Vastu spot", good: "🟢 good Vastu", ok: "🟡 acceptable Vastu", poor: "🔴 not ideal for Vastu" }[r.vastu] || "";
+    html = `<b>📍 ${esc(nm)}</b><div class="sub">${floorTxt}${flatTxt}${r.size} (${r.ft}) · ${r.area} m² · ${r.sqft} sq ft · ` +
+      `${r.zone_word ? esc(r.zone_word) + " · " : ""}ceiling ${ch.toFixed(2)} m (${Math.floor(ft / 12)}'${ft % 12}")${badge ? " · " + badge : ""}</div>` +
+      (canWish && r.key ? `<div class="row"><button class="b" id="hudWish">✏️ Change this room</button><button class="b" id="hudSay">🔊 Tell me</button></div>`
+        : `<div class="row"><button class="b" id="hudSay">🔊 Tell me</button></div>`);
+  }
+  $("hud").innerHTML = html + liftHtml;
+  const w = $("hudWish"); if (w) w.onclick = () => openWish(r);
+  const say = $("hudSay");
+  if (say) say.onclick = () => { const old = state.voice; state.voice = true; speak(r.say); state.voice = old; toast(r.say, 7000); };
+  for (const b of $("hud").querySelectorAll("[data-lift]")) b.onclick = () => { if (!liftTrip(+b.dataset.lift)) toast("Can't reach the lift from here."); };
+  const lc = $("hud").querySelector("[data-lcall]"); if (lc) lc.onclick = () => { liftCall(stopOf(walker.level), "hall"); hudRoom = undefined; };
+  const li = $("hud").querySelector("[data-lin]"); if (li) li.onclick = () => boardLift();
+  const lm = $("hud").querySelector("[data-lmove]"); if (lm) lm.onclick = openLiftMove;
+}
+
+// ───────────────────────────── floors: the bar, the view of one floor, floors apart, the lift
+const multiFloor = () => !!S && TOP() - R0() >= 2;            // two or more floors with rooms
+function buildFloorBar() {
+  const el = $("floors"); el.innerHTML = "";
+  const top = TOP();
+  el.style.display = top >= 1 ? "flex" : "none";
+  if (multiFloor()) {                                     // every floor at once
+    const b = document.createElement("button"); b.className = "b"; b.dataset.l = "all";
+    b.textContent = "🏢 All"; b.title = "Every floor, pulled apart";
+    b.onclick = () => { hideStart(); tourInterrupt(); if (state.xray) setXray(false);
+      setMode(state.mode === "walk" || state.mode === "top" ? "dollhouse" : state.mode === "outside" ? "dollhouse" : state.mode, { all: true }); };
+    el.appendChild(b);
+  }
+  for (let L = top; L >= 0; L--) {
+    const b = document.createElement("button"); b.className = "b"; b.dataset.l = L;
+    b.textContent = levelKind(L) === "terrace" ? "🏙️ Top" : levelKind(L) === "stilt" ? "🚗 Stilt" : L === 0 ? "G" : String(L);
+    b.title = levelLabel(L);
+    b.onclick = () => goLevel(L);
+    el.appendChild(b);
+  }
+  $("btnExplode").style.display = top >= 2 ? "" : "none";
+}
+function updateFloorBar() {
+  const a = activeLevel(), all = state.explode && state.mode !== "walk";
+  for (const b of $("floors").children) {
+    b.classList.toggle("on", b.dataset.l === "all" ? all : (!all && +b.dataset.l === a && (state.mode !== "outside" || state.explode)));
+  }
+}
+function applyLevelView() {
+  if (!S) return;
+  const m = state.mode, act = activeLevel(), ex = state.explode && m !== "walk", H = S.levels.storey, top = TOP(), r0 = R0();
+  for (const lg of levelGroups) {
+    const L = lg.L;
+    lg.root.position.y = ex ? L * GAP : 0;
+    let show = true, ceil = true;
+    if (m === "dollhouse" || m === "top") { show = ex || L <= act; ceil = !ex && L < act; }
+    else if (m === "outside") ceil = !ex;
+    lg.root.visible = show;
+    if (lg.ceil) lg.ceil.visible = ceil;
+  }
+  const xr = !!state.xray && lift.ok;
+  if (xr) for (const lg of levelGroups) lg.root.visible = false;
+  for (const rec of lift.lv) {
+    if (!rec) continue;
+    rec.g.position.y = ex ? rec.L * GAP : 0;
+    rec.g.visible = xr || !(m === "dollhouse" || m === "top") || ex || rec.L <= act;
+    if (rec.walls) rec.walls.visible = !xr;
+  }
+  if (lift.ok) {
+    lift.x.visible = xr;
+    lift.car.visible = xr || ex || !((m === "dollhouse" || m === "top") && liftLevelF(lift.z) > act + 0.01);
+  }
+  for (const g of G.ghost.children) g.visible = xr;
+  G.core.visible = ex && !xr;
+  G.roof.visible = !xr && (m === "walk" || m === "outside" || act >= top || ex);
+  G.roof.position.y = ex ? top * GAP : 0;
+  const dl = hasRooms(act) ? act : r0;
+  const pl = planOf(dl);
+  G.dyn.position.y = (dl - r0) * H + (ex ? dl * GAP : 0);
+  G.dyn.visible = !xr && pl === 0 && (hasRooms(act) || m === "outside");
+  G.dyn2.position.y = G.dyn.position.y;
+  G.dyn2.visible = !xr && pl === 1 && hasRooms(act);
+  if (S.upper && mm.plan !== pl) drawMinimapBase(pl);
+  G.vastu.visible = state.vastu && !xr;
+  if (lift.ok) liftPose(true);
+  G.vastu.position.y = G.dyn.position.y;
+  for (const o of registry.doors) o.pivot.visible = !(o.groundOnly && dl > 0);
+  for (const f of registry.fans) f.visible = m === "walk";
+  for (const l of registry.labels) if (l.flat !== undefined) l.el.innerHTML = houseKind() ? `🏠 ${homeName(dl)}` : `🏠 Flat ${flatNo(dl, l.flat)}`, l.size = null;
+  hudLevel = walker.level; hudRoom = undefined;
+  const cap = document.querySelector("#mini .cap");
+  if (cap) cap.textContent = (top > 1 ? levelLabel(act) + " · " : "") + "Tap the map to walk there";
+  updateFloorBar(); poke(600);
+}
+function goLevel(L) {
+  hideStart(); tourInterrupt();
+  if (state.mode === "walk") {
+    if (L === walker.level || lift.anim) return;
+    if (lift.rider) { const i = stopOf(L); if (i >= 0) liftCall(i, "car"); else toast("The lift does not go there."); return; }
+    if (lift.ok && stopOf(L) >= 0 && stopOf(walker.level) >= 0 && liftTrip(L)) return;   // walk to the lift, ride
+    walkTo(walker.x, walker.y, L);                              // by the stairs
     return;
   }
-  const badge = { best: "🟢 best Vastu spot", good: "🟢 good Vastu", ok: "🟡 acceptable Vastu", poor: "🔴 not ideal for Vastu" }[r.vastu] || "";
-  $("hud").innerHTML = `<b>📍 ${esc(r.name)}</b><div class="sub">${r.size} (${r.ft}) · ${r.area} m² · ${r.sqft} sq ft · ` +
-    `${r.zone_word ? esc(r.zone_word) + " · " : ""}ceiling ${ch.toFixed(2)} m (${Math.floor(ft / 12)}'${ft % 12}")${badge ? " · " + badge : ""}</div>` +
-    (canWish && r.key ? `<div class="row"><button class="b" id="hudWish">✏️ Change this room</button><button class="b" id="hudSay">🔊 Tell me</button></div>`
-      : `<div class="row"><button class="b" id="hudSay">🔊 Tell me</button></div>`);
-  const w = $("hudWish"); if (w) w.onclick = () => openWish(r);
-  $("hudSay").onclick = () => { const old = state.voice; state.voice = true; speak(r.say); state.voice = old; toast(r.say, 7000); };
+  if (state.xray) { const i = stopOf(L); if (i >= 0) liftCall(i, "remote"); return; }
+  state.view = L;
+  state.explode = false;                                  // one floor, opened up
+  setMode(state.mode === "outside" ? "dollhouse" : state.mode, { all: false });
 }
+// ───────────────────────────── the lift (scene.lift, measured from the plan): landing doors, a call button and a
+// floor display on every floor, a car with its button panel, counterweight, ropes, rails and motor — it rides at the
+// lift's own speed (smooth start and stop), chimes, opens both doors together, and you walk in and press a floor.
+const DOOR_OPEN_S = 1.4, DOOR_CLOSE_S = 1.6, DWELL_S = 4.0;
+const lift = { ok: false };
+function liftReset() {
+  Object.assign(lift, { ok: false, z: 0, v: 0, at: 0, target: null, queue: new Set(), door: 0, phase: "idle", hold: 0,
+    rider: false, anim: null, auto: null, fast: false, dir: 0, lv: [], car: null, carDoors: [], x: null, cw: null,
+    ropes: null, ropeMat: null, hits: [], g: {}, open: -1, disp: "", cop: "", labels: {}, prev: null, last: 0 });
+}
+liftReset();
+const liftDisp = { canvas: null, tex: null, mat: null };
+const copPlate = { canvas: null, tex: null };
+const LIFT_AX = () => { const n = S.lift.door.n; return { n, u: [n[1], -n[0]], theta: Math.atan2(-n[0], n[1]) }; };
+function liftPt(u, v) { const D = S.lift.door, a = LIFT_AX(); return [D.mid[0] + a.u[0] * u + a.n[0] * v, D.mid[1] + a.u[1] * u + a.n[1] * v]; }
+function lgeo(u0, u1, v0, v1, z0, z1) {
+  const g = new THREE.BoxGeometry(Math.max(1e-3, u1 - u0), Math.max(1e-3, z1 - z0), Math.max(1e-3, v1 - v0));
+  g.translate((u0 + u1) / 2, (z0 + z1) / 2, -(v0 + v1) / 2); return g;
+}
+function lgroup(parent) {
+  const g = new THREE.Group(), D = S.lift.door; g.position.set(D.mid[0], 0, -D.mid[1]); g.rotation.y = LIFT_AX().theta;
+  parent.add(g); return g;
+}
+function lmesh(g, geo, role, edge = "door", own = null) {
+  const m = new THREE.Mesh(geo, own || mat(role)); m.castShadow = !NO_SHADOW.has(role); m.receiveShadow = true;
+  if (!own) { m.userData.role = role; registry.meshes.push(m); }
+  g.add(m);
+  if (edge) { const e = new THREE.LineSegments(new THREE.EdgesGeometry(geo), lineMat(edge)); e.userData.edge = true; g.add(e); registry.edges.push(e); }
+  return m;
+}
+const stopOf = (L) => (S && S.lift ? S.lift.stops.findIndex((s) => s.L === L) : -1);
+function liftLevelF(z) {                 // fractional level for a car height (the exploded view moves the car with it)
+  const st = S.lift.stops;
+  if (z <= st[0].z) return st[0].L;
+  for (let i = 0; i + 1 < st.length; i++) if (z <= st[i + 1].z) return st[i].L + (z - st[i].z) / (st[i + 1].z - st[i].z) * (st[i + 1].L - st[i].L);
+  return st[st.length - 1].L;
+}
+function liftGeom() {                    // the lift's local layout: u along the door, v into the shaft
+  const Lf = S.lift, D = Lf.door, a = LIFT_AX(), c = Lf.clear;
+  let vMax = -9, uMin = 9, uMax = -9;
+  for (const [x, y] of [[c[0], c[1]], [c[2], c[1]], [c[2], c[3]], [c[0], c[3]]]) {
+    const dx = x - D.mid[0], dy = y - D.mid[1];
+    vMax = Math.max(vMax, dx * a.n[0] + dy * a.n[1]);
+    const u = dx * a.u[0] + dy * a.u[1]; uMin = Math.min(uMin, u); uMax = Math.max(uMax, u);
+  }
+  const t = D.t, vCar = t / 2 + 0.1, cw = Lf.car.w, cd = Math.min(Lf.car.d, vMax - vCar - 0.04);
+  const rear = vMax - (vCar + cd) >= 0.17;
+  const side = uMax - cw / 2 >= -uMin - cw / 2 ? 1 : -1;
+  let cu = 0;
+  if (!rear) cu = clamp(-side * 0.08, uMin + cw / 2 + 0.04, uMax - cw / 2 - 0.04);
+  cu = clamp(cu, uMin + cw / 2 + 0.03, uMax - cw / 2 - 0.03);
+  const cwU = rear ? [cu - 0.28, cu + 0.28] : side > 0 ? [uMax - 0.14, uMax - 0.03] : [uMin + 0.03, uMin + 0.14];
+  const cwV = rear ? [vMax - 0.14, vMax - 0.03] : [vCar + cd / 2 - 0.3, vCar + cd / 2 + 0.3];
+  return { t, w: D.w, dc: Lf.door_clear, vCar, cw, cd, ch: Lf.car.h, cu, uMin, uMax, vMax, cwU, cwV, rear,
+    zMin: Lf.stops[0].z, zMax: Lf.stops[Lf.stops.length - 1].z };
+}
+function canvasPlane(w, h, canvas) {
+  const tex = new THREE.CanvasTexture(canvas); tex.colorSpace = THREE.SRGBColorSpace;
+  return { tex, mat: new THREE.MeshBasicMaterial({ map: tex, toneMapped: false }) };
+}
+function drawDisplay(label, dir) {
+  const c = liftDisp.canvas, g = c.getContext("2d");
+  g.fillStyle = "#06090D"; g.fillRect(0, 0, c.width, c.height);
+  g.fillStyle = "#FFB000"; g.textAlign = "center"; g.textBaseline = "middle";
+  g.font = "bold 46px system-ui, sans-serif"; g.fillText(label, c.width * 0.62, c.height / 2 + 2);
+  if (dir) { g.font = "bold 34px system-ui, sans-serif"; g.fillText(dir > 0 ? "▲" : "▼", c.width * 0.24, c.height / 2 + 2); }
+  liftDisp.tex.needsUpdate = true;
+}
+function drawPlate() {                   // the car's button panel, buttons lit while their floor is called
+  const c = copPlate.canvas, g = c.getContext("2d"), st = S.lift.stops, n = st.length;
+  g.fillStyle = "#AEB6BE"; g.fillRect(0, 0, c.width, c.height);
+  g.fillStyle = "#06090D"; g.fillRect(14, 10, c.width - 28, 44);
+  g.fillStyle = "#FFB000"; g.font = "bold 30px system-ui"; g.textAlign = "center"; g.textBaseline = "middle";
+  g.fillText(lift.disp.split("|")[0] || "", c.width / 2, 33);
+  const rows = Math.ceil(n / 2), top = 72, gap = Math.min(52, (c.height - top - 70) / Math.max(1, rows));
+  st.forEach((s, i) => {
+    const col = n > 3 ? i % 2 : 0.5, row = n > 3 ? Math.floor(i / 2) : i;
+    const x = n > 3 ? 40 + col * 48 : c.width / 2, y = c.height - 70 - row * gap;
+    const lit = lift.queue.has(i);
+    g.beginPath(); g.arc(x, y, 17, 0, Math.PI * 2); g.fillStyle = lit ? "#FFB000" : "#D9DEE3"; g.fill();
+    g.lineWidth = 3; g.strokeStyle = lit ? "#FFE29A" : "#6B737B"; g.stroke();
+    g.fillStyle = "#1A1D21"; g.font = "bold 17px system-ui"; g.fillText(s.label, x, y + 1);
+  });
+  const y = c.height - 24, tri = (x, d) => { g.beginPath(); g.moveTo(x, y - 7); g.lineTo(x + d * 8, y); g.lineTo(x, y + 7); g.closePath(); g.fill(); };
+  for (const [x, open] of [[30, true], [64, false]]) {                 // door open ◀|▶ and close ▶|◀
+    g.beginPath(); g.arc(x, y, 14, 0, Math.PI * 2); g.fillStyle = "#D9DEE3"; g.fill(); g.strokeStyle = "#6B737B"; g.lineWidth = 2; g.stroke();
+    g.fillStyle = "#1A1D21"; if (open) { tri(x - 3, -1); tri(x + 3, 1); } else { tri(x - 9, 1); tri(x + 9, -1); }
+  }
+  g.beginPath(); g.arc(98, y, 14, 0, Math.PI * 2); g.fillStyle = "#FFC400"; g.fill(); g.strokeStyle = "#8A6A00"; g.stroke();   // alarm
+  g.fillStyle = "#1A1D21"; g.font = "bold 16px system-ui"; g.fillText("!", 98, y + 1);
+  copPlate.tex.needsUpdate = true;
+}
+
+function buildLift() {
+  const Lf = S.lift;
+  lift.ok = !!(Lf && Lf.stops && Lf.stops.length > 1);
+  if (!lift.ok) return;
+  const k = liftGeom(); lift.k = k;
+  const D = Lf.door, a = LIFT_AX(), top = TOP(), H = S.levels.storey;
+  liftDisp.canvas = liftDisp.canvas || Object.assign(document.createElement("canvas"), { width: 128, height: 56 });
+  if (!liftDisp.tex) { const p = canvasPlane(0.4, 0.17, liftDisp.canvas); liftDisp.tex = p.tex; liftDisp.mat = p.mat; }
+  copPlate.canvas = copPlate.canvas || Object.assign(document.createElement("canvas"), { width: 128, height: 384 });
+  if (!copPlate.tex) copPlate.tex = canvasPlane(0.2, 0.6, copPlate.canvas).tex;
+  lift.disp = ""; lift.cop = "";
+
+  // ── every floor: landing doors (the car door drives them), frame, floor display, call button; the outside tower's walls
+  const ring = (o, c) => [[o[0], o[1], o[2], c[1]], [o[0], c[3], o[2], o[3]], [o[0], c[1], c[0], c[3]], [c[2], c[1], o[2], c[3]]];
+  const shaftOuter = Lf.tower ? Lf.outer : [Lf.room[0] - 0.0575, Lf.room[1] - 0.0575, Lf.room[2] + 0.0575, Lf.room[3] + 0.0575];
+  const wrole = Lf.tower ? "lift_tower" : "wall_out";      // an outside tower reads as its own RCC shaft
+  const wallsFor = (bld, z0, z1, stopZ, role = wrole) => {   // ring of shaft walls, the door strip cut round the opening
+    for (const s of ring(shaftOuter, Lf.clear)) {
+      const inS = D.mid[0] >= s[0] - 0.02 && D.mid[0] <= s[2] + 0.02 && D.mid[1] >= s[1] - 0.02 && D.mid[1] <= s[3] + 0.02;
+      if (!inS || stopZ === null) { bld.box([...s, z0, z1], role, "wall"); continue; }
+      const alongX = s[2] - s[0] > s[3] - s[1], m = alongX ? D.mid[0] : D.mid[1], lo = m - D.w / 2, hi = m + D.w / 2;
+      const piece = (p0, p1, za, zb) => { if (p1 - p0 < 1e-3 || zb - za < 1e-3) return; bld.box(alongX ? [p0, s[1], p1, s[3], za, zb] : [s[0], p0, s[2], p1, za, zb], role, "wall"); };
+      const s0 = alongX ? s[0] : s[1], s1 = alongX ? s[2] : s[3];
+      piece(s0, lo, z0, z1); piece(hi, s1, z0, z1); piece(lo, hi, stopZ + S.levels.door, z1); piece(lo, hi, z0, stopZ);
+    }
+  };
+  for (let L = 0; L < top; L++) {
+    const g = new THREE.Group(); g.userData.level = L; G.lift.add(g);
+    const rec = { L, g, walls: null, doors: [], button: null, btnMat: null };
+    const si = stopOf(L), stopZ = si >= 0 ? Lf.stops[si].z : null;
+    if (Lf.tower || levelKind(L) === "stilt") {
+      const wg = new THREE.Group(); g.add(wg); rec.walls = wg;
+      const bld = new Builder();
+      const z0 = L === 0 ? 0 : zf(L), z1 = L + 1 <= top ? zf(L + 1) : Lf.roof;
+      wallsFor(bld, z0, levelKind(L) === "stilt" && !Lf.tower ? zf(L + 1) - 0.15 : z1, stopZ);
+      bld.emit(wg);
+    }
+    if (si >= 0) {
+      const lg = lgroup(g); lg.position.y = stopZ;
+      const t = k.t, w = k.w, f = -t / 2 - 0.02;
+      lmesh(lg, lgeo(-w / 2 - 0.07, -w / 2, f, -t / 2 + 0.005, 0, S.levels.door + 0.07), "lift_frame");
+      lmesh(lg, lgeo(w / 2, w / 2 + 0.07, f, -t / 2 + 0.005, 0, S.levels.door + 0.07), "lift_frame");
+      lmesh(lg, lgeo(-w / 2 - 0.07, w / 2 + 0.07, f, -t / 2 + 0.005, S.levels.door, S.levels.door + 0.07), "lift_frame");
+      for (const sgn of [-1, 1]) {
+        const p = lmesh(lg, lgeo(-w / 4 - 0.01, w / 4 + 0.01, t / 2 + 0.01, t / 2 + 0.04, 0.005, S.levels.door), "lift_door");
+        p.position.x = sgn * w / 4; p.userData.lift = { kind: "door", L }; lift.hits.push(p);
+        rec.doors.push({ m: p, sgn, w });
+      }
+      const disp = new THREE.Mesh(new THREE.PlaneGeometry(0.4, 0.17), liftDisp.mat);
+      disp.position.set(0, S.levels.door + 0.22, t / 2 + 0.026); lg.add(disp);
+      lmesh(lg, lgeo(w / 2 + 0.17, w / 2 + 0.31, f, -t / 2 + 0.005, 0.95, 1.27), "lift_frame");
+      rec.btnMat = new THREE.MeshBasicMaterial({ color: 0x6B7680 });
+      const bg = new THREE.CylinderGeometry(0.03, 0.03, 0.02, 20); bg.rotateX(Math.PI / 2);
+      const btn = new THREE.Mesh(bg, rec.btnMat); btn.position.set(w / 2 + 0.24, 1.11, t / 2 + 0.03); lg.add(btn);
+      btn.userData.lift = { kind: "call", L }; lift.hits.push(btn); rec.button = btn;
+      const hit = new THREE.Mesh(lgeo(w / 2 + 0.12, w / 2 + 0.36, f - 0.1, f, 0.85, 1.37), new THREE.MeshBasicMaterial({ visible: false }));
+      hit.userData.lift = { kind: "call", L }; lg.add(hit); lift.hits.push(hit);
+    }
+    lift.lv[L] = rec;
+  }
+  // the shaft's head above the roof (the motor's overrun), with the roof
+  const hb = new Builder(), roofZ = Lf.roof;
+  wallsFor(hb, roofZ, Lf.head, null, "lift_tower");
+  addLabel("🛗 Lift", [(Lf.clear[0] + Lf.clear[2]) / 2, (Lf.clear[1] + Lf.clear[3]) / 2, Lf.head + 0.5], "lbl",
+    () => state.mode === "outside" && !state.xray && !state.explode);
+  hb.box([shaftOuter[0] - 0.08, shaftOuter[1] - 0.08, shaftOuter[2] + 0.08, shaftOuter[3] + 0.08, Lf.head, Lf.head + 0.15], "slab", "wall");
+  hb.emit(G.roof);
+
+  // ── the car: floor, panelled walls, mirror, handrail, light, button panel, display, doors, sling and safety gear
+  const car = lgroup(G.lift); lift.car = car;
+  const { vCar, cw, cd, ch, cu, dc } = k, w2 = cw / 2;
+  const fl = lmesh(car, lgeo(cu - w2, cu + w2, vCar, vCar + cd, -0.12, 0), "lift_floor", "stair");
+  fl.userData.lift = { kind: "car" }; lift.hits.push(fl);
+  lmesh(car, lgeo(cu - w2, cu + w2, vCar + cd, vCar + cd + 0.03, 0, ch), "lift_car", "door");
+  lmesh(car, lgeo(cu - w2 - 0.03, cu - w2, vCar, vCar + cd + 0.03, 0, ch), "lift_car", "door");
+  lmesh(car, lgeo(cu + w2, cu + w2 + 0.03, vCar, vCar + cd + 0.03, 0, ch), "lift_car", "door");
+  if (cu - w2 < -dc / 2 - 0.005) lmesh(car, lgeo(cu - w2, -dc / 2, vCar - 0.02, vCar + 0.01, 0, ch), "lift_car", "door");
+  if (cu + w2 > dc / 2 + 0.005) lmesh(car, lgeo(dc / 2, cu + w2, vCar - 0.02, vCar + 0.01, 0, ch), "lift_car", "door");
+  lmesh(car, lgeo(-dc / 2, dc / 2, vCar - 0.02, vCar + 0.01, S.levels.door, ch), "lift_car", "door");
+  lmesh(car, lgeo(cu - w2 - 0.03, cu + w2 + 0.03, vCar - 0.02, vCar + cd + 0.03, ch, ch + 0.06), "lift_car", "door");
+  lmesh(car, lgeo(cu - 0.28, cu + 0.28, vCar + cd / 2 - 0.3, vCar + cd / 2 + 0.3, ch - 0.012, ch), "lift_light", null);
+  const bulb = new THREE.PointLight(0xFFF4E0, 1.1, 3.2, 1.6);        // the car's ceiling light lights the car
+  bulb.position.set(cu, ch - 0.25, -(vCar + cd / 2)); car.add(bulb); lift.bulb = bulb;
+  lmesh(car, lgeo(cu - w2 + 0.08, cu + w2 - 0.08, vCar + cd - 0.006, vCar + cd, 1.0, 2.0), "mirror", null);
+  lmesh(car, lgeo(cu - w2 + 0.1, cu + w2 - 0.1, vCar + cd - 0.07, vCar + cd - 0.04, 0.88, 0.92), "rail", null);
+  const plate = new THREE.Mesh(new THREE.PlaneGeometry(0.2, 0.6), new THREE.MeshBasicMaterial({ map: copPlate.tex, toneMapped: false }));
+  plate.rotation.y = -Math.PI / 2; plate.position.set(cu + w2 - 0.004, 1.15, -(vCar + 0.2)); car.add(plate);
+  const cdisp = new THREE.Mesh(new THREE.PlaneGeometry(0.3, 0.13), liftDisp.mat);
+  cdisp.rotation.y = Math.PI; cdisp.position.set(0, S.levels.door + 0.08, -(vCar + 0.012)); car.add(cdisp);
+  lift.carDoors = [];
+  for (const sgn of [-1, 1]) {
+    const p = lmesh(car, lgeo(-dc / 4 - 0.01, dc / 4 + 0.01, vCar - 0.045, vCar - 0.025, 0.005, S.levels.door), "lift_door");
+    p.position.x = sgn * dc / 4; lift.carDoors.push({ m: p, sgn, w: dc });
+  }
+  lmesh(car, lgeo(cu - w2 - 0.07, cu + w2 + 0.07, vCar + cd / 2 - 0.05, vCar + cd / 2 + 0.05, ch + 0.06, ch + 0.22), "machine", "door");
+  for (const sgn of [-1, 1]) {
+    lmesh(car, lgeo(cu + sgn * (w2 + 0.035) - 0.025, cu + sgn * (w2 + 0.035) + 0.025, vCar + cd / 2 - 0.04, vCar + cd / 2 + 0.04, -0.2, ch + 0.22), "machine", null);
+    lmesh(car, lgeo(cu + sgn * (w2 + 0.035) - 0.04, cu + sgn * (w2 + 0.035) + 0.04, vCar + cd / 2 - 0.06, vCar + cd / 2 + 0.06, -0.2, -0.08), "buffer", null);
+  }
+
+  // ── how it works (x-ray): rails, counterweight, ropes, motor and pulley, pit and buffers, the shaft's outline
+  const x = new THREE.Group(); G.lift.add(x); lift.x = x;
+  const xl = lgroup(x), zb = k.zMin - Lf.pit, zt = Lf.head;
+  for (const sgn of [-1, 1]) {
+    const ru = cu + sgn * (w2 + 0.085);
+    lmesh(xl, lgeo(ru - 0.02, ru + 0.02, vCar + cd / 2 - 0.03, vCar + cd / 2 + 0.03, zb, zt - 0.3), "rail", null);
+    const cu0 = k.rear ? (sgn < 0 ? k.cwU[0] - 0.04 : k.cwU[1] + 0.01) : (k.cwU[0] + k.cwU[1]) / 2 - 0.015;
+    const cv0 = k.rear ? (k.cwV[0] + k.cwV[1]) / 2 - 0.015 : (sgn < 0 ? k.cwV[0] - 0.04 : k.cwV[1] + 0.01);
+    lmesh(xl, lgeo(cu0, cu0 + 0.03, cv0, cv0 + 0.03, zb, zt - 0.3), "rail", null);
+  }
+  lmesh(xl, lgeo(k.uMin, k.uMax, k.t / 2, k.vMax, zb - 0.1, zb), "concrete", "site");
+  lmesh(xl, lgeo(cu - 0.05, cu + 0.05, vCar + cd / 2 - 0.05, vCar + cd / 2 + 0.05, zb, zb + 0.45), "buffer", null);
+  const cwc = [(k.cwU[0] + k.cwU[1]) / 2, (k.cwV[0] + k.cwV[1]) / 2];
+  lmesh(xl, lgeo(cwc[0] - 0.05, cwc[0] + 0.05, cwc[1] - 0.05, cwc[1] + 0.05, zb, zb + 0.35), "buffer", null);
+  const mu = (cu + cwc[0]) / 2, mv = (vCar + cd / 2 + cwc[1]) / 2;
+  lmesh(xl, lgeo(mu - 0.28, mu + 0.28, mv - 0.17, mv + 0.17, zt - 0.62, zt - 0.3), "machine", "door");
+  const sh = new THREE.CylinderGeometry(0.17, 0.17, 0.09, 24); sh.rotateZ(Math.PI / 2);
+  const sheave = new THREE.Mesh(sh, mat("steel")); sheave.userData.role = "steel"; registry.meshes.push(sheave);
+  const pv = new THREE.Group(), side = Math.abs(cwc[0] - cu) > Math.abs(cwc[1] - (vCar + cd / 2));
+  if (side) pv.rotation.y = Math.PI / 2;                 // the pulley turns in the plane of the ropes
+  pv.position.set(mu, zt - 0.8, -mv); pv.add(sheave); xl.add(pv); lift.sheave = sheave;
+  const cwm = lmesh(xl, lgeo(k.cwU[0] - (k.cwU[0] + k.cwU[1]) / 2, k.cwU[1] - (k.cwU[0] + k.cwU[1]) / 2,
+    k.cwV[0] - cwc[1], k.cwV[1] - cwc[1], 0, 1.3), "cwt", "door");
+  cwm.position.x = cwc[0]; cwm.position.z = -cwc[1]; lift.cw = cwm;
+  lift.ropeMat = new THREE.LineBasicMaterial({ color: 0x00E5FF });
+  const rg = new THREE.BufferGeometry(); rg.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(8 * 3), 3));
+  lift.ropes = new THREE.LineSegments(rg, lift.ropeMat); lift.ropes.frustumCulled = false; xl.add(lift.ropes);
+  lift.xl = xl; lift.geo = { mu, mv, cwc };
+  const ol = new Lines(), c = Lf.clear;
+  ol.box([c[0], c[1], c[2], c[3], zb, zt]);
+  const ob = ol.build("ghost"); x.add(ob);
+
+  // ── labels for the x-ray view (they follow the moving parts)
+  const lab = (key, html) => { addLabel(html, [0, 0, 0], "lbl xr", () => state.xray, { xr: key }); lift.labels[key] = registry.labels[registry.labels.length - 1]; };
+  lab("motor", "⚙️ Motor + brake<small>no machine room needed</small>");
+  lab("cw", "⚖️ Counterweight<small>car + half the load</small>");
+  lab("rope", "🔗 Steel ropes");
+  lab("rail", "🛤️ Guide rails<small>safety gear grips them</small>");
+  lab("car", "🛗 Car");
+  lab("pit", `🛡️ Buffers<small>pit ${Lf.pit.toFixed(1)} m deep</small>`);
+  const place = (key, u, v, z) => { const p = liftPt(u, v), l = lift.labels[key]; l.pos.set(p[0], z, -p[1]); l.plan = [p[0], p[1], z]; };
+  place("motor", mu, mv, zt - 0.2); place("rail", cu - w2 - 0.085, vCar + cd / 2, (k.zMin + k.zMax) / 2 + 1.2);
+  place("pit", cu, vCar + cd / 2, zb + 0.2);
+  lift.place = place;
+  lift.z = k.zMin; lift.at = 0; lift.door = 0; lift.phase = "idle";
+  liftPose(true);
+  buildCopPanel();
+}
+
+function liftPose(force = false) {
+  if (!lift.ok) return;
+  const k = lift.k, ex = state.explode && state.mode !== "walk" && !state.xray;
+  const zOff = ex ? liftLevelF(lift.z) * GAP : 0;
+  lift.car.position.y = lift.z + zOff;
+  const e = ease(lift.door), stopHere = lift.phase !== "moving" ? lift.at : -1;
+  for (const d of lift.carDoors) d.m.position.x = d.sgn * (d.w / 4 + d.w / 2 * e);
+  const openL = stopHere >= 0 ? S.lift.stops[stopHere].L : -1;
+  for (const rec of lift.lv) {
+    if (!rec || !rec.doors.length) continue;
+    const oe = rec.L === openL ? e : 0;
+    if (!force && rec.L !== openL && rec.L !== lift.open) continue;
+    for (const d of rec.doors) d.m.position.x = d.sgn * (d.w / 4 + d.w / 2 * oe);
+  }
+  lift.open = openL;
+  // the display on every floor and in the car: where the car is, which way it goes
+  const st = S.lift.stops, near = st.reduce((b, s, i) => (Math.abs(s.z - lift.z) < Math.abs(st[b].z - lift.z) ? i : b), 0);
+  const dir = lift.phase === "moving" ? Math.sign(st[lift.target].z - lift.z) : 0;
+  const key = `${st[near].label}|${dir}`;
+  if (key !== lift.disp) { lift.disp = key; drawDisplay(st[near].label, dir); lift.cop = ""; syncCop(); }
+  if ($("cop").style.display === "block") $("copInfo").textContent = `${lift.v.toFixed(2)} m/s · ${lift.z.toFixed(2)} m above the ground`;
+  if (lift.bulb) lift.bulb.intensity = lift.rider || lift.door > 0.01 || state.xray ? 1.1 : 0;   // (no shader rebuilds)
+  const ck = [...lift.queue].sort().join(",") + "|" + key;
+  if (ck !== lift.cop) { lift.cop = ck; drawPlate(); syncCop(); }
+  for (const rec of lift.lv) if (rec && rec.btnMat) {
+    const on = lift.queue.has(stopOf(rec.L)) || (lift.auto && lift.auto.stage === "call" && stopOf(rec.L) === stopOf(walker.level));
+    rec.btnMat.color.set(on ? 0xFFB000 : (state.theme === "bp" ? 0x2E7FB8 : 0x6B7680));
+  }
+  if (state.xray || force) {             // counterweight goes down as the car goes up; ropes over the pulley
+    const zb = k.zMin - S.lift.pit, zt = S.lift.head;
+    const cwz = clamp(k.zMin + 0.35 + (k.zMax - lift.z), zb + 0.4, zt - 2.4);
+    lift.cw.position.y = cwz;
+    const { mu, mv, cwc } = lift.geo, top = lift.z + k.ch + 0.22, sz = zt - 0.8 + 0.17;
+    const P = lift.ropes.geometry.attributes.position.array;
+    const pts = [[k.cu - 0.04, k.vCar + k.cd / 2, top], [mu - 0.04, mv, sz], [k.cu + 0.04, k.vCar + k.cd / 2, top], [mu + 0.04, mv, sz],
+      [cwc[0] - 0.04, cwc[1], cwz + 1.3], [mu - 0.04, mv, sz], [cwc[0] + 0.04, cwc[1], cwz + 1.3], [mu + 0.04, mv, sz]];
+    pts.forEach((p, i) => { P[i * 3] = p[0]; P[i * 3 + 1] = p[2]; P[i * 3 + 2] = -p[1]; });
+    lift.ropes.geometry.attributes.position.needsUpdate = true; lift.ropes.geometry.computeBoundingSphere();
+    lift.ropeMat.color.set(state.theme === "bp" ? 0x00E5FF : 0x2B2F33);
+    lift.sheave.rotation.x -= (lift.v || 0) * 0.1;
+    if (lift.place) {
+      lift.place("car", k.cu, k.vCar + k.cd / 2, lift.z + k.ch + 0.5);
+      lift.place("cw", cwc[0], cwc[1], cwz + 1.6);
+      lift.place("rope", (k.cu + mu) / 2, (k.vCar + k.cd / 2 + mv) / 2, (top + sz) / 2);
+      const cl = lift.labels.car, txt = `🛗 Car ${k.cw.toFixed(2)} × ${k.cd.toFixed(2)} m<small>${lift.v.toFixed(2)} m/s · ${(lift.z).toFixed(1)} m up</small>`;
+      if (cl.el.innerHTML !== txt) { cl.el.innerHTML = txt; cl.size = null; }
+    }
+  }
+}
+
+// ── sounds (made here, no files): arrival chime, motor hum, alarm bell
+let actx = null, hum = null;
+function audio() {
+  if (!state.sound) return null;
+  try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === "suspended") actx.resume(); } catch (e) { actx = null; }
+  return actx;
+}
+function tone(f, t0, dur, gain = 0.05, type = "sine") {
+  const a = audio(); if (!a) return;
+  const o = a.createOscillator(), g = a.createGain(), t = a.currentTime + t0;
+  o.type = type; o.frequency.value = f; g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(gain, t + 0.012);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur); o.connect(g).connect(a.destination); o.start(t); o.stop(t + dur + 0.05);
+}
+const liftHeard = () => lift.rider || state.xray || (state.mode === "walk" && Math.hypot(walker.x - S.lift.door.mid[0], walker.y - S.lift.door.mid[1]) < 7);
+function chime() { if (liftHeard()) { tone(1318.5, 0, 0.9); tone(1046.5, 0.3, 1.2); } }
+function bell() { for (let i = 0; i < 8; i++) tone(1046.5, i * 0.11, 0.09, 0.04, "square"); }
+function humOn(on) {
+  if (on && !hum && liftHeard()) {
+    const a = audio(); if (!a) return;
+    const o = a.createOscillator(), f = a.createBiquadFilter(), g = a.createGain();
+    o.type = "sawtooth"; o.frequency.value = 55; f.type = "lowpass"; f.frequency.value = 170;
+    g.gain.setValueAtTime(0.0001, a.currentTime); g.gain.linearRampToValueAtTime(0.022, a.currentTime + 0.8);
+    o.connect(f).connect(g).connect(a.destination); o.start(); hum = { o, g, a };
+  } else if (!on && hum) {
+    const h = hum; hum = null; h.g.gain.linearRampToValueAtTime(0.0001, h.a.currentTime + 0.5); h.o.stop(h.a.currentTime + 0.6);
+  }
+}
+
+// ── the controller: calls from the landings (hall) and from the car; collective — keeps going the way it goes
+function liftCall(i, from = "hall") {
+  if (!lift.ok || i < 0 || i >= S.lift.stops.length) return;
+  audio();
+  if (i === lift.at && lift.phase !== "moving") {
+    if (lift.phase === "closing" || lift.phase === "idle") lift.phase = "opening";
+    lift.hold = Math.max(lift.hold, lift.rider ? 30 : DWELL_S);
+  } else lift.queue.add(i);
+  if (from === "car" && lift.phase === "open") lift.hold = Math.min(lift.hold, 0.9);
+  poke(600);
+}
+function liftNext() {
+  const q = [...lift.queue]; if (!q.length) return null;
+  const ahead = q.filter((i) => (lift.dir > 0 ? i > lift.at : lift.dir < 0 ? i < lift.at : true));
+  const pool = ahead.length ? ahead : q;
+  return pool.reduce((b, i) => (Math.abs(i - lift.at) < Math.abs(b - lift.at) ? i : b), pool[0]);
+}
+function liftArrived() {
+  const s = S.lift.stops[lift.at];
+  chime();
+  if (lift.rider) {
+    walker.level = s.L; applyLevelView();
+    if (state.voice && liftHeard()) speak(s.name);
+    toast(`🛗 ${s.name}`, 1800);
+  }
+  hudRoom = undefined;
+}
+function liftUpdate(dt) {
+  if (!lift.ok) return false;
+  const st = S.lift.stops; let active = false;
+  if (lift.phase === "idle" && lift.queue.size) {
+    const n = liftNext();
+    if (n === lift.at) { lift.queue.delete(n); lift.phase = "opening"; }
+    else { lift.target = n; lift.dir = Math.sign(n - lift.at); lift.phase = "moving"; humOn(true); }
+  }
+  if (lift.phase === "moving") {
+    const a = S.lift.acc * (lift.fast ? 3 : 1), vmax = S.lift.speed * (lift.fast ? 3 : 1);
+    const s = Math.sign(st[lift.target].z - lift.z) || 1;
+    for (const i of lift.queue) {           // a call ahead that the car can still stop for comes first
+      const ahead = (st[i].z - lift.z) * s;
+      if (ahead > 0.02 && ahead < (st[lift.target].z - lift.z) * s && ahead >= lift.v * lift.v / (2 * a) + 0.05) lift.target = i;
+    }
+    const d = (st[lift.target].z - lift.z) * s;
+    lift.v = Math.min(vmax, Math.sqrt(2 * a * Math.max(0, d)), lift.v + a * dt);
+    const step = Math.max(lift.v, 0.02) * dt;
+    if (d <= step + 1e-4) {
+      lift.z = st[lift.target].z; lift.v = 0; lift.at = lift.target; lift.queue.delete(lift.at);
+      lift.phase = "opening"; humOn(false); liftArrived();
+    } else lift.z += s * step;
+    // which floor it is passing (for the dir of the next choice)
+    const passed = st.reduce((b, q, i) => ((q.z - lift.z) * s <= 0.001 ? i : b), lift.at);
+    if (s > 0) lift.at = Math.max(lift.at, passed); else lift.at = Math.min(lift.at, st.findIndex((q) => q.z >= lift.z - 0.001));
+    active = true;
+  } else if (lift.phase === "opening") {
+    lift.door = Math.min(1, lift.door + dt / DOOR_OPEN_S);
+    if (lift.door >= 1) { lift.phase = "open"; lift.hold = Math.max(lift.hold, lift.rider ? 30 : DWELL_S); }
+    active = true;
+  } else if (lift.phase === "open") {
+    if (!lift.anim) {
+      if (lift.rider && lift.queue.size) lift.hold = Math.min(lift.hold, 1.0);
+      if (!(lift.rider && !lift.queue.size)) lift.hold -= dt;
+      if (lift.hold <= 0) lift.phase = "closing";
+    }
+  } else if (lift.phase === "closing") {
+    lift.door = Math.max(0, lift.door - dt / DOOR_CLOSE_S);
+    if (lift.door <= 0) { lift.phase = "idle"; lift.hold = 0; if (!lift.queue.size) lift.dir = 0; }
+    active = true;
+  }
+  if (active || state.xray) liftPose();
+  return active;
+}
+
+// ── getting in and out
+const angDiff = (a, b) => ((a - b + 3 * Math.PI) % (2 * Math.PI)) - Math.PI;
+function liftFront() { return liftPt(0, -(S.lift.door.t / 2 + 0.75)); }
+function canBoard() {
+  return lift.ok && !lift.rider && !lift.anim && state.mode === "walk" && lift.at === stopOf(walker.level) &&
+    (lift.phase === "open" || (lift.phase === "opening" && lift.door > 0.55));
+}
+function boardLift() {
+  if (!canBoard()) return;
+  const k = lift.k, D = S.lift.door;
+  lift.anim = { kind: "in", t: 0, from: [walker.x, walker.y], to: liftPt(k.cu, k.vCar + k.cd * 0.55), yaw0: walker.yaw,
+    yaw1: Math.atan2(-D.n[1], -D.n[0]) };
+  lift.hold = 30; walker.path = []; tourInterrupt(); hudRoom = undefined;
+}
+function stepOut() {
+  if (!lift.rider || lift.anim) return;
+  if (lift.phase === "moving") { toast("The lift is moving — wait for the doors to open."); return; }
+  if (lift.phase !== "open") { liftCall(lift.at, "car"); toast("Opening the doors…", 1500); return; }
+  const out = liftFront();
+  lift.anim = { kind: "out", t: 0, from: [walker.x, walker.y], to: out, yaw0: walker.yaw, yaw1: walker.yaw };
+}
+function riderUpdate(dt) {
+  const A = lift.anim;
+  if (A) {
+    A.t += dt / 0.9; const k = ease(Math.min(1, A.t));
+    walker.x = lerp(A.from[0], A.to[0], k); walker.y = lerp(A.from[1], A.to[1], k);
+    walker.yaw = A.yaw0 + angDiff(A.yaw1, A.yaw0) * k; walker.pitch = lerp(walker.pitch, -0.04, Math.min(1, dt * 3));
+    if (A.t >= 1) {
+      lift.anim = null;
+      if (A.kind === "in") { lift.rider = true; showCop(true); toast("Press a floor on the panel →", 2600); }
+      else { lift.rider = false; walker.level = S.lift.stops[lift.at].L; lift.hold = 2.5; showCop(state.xray); applyLevelView(); }
+      hudRoom = undefined;
+    }
+  } else if (lift.rider && lift.phase === "open" && (keys.has("w") || keys.has("arrowup") || keys.has("pad-fwd"))) stepOut();
+  walker.h = lift.z + walker.eye;
+  camera.position.set(walker.x, walker.h, -walker.y);
+  camera.lookAt(camera.position.clone().add(lookDir()));
+}
+function liftTrip(L) {                    // the floor bar / HUD in walk mode: walk to the lift, call, ride, step out
+  const to = stopOf(L), from = stopOf(walker.level);
+  if (to < 0 || from < 0) return false;
+  tourInterrupt();
+  lift.auto = { to, stage: "walk" };
+  const f = liftFront(), c = nearestFree(f[0], f[1], 1.2);
+  if (c && Math.hypot(walker.x - f[0], walker.y - f[1]) > 0.6) {
+    const p = centreOf(c), path = astar(walker.x, walker.y, p[0], p[1], walker.level);
+    if (!path) { lift.auto = null; return false; }
+    walker.path = path.slice(1);
+  }
+  toast(`🛗 Taking the lift to ${levelLabel(L)}…`, 2200);
+  return true;
+}
+function liftAuto() {
+  const A = lift.auto; if (!A) return;
+  if (A.stage === "walk" && !walker.path.length) {
+    const D = S.lift.door; walker.yaw = Math.atan2(D.n[1], D.n[0]);
+    liftCall(stopOf(walker.level), "hall"); A.stage = "call";
+  } else if (A.stage === "call" && canBoard()) { boardLift(); A.stage = "board"; }
+  else if (A.stage === "board" && lift.rider && !lift.anim) { liftCall(A.to, "car"); A.stage = "ride"; }
+  else if (A.stage === "ride" && lift.rider && lift.at === A.to && lift.phase === "open" && !lift.anim) { stepOut(); lift.auto = null; }
+}
+
+// ── the button panel on screen (in the car, or to drive the car in the x-ray view)
+function buildCopPanel() {
+  const el = $("copBtns"); if (!el) return;
+  el.innerHTML = "";
+  const st = S.lift.stops;
+  for (let i = st.length - 1; i >= 0; i--) {
+    const b = document.createElement("button"); b.className = "fb"; b.textContent = st[i].label; b.title = st[i].name; b.dataset.i = i;
+    b.onclick = () => { liftCall(i, lift.rider ? "car" : "remote"); syncCop(); };
+    el.appendChild(b);
+  }
+  const Lf = S.lift, how = $("copHow");
+  if (how) how.innerHTML =
+    `<b>How your lift works</b> · ${Lf.persons} persons · ${Lf.load} kg · ${Lf.speed.toFixed(1)} m/s · ${st.length} stops<br>` +
+    "⚙️ A small motor at the top turns a grooved pulley — no machine room.<br>" +
+    "🔗 Steel ropes carry the car on one side and ⚖️ a counterweight (the car + half the load) on the other, " +
+    "so the motor only lifts the difference.<br>" +
+    "🛤️ Rails guide both; if the car ever runs too fast, the safety gear grips the rails. 🛡️ Buffers wait in the pit.<br>" +
+    "🚪 The car door drives the landing door — a landing door opens only when the car is there.<br>" +
+    `♿ ${esc(Lf.words)}`;
+  syncCop();
+}
+function syncCop() {
+  if (!lift.ok) return;
+  const [lab, dir] = (lift.disp || "|0").split("|");
+  const d = $("copDisp"); if (d) d.textContent = (+dir > 0 ? "▲ " : +dir < 0 ? "▼ " : "") + lab;
+  for (const b of $("copBtns").children) b.classList.toggle("lit", lift.queue.has(+b.dataset.i));
+  const info = $("copInfo");
+  if (info) info.textContent = `${lift.v.toFixed(2)} m/s · ${lift.z.toFixed(2)} m above the ground`;
+  $("copOut").style.display = lift.rider ? "" : "none";
+  $("copHow").style.display = state.xray ? "" : "none";
+  $("copFast").classList.toggle("on", lift.fast);
+  $("copSnd").textContent = state.sound ? "🔊" : "🔇";
+}
+function showCop(on) { $("cop").style.display = on && lift.ok ? "block" : "none"; syncCop(); }
+document.querySelectorAll("#cop [data-op]").forEach((b) => b.addEventListener("click", () => {
+  const op = b.dataset.op;
+  if (op === "open" && lift.phase !== "moving") liftCall(lift.at, "car");
+  if (op === "close" && lift.phase === "open" && !lift.anim) lift.hold = 0;
+  if (op === "bell") { bell(); toast("🔔 Alarm — in a real lift this rings the building's alarm and the lift company's 24-hour line.", 5000); }
+  poke();
+}));
+$("copOut").addEventListener("click", stepOut);
+$("copFast").addEventListener("click", () => { lift.fast = !lift.fast; syncCop(); });
+$("copSnd").addEventListener("click", () => { state.sound = !state.sound; if (!state.sound) humOn(false); syncCop(); });
+$("copClose").addEventListener("click", () => { if (state.xray) setXray(false); else showCop(false); });
+
+// ── x-ray: the building fades to outlines and the lift's machinery shows, with what each part does
+function setXray(on) {
+  if (!S || !lift.ok) return;
+  state.xray = on; $("btnLift").classList.toggle("on", on);
+  hideStart(); tourInterrupt();
+  if (on) {
+    state.explode = false; $("btnExplode").classList.remove("on");
+    if (state.mode === "walk" || state.mode === "top") setMode("dollhouse", { instant: true });
+    const c = S.lift.clear, D = S.lift.door, zb = lift.k.zMin - S.lift.pit, zt = S.lift.head;
+    orbit.target.set((c[0] + c[2]) / 2, (zb + zt) / 2, -(c[1] + c[3]) / 2);
+    const ang = Math.atan2(-D.n[1], -D.n[0]) + 0.6, dx = Math.cos(ang), dy = Math.sin(ang);
+    orbit.theta = Math.atan2(dx, -dy); orbit.phi = 1.3; orbit.r = fitRadius((zt - zb) * 0.95);
+    flyTo(orbitPos(), orbit.target.clone(), 1.0);
+    toast("🛗 How the lift works — press a floor on the panel and watch the car and the counterweight.", 4200);
+  }
+  showCop(on || lift.rider);
+  liftPose(true); applyLevelView(); poke(1500);
+}
+
+// ── ghosts: the floors above the one in view (and every floor in the x-ray) as outlines — the building stays whole
+function buildGhosts() {
+  const o = S.shell.outer, top = TOP();
+  for (let L = 0; L <= top; L++) {
+    const l = new Lines(), z = zf(L), z1 = L === top ? z + S.levels.parapet : z + S.levels.ceiling;
+    l.box([o[0], o[1], o[2], o[3], z - (L ? 0.15 : 0), z1]);
+    const ls = l.build("ghost"); ls.userData.level = L;
+    const pl = new THREE.Mesh(new THREE.PlaneGeometry(o[2] - o[0], o[3] - o[1]),
+      new THREE.MeshBasicMaterial({ color: 0x4FA3D9, transparent: true, opacity: 0.06, depthWrite: false, side: THREE.DoubleSide }));
+    pl.rotation.x = -Math.PI / 2; pl.position.set((o[0] + o[2]) / 2, z, -(o[1] + o[3]) / 2); pl.userData.level = L;
+    const g = new THREE.Group(); g.userData.level = L; g.add(ls, pl); G.ghost.add(g);
+  }
+}
+
+$("btnExplode").addEventListener("click", () => {
+  if (state.xray) { state.xray = false; $("btnLift").classList.remove("on"); showCop(lift.rider); }
+  state.explode = !state.explode; $("btnExplode").classList.toggle("on", state.explode);
+  hideStart(); tourInterrupt();
+  setMode(state.mode === "walk" ? "outside" : state.mode);
+});
+
+function openLiftMove() {
+  const cur = S.lift.position;
+  for (const b of document.querySelectorAll("#liftMove [data-pos]")) b.classList.toggle("on", b.dataset.pos === cur);
+  $("liftMove").style.display = "block";
+}
+document.querySelectorAll("#liftMove [data-pos]").forEach((b) => b.addEventListener("click", () => {
+  $("liftMove").style.display = "none";
+  if (b.dataset.pos === S.lift.position) { toast("The lift is already there."); return; }
+  ST.value({ id: Date.now(), action: "lift", position: b.dataset.pos, sid: SID });
+  toast(`🛗 Re-making your design with the lift ${b.dataset.pos === "inside" ? "inside the home" : b.dataset.pos === "entrance" ? "beside the main door" : "at the side"}…`, 6000);
+}));
+$("liftMoveClose").addEventListener("click", () => { $("liftMove").style.display = "none"; });
+
 let wishRoom = null;
 function openWish(r) { wishRoom = r; $("wishT").textContent = `Change the ${r.name}`; $("wish").style.display = "block"; }
 function closeWish() { $("wish").style.display = "none"; wishRoom = null; }
@@ -1476,21 +2482,22 @@ function toast(t, ms = 3800) { $("toast").textContent = t; $("toast").style.disp
 const mini = $("miniC"), mg = mini.getContext("2d");
 const miniBase = document.createElement("canvas");     // the plan drawn once; each frame only adds 'you are here'
 let mm = { s: 1, pad: 6, base: false };
-function drawMinimapBase() {
+function drawMinimapBase(p = 0) {
   if (!S) return;
+  const P = PL(p);
   const W = S.plot.w, H = S.plot.h, max = window.innerWidth < 640 ? 130 : 190, s = max / Math.max(W, H);
-  mini.width = miniBase.width = Math.round(W * s + 12); mini.height = miniBase.height = Math.round(H * s + 12); mm = { s, pad: 6 };
+  mini.width = miniBase.width = Math.round(W * s + 12); mini.height = miniBase.height = Math.round(H * s + 12); mm = { s, pad: 6, plan: p };
   const X = (x) => mm.pad + x * s, Y = (y) => mm.pad + (H - y) * s;
   mg.fillStyle = "#06182E"; mg.fillRect(0, 0, mini.width, mini.height);
   mg.strokeStyle = "#3E6E9C"; mg.setLineDash([3, 3]); mg.strokeRect(X(0), Y(H), W * s, H * s); mg.setLineDash([]);
   const col = { LIVING: "#1E5A92", DINING: "#1E5A92", BEDROOM: "#2C4F86", KITCHEN: "#6B4E1E", BATHROOM: "#1D5E66", POOJA: "#7A5B12", STAIRS: "#3A3A5A" };
-  for (const r of S.rooms) { const [x0, y0, x1, y1] = r.r; mg.fillStyle = col[r.cat] || "#203C5E"; mg.globalAlpha = 0.75; mg.fillRect(X(x0), Y(y1), (x1 - x0) * s, (y1 - y0) * s); }
+  for (const r of P.rooms) { const [x0, y0, x1, y1] = r.r; mg.fillStyle = col[r.cat] || "#203C5E"; mg.globalAlpha = 0.75; mg.fillRect(X(x0), Y(y1), (x1 - x0) * s, (y1 - y0) * s); }
   mg.globalAlpha = 1;
   for (const st of S.site) { const [x0, y0, x1, y1] = st.r; mg.strokeStyle = st.cat === "GARDEN" ? "#22C55E" : st.cat === "POOL" ? "#38BDF8" : "#64748B"; mg.strokeRect(X(x0), Y(y1), (x1 - x0) * s, (y1 - y0) * s); }
   mg.fillStyle = "#00E5FF";
-  for (const k of ["ext", "int", "post", "cmp"]) for (const b of S.walls[k] || []) { if (k !== "cmp" && b[4] > S.levels.ffl + 0.5) continue; mg.fillRect(X(b[0]), Y(b[3]), Math.max(1, (b[2] - b[0]) * s), Math.max(1, (b[3] - b[1]) * s)); }
+  for (const k of ["ext", "int", "post", "cmp"]) for (const b of (k === "cmp" ? S.walls[k] : P.walls[k]) || []) { if (k !== "cmp" && b[4] > S.levels.ffl + 0.5) continue; mg.fillRect(X(b[0]), Y(b[3]), Math.max(1, (b[2] - b[0]) * s), Math.max(1, (b[3] - b[1]) * s)); }
   mg.fillStyle = "#00FF88";
-  for (const d of S.doors) { mg.beginPath(); mg.arc(X(d.mid[0]), Y(d.mid[1]), 2.2, 0, 7); mg.fill(); }
+  for (const d of P.doors) { mg.beginPath(); mg.arc(X(d.mid[0]), Y(d.mid[1]), 2.2, 0, 7); mg.fill(); }
   // north
   const cx = mini.width - 16, cy = 16, n = S.north;
   mg.strokeStyle = "#fff"; mg.fillStyle = "#fff"; mg.lineWidth = 2; mg.beginPath(); mg.moveTo(cx - n[0] * 9, cy + n[1] * 9); mg.lineTo(cx + n[0] * 9, cy - n[1] * 9); mg.stroke();
@@ -1535,6 +2542,9 @@ function update(dt) {
     const tgt = new THREE.Vector3().lerpVectors(trans.fromT, trans.toT, k); camera.lookAt(tgt);
     if (trans.t >= 1) { trans.on = false; if (trans.done) trans.done(); }
     active = true;
+  } else if (state.mode === "walk" && (lift.rider || lift.anim)) {
+    riderUpdate(dt); liftAuto(); updateHud();
+    active = true;
   } else if (state.mode === "walk") {
     const run = keys.has("shift") ? 2.4 : 1.4;
     let f = 0, s = 0, turn = 0;
@@ -1560,6 +2570,16 @@ function update(dt) {
     }
     tourUpdate(dt);
     if (tour.on) active = true;
+    if (lift.ok) {
+      liftAuto();
+      if (canBoard() && !lift.auto && lift.prev) {               // walking into the open lift steps you in
+        const D = S.lift.door, dx = walker.x - D.mid[0], dy = walker.y - D.mid[1];
+        const along = dx * D.n[0] + dy * D.n[1], across = Math.abs(dx * D.n[1] - dy * D.n[0]);
+        const mv = (walker.x - lift.prev[0]) * D.n[0] + (walker.y - lift.prev[1]) * D.n[1];
+        if (along > -(D.t / 2 + 0.5) && across < D.w / 2 + 0.1 && mv > 0.0005) boardLift();
+      }
+      lift.prev = [walker.x, walker.y];
+    }
     const gz = groundAt(walker.x, walker.y) + walker.eye;
     if (Math.abs(gz - walker.h) > 0.002) { walker.h += (gz - walker.h) * Math.min(1, dt * 7); active = true; }
     camera.position.set(walker.x, walker.h, -walker.y);
@@ -1569,17 +2589,26 @@ function update(dt) {
     if (orbit.auto) { orbit.theta += dt * 0.08; active = true; }
     camera.position.copy(orbitPos()); camera.lookAt(orbit.target);
   }
+  if (liftUpdate(dt)) active = true;                  // the lift runs in every view
   // doors open as you come near (always open in the roof-off views), gates likewise
   for (const o of registry.doors) {
-    if (o.still) continue;
-    const near = walker.level === 0 && Math.hypot(walker.x - o.d.mid[0], walker.y - o.d.mid[1]) < 1.7;
+    if (o.still) {                                   // (a lift without scene.lift) the door slides away near it
+      const open = state.mode === "walk" && Math.hypot(walker.x - o.d.mid[0], walker.y - o.d.mid[1]) < 1.2;
+      if (o.pivot.visible === open) { o.pivot.visible = !open; active = true; }
+      continue;
+    }
+    const near = hasRooms(walker.level) && planOf(walker.level) === (o.plan || 0) &&
+      Math.hypot(walker.x - o.d.mid[0], walker.y - o.d.mid[1]) < 1.7;
     o.target = state.mode === "walk" ? (near ? 1 : 0) : (state.mode === "outside" ? 0 : 1);
     if (Math.abs(o.target - o.cur) > 1e-3) { o.cur += clamp(o.target - o.cur, -dt * 1.6, dt * 1.6); o.pivot.rotation.y = o.d.closed * DEG + o.delta * ease(o.cur); active = true; }
   }
+  if (driveUpdate(dt)) active = true;
   for (const o of registry.gates) {
     const near = state.mode === "walk" && Math.hypot(walker.x - o.mid[0], walker.y - o.mid[1]) < 3.2;
-    o.target = near || tour.on ? 1 : 0;
-    if (Math.abs(o.target - o.cur) > 1e-3) { o.cur += clamp(o.target - o.cur, -dt * 0.9, dt * 0.9); o.pivot.rotation.y = o.closed + o.delta * ease(o.cur); active = true; }
+    const car = drive.on && drive.at && Math.hypot(drive.at[0] - o.gmid[0], drive.at[1] - o.gmid[1]) < 8.5 &&
+      S.gates[S.drive.gate] === o.g;
+    o.target = near || tour.on || car ? 1 : 0;
+    if (Math.abs(o.target - o.cur) > 1e-3) { o.cur += clamp(o.target - o.cur, -dt * 0.7, dt * 0.7); const e = ease(o.cur); for (const f of o.parts) f(e); active = true; }
   }
   if (state.mode === "walk" && registry.fans.length) { for (const f of registry.fans) f.rotation.y += dt * 4.2; active = true; }
   sky.position.copy(camera.position);
@@ -1629,6 +2658,7 @@ resize();
 requestAnimationFrame(frame);
 // debugging handle (read-only use from the browser console)
 window.__walk = { scene, camera, renderer, registry, state, walker, get S() { return S; }, walkTo, stairAt, groundAt,
+  lift, liftCall, boardLift, stepOut, setXray, liftTrip, goLevel, orbit, drive, startDrive,
   tick(n = 1, dt = 1 / 30) { for (let k = 0; k < n; k++) update(dt); renderer.render(scene, camera); updateLabels(canvas.clientWidth, canvas.clientHeight); drawMinimap(); },
   pick(x, y) {
     const r = canvas.getBoundingClientRect(); ray.setFromCamera(new THREE.Vector2((x / r.width) * 2 - 1, -(y / r.height) * 2 + 1), camera);

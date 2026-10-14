@@ -23,10 +23,11 @@ if root_dir not in sys.path:
 import importlib as _importlib
 for _name in ("floorplan_generator.room_specs", "floorplan_generator.vastu_engine",
               "floorplan_generator.family_analyzer", "floorplan_generator.space_program",
-              "floorplan_generator.site_planner", "floorplan_generator.site_feasibility",
+              "floorplan_generator.gates", "floorplan_generator.site_planner", "floorplan_generator.site_feasibility",
               "floorplan_generator.layout_solver", "floorplan_generator.quantities", "floorplan_generator.intent_engine",
               "floorplan_generator.wish_parser",
-              "floorplan_generator.layout_engine", "floorplan_generator.vastu_analyzer",
+              "floorplan_generator.layout_engine", "floorplan_generator.apartment", "floorplan_generator.duplex",
+              "floorplan_generator.vastu_analyzer",
               "floorplan_generator.takeoff", "floorplan_generator.house_report",
               "floorplan_generator.land_value",
               "floorplan_renderer._common", "floorplan_renderer.drafting", "floorplan_renderer.svg_renderer",
@@ -78,6 +79,37 @@ def _site_request_status(plan):
     return missing, info
 
 
+def _gates_card(plan):
+    """The gates, each sized for what passes through it (floorplan_generator/gates.py)."""
+    eng = getattr(plan, "engineering", None) or {}
+    gates = eng.get("gates") or []
+    if not gates:
+        return
+    what = {"walk": "🚶 Walking gate", "two_wheeler": "🛵 Walking + two-wheeler gate", "vehicle": "🚗 Car gate",
+            "vehicle_wicket": "🚗 Car gate with a 🚶 wicket door"}
+    op = {"swing": "swings inward", "sliding": "sliding", "telescopic": "telescopic sliding", "bifold": "bi-fold"}
+    road = eng.get("road_m", 9.0)
+    head = " · ".join(f"{g['tag']} {g['feet']}" for g in gates)
+    with st.expander(f"🚪 Gates — {head} (sized for what passes through, from a {road / 0.3048:.0f} ft road)",
+                     expanded=False):
+        for g in gates:
+            st.markdown(f"**{g['tag']} · {what.get(g['kind'], 'Gate')} — {g['width']:.2f} m ({g['feet']}), "
+                        f"{op.get(g['op'], g['op'])}, {g['height']:.1f} m high**")
+            for line in g.get("why") or []:
+                st.markdown(f"- {line}")
+            pd = g.get("pada")
+            if pd and getattr(plan, "vastu_enabled", False):
+                good = pd["score"] >= 8
+                text = f"Vastu: this gate stands in pada **{pd['id']} ({pd['deity']})** — " + (
+                    "an auspicious gate position." if good else (pd.get("effect") or "a weaker position") + ".")
+                if not good and pd.get("remedy"):
+                    text += f" Remedy: {pd['remedy']}."
+                st.caption(text)
+        st.caption("Gates open inward only — Indian building rules do not let a gate swing over the street. "
+                   "Widths are rounded up to whole feet, the way gates are made. In the 3D view, press "
+                   "🚗 Drive in to watch the car turn in from the road.")
+
+
 def _checker_version() -> float:
     """Part of the cache key, so an edited site_feasibility.py is not answered from the cache."""
     import floorplan_generator.site_feasibility as _sf
@@ -91,13 +123,30 @@ def _bhk_fit(plot_w, plot_h, facing, family_kw, building_type, floors, vastu, ve
     return bhk_options(plot_w, plot_h, facing, FamilyProfile(**family_kw), building_type, floors, vastu)
 
 
+@st.cache_data(show_spinner=False, max_entries=128)
+def _flats_fit(plot_w, plot_h, facing, bhk, family_kw, floors, vastu, has_lift, lift_capacity, version=0.0):
+    """Apartments: how 1, 2 and 4 flats per floor fit (each flat planned around a common core)."""
+    from floorplan_generator.apartment import flats_options
+    return flats_options(plot_w, plot_h, facing, bhk, FamilyProfile(**family_kw), floors, vastu,
+                         has_lift, lift_capacity)
+
+
+@st.cache_data(show_spinner=False, max_entries=128)
+def _lift_fit(plot_w, plot_h, facing, bhk, family_kw, floors, vastu, lift_capacity, stair_code, version=0.0):
+    """Houses: where the lift can stand — inside, beside the main door, or in a side yard."""
+    from floorplan_generator.site_feasibility import lift_options
+    return lift_options(plot_w, plot_h, facing, bhk, FamilyProfile(**family_kw), "Independent House", floors,
+                        vastu, lift_capacity, stair_code)
+
+
 @st.cache_data(show_spinner=False, max_entries=256)
 def _site_fit(plot_w, plot_h, facing, bhk, family_kw, building_type, floors, quality, vastu,
-              has_lift, lift_capacity, stair_code, components, version=0.0):
+              has_lift, lift_capacity, stair_code, components, version=0.0, lift_position="inside"):
     """Which site amenities fit with the choices made so far."""
     from floorplan_generator.site_feasibility import check_site
     return check_site(plot_w, plot_h, facing, bhk, FamilyProfile(**family_kw), building_type, floors,
-                      quality, vastu, has_lift, lift_capacity, stair_code, components)
+                      quality, vastu, has_lift, lift_capacity, stair_code, components,
+                      lift_position=lift_position)
 
 
 def _amenity_toggle(label, key, fit, help=None, show_ok=False) -> bool:
@@ -337,6 +386,13 @@ def render_design_tab():
             help="Which side faces the main access road / North direction"
         )
         orient_code = orientation[0]  # 'N', 'E', 'S', 'W'
+        _roads = {"15 ft lane (4.5 m)": 4.5, "20 ft road (6 m)": 6.0, "25 ft road (7.5 m)": 7.5,
+                  "30 ft road (9 m)": 9.0, "40 ft road (12 m)": 12.0, "60 ft road or wider (18 m)": 18.0}
+        road_sel = st.selectbox(
+            "🛣️ Road in front of the plot", list(_roads), index=3, key="road_width_sel",
+            help="Sizes the gates: a car turning in from a narrow road sweeps a wider arc, so it needs a "
+                 "wider gate. People only → a small gate, two-wheelers → a medium one, cars → a wide one.")
+        road_w = _roads[road_sel]
         land = _location_picker(plot_area_sqm)
 
     with col_family:
@@ -419,8 +475,18 @@ def render_design_tab():
         if int(st.session_state.get("num_floors", 1) or 1) > max_floors:
             st.session_state["num_floors"] = max_floors
         st.session_state.setdefault("num_floors", 1)
+        _duplex = "Duplex" in bldg_type
+        if _duplex:                          # a duplex is one home on two floors
+            st.session_state["num_floors"] = 2
         floors = st.number_input("Number of Floors", min_value=1, max_value=max_floors, step=1,
-                                 key="num_floors")
+                                 key="num_floors", disabled=_duplex)
+        if _duplex:
+            st.caption("🔒 A duplex is **one home on 2 floors**: living, dining, kitchen and a guest / elders' room "
+                       "below; the bedrooms and a family lounge above; the stair rises from the entrance foyer.")
+        elif "Independent" in bldg_type and int(floors) > 1:
+            st.caption(f"🏘️ {int(floors)} floors = **{int(floors)} homes**, one on each floor, the same plan — every "
+                       "home's front door opens on a stair lobby at the front, so each floor is reached by the stair "
+                       "(and lift) without passing through another home. *One home over two floors? Choose Duplex.*")
         has_upper = floors > 1 or "Apartment" in bldg_type or "Duplex" in bldg_type
 
         # Lift/Elevator toggle — intelligent auto-enable for 4+ floors or Apartments
@@ -444,16 +510,85 @@ def render_design_tab():
                 help="IS 14665 compliant lift shaft (min 1.5m × 1.5m). Placed per Vastu in S/SW/W zone."
             )
 
+        lift_position = "inside"
         if has_lift:
             lift_capacity = st.selectbox(
                 "Lift Capacity",
-                ["4 Person (630kg) — 1.5m × 1.5m shaft",
-                 "6 Person (480kg) — 1.6m × 1.7m shaft",
-                 "8 Person (680kg) — 1.8m × 2.0m shaft"],
-                index=0
+                ["4 Person (272 kg) — 1.5 m × 1.5 m shaft",
+                 "6 Person (408 kg) — 1.6 m × 1.7 m shaft",
+                 "8 Person (544 kg) — 1.8 m × 2.0 m shaft"],
+                index=0, key="lift_capacity_sel",
+                help="IS 14665: 68 kg a person. The car size decides who it can carry — see the note below."
             )
+            from floorplan_generator.space_program import lift_car as _lift_car
+            import re as _re
+            _persons = int((_re.search(r"(\d+)", lift_capacity) or [0, 4])[1])
+            st.caption("🛗 " + _lift_car(_persons)["words"])
+
+            # Where the lift stands: apartments share a core; a duplex keeps it inside; a house can choose
+            _floorwise = "Independent" in bldg_type and int(floors) > 1
+            _where = {"inside": ("🏢 In the stair lobby — shared by every floor" if _floorwise
+                                 else "🏠 Inside the home — opens into the house"),
+                      "entrance": "🚪 Outside, beside the main door",
+                      "side": "↔️ Outside, at the side of the house"}
+            if "Apartment" in bldg_type:
+                st.selectbox("🛗 Where is the lift?", ["🏢 In the common core — outside every flat"], disabled=True,
+                             key="lift_pos_apartment")
+                st.caption("Many families share an apartment: the lift and stair stand in the common core, and "
+                           "the lobby / corridor leads from them to every flat's main door.")
+            elif _duplex:
+                st.selectbox("🛗 Where is the lift?", [_where["inside"]], disabled=True, key="lift_pos_duplex")
+                st.caption("A duplex is one home on two floors — its lift stays inside, next to the stair.")
+            else:
+                import floorplan_generator.site_feasibility as _sf_mod
+                _lfit = _lift_fit(round(plot_w, 3), round(plot_h, 3), orient_code, effective_bhk, family_kw,
+                                  int(floors), vastu_on, lift_capacity, st.session_state.get("stair_code_sel", "dog_leg"),
+                                  os.path.getmtime(_sf_mod.__file__))
+                _lopts = [k for k in ("inside", "entrance", "side") if _lfit[k].status != "no"]
+                if "lift_position_pending" in st.session_state:          # moved from the 3D walk-through
+                    st.session_state["lift_position"] = st.session_state.pop("lift_position_pending")
+                if st.session_state.get("lift_position") not in _lopts:
+                    st.session_state["lift_position"] = "inside"
+                lift_position = st.selectbox(
+                    "🛗 Where is the lift?", _lopts, key="lift_position",
+                    format_func=lambda k: _where[k] + (" ⚠️" if _lfit[k].status == "tight" else ""),
+                    help="Inside: you enter the house first, then take the lift. Outside: a lift tower with its own "
+                         "landing on every floor — each floor can be reached (or let out) without passing through "
+                         "another. You can also move it later from the 3D walk-through.")
+                _locked = [k for k in ("entrance", "side") if _lfit[k].status == "no"]
+                st.caption(("✅ " if _lfit[lift_position].status == "ok" else "⚠️ ") + _lfit[lift_position].reason[0].upper()
+                           + _lfit[lift_position].reason[1:] + "."
+                           + "".join(f"  \n🔒 {_where[k].split(' ', 1)[1]}: {_lfit[k].reason}." for k in _locked))
         else:
             lift_capacity = "4 Person"
+
+        # Apartments: flats per floor around a common stair / lift core (only layouts that fit are offered)
+        flats_per_floor = "auto"
+        if "Apartment" in bldg_type:
+            import floorplan_generator.apartment as _apt
+            _fits = _flats_fit(round(plot_w, 3), round(plot_h, 3), orient_code, effective_bhk, family_kw,
+                               int(floors), vastu_on, has_lift, lift_capacity, os.path.getmtime(_apt.__file__))
+            _auto_n = next((n for n in (4, 2) if _fits[n]["comfortable"]), 1)
+            _flat_opts = ["Auto"] + [n for n in (1, 2, 4) if _fits[n]["fits"]]
+            if st.session_state.get("flats_per_floor") not in _flat_opts:
+                st.session_state["flats_per_floor"] = "Auto"
+
+            def _flat_label(o):
+                if o == "Auto":
+                    return f"Auto — {_auto_n} flat{'s' if _auto_n > 1 else ''} per floor"
+                r = _fits[o]
+                return (f"{o} flat{'s' if o > 1 else ''} per floor · {r['area']:.0f} m² each "
+                        f"{'✅' if r['comfortable'] else '⚠️ compact'}")
+            _fsel = st.selectbox("🏢 Flats on each floor", _flat_opts, key="flats_per_floor", format_func=_flat_label,
+                                 help="Each flat is a full home planned by the engine; the stair, lift and a lobby "
+                                      "or corridor are shared, and every flat's main door opens onto them.")
+            flats_per_floor = "auto" if _fsel == "Auto" else int(_fsel)
+            _n_now = _auto_n if _fsel == "Auto" else int(_fsel)
+            _locked = [n for n in (2, 4) if not _fits[n]["fits"]]
+            st.caption(f"🏢 {_n_now} flat{'s' if _n_now > 1 else ''} × {int(floors)} floor{'s' if floors > 1 else ''} "
+                       f"= **{_n_now * int(floors)} home{'s' if _n_now * int(floors) > 1 else ''}** of {effective_bhk}."
+                       + (f" 🔒 {' and '.join(str(n) for n in _locked)} flats per floor need a wider / deeper plot."
+                          if _locked else ""))
 
         # Staircase type
         stair_options = [
@@ -486,6 +621,7 @@ def render_design_tab():
                 help="Dog-leg fits in compact plots. Open Well needs larger footprint."
             )
             stair_code = stair_map.get(stair_type, "dog_leg")
+            st.session_state["stair_code_sel"] = stair_code
 
     # ---------------------------------------------------------
     # What fits on this plot — every site amenity is checked against the plot, BHK and
@@ -505,7 +641,8 @@ def render_design_tab():
         'security_cabin': {'enabled': bool(ss.get("amen_security"))},
     }
     site_fit = _site_fit(round(plot_w, 3), round(plot_h, 3), orient_code, effective_bhk, family_kw, bldg_type,
-                         int(floors), quality, vastu_on, has_lift, lift_capacity, stair_code, comps_now, _checker_version())
+                         int(floors), quality, vastu_on, has_lift, lift_capacity, stair_code, comps_now, _checker_version(),
+                         lift_position)
 
     if site_fit.lifestyle_dropped:
         with col_family:
@@ -630,14 +767,19 @@ def render_design_tab():
                 importlib.reload(floorplan_generator.room_specs)
                 importlib.reload(floorplan_generator.vastu_engine)
                 import floorplan_generator.space_program
+                import floorplan_generator.gates
                 import floorplan_generator.site_planner
                 import floorplan_generator.layout_solver
                 import floorplan_generator.quantities
                 import floorplan_generator.intent_engine
                 import floorplan_generator.layout_engine
-                for _mod in (floorplan_generator.space_program, floorplan_generator.site_planner,
+                import floorplan_generator.apartment
+                import floorplan_generator.duplex
+                for _mod in (floorplan_generator.space_program, floorplan_generator.gates,
+                             floorplan_generator.site_planner,
                              floorplan_generator.layout_solver, floorplan_generator.quantities,
-                             floorplan_generator.intent_engine, floorplan_generator.layout_engine):
+                             floorplan_generator.intent_engine, floorplan_generator.layout_engine,
+                             floorplan_generator.apartment, floorplan_generator.duplex):
                     importlib.reload(_mod)
                 from floorplan_generator.layout_engine import LayoutEngine, GeneratedFloorPlan
 
@@ -657,6 +799,9 @@ def render_design_tab():
                     "building_type": bldg_type,
                     "additional_components": additional_components,
                     "family_profile": profile,
+                    "flats_per_floor": flats_per_floor,
+                    "lift_position": lift_position,
+                    "road_width": road_w,
                 }
                 init_sig = inspect.signature(LayoutEngine.__init__)
                 has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in init_sig.parameters.values())
@@ -786,6 +931,7 @@ def render_design_tab():
                        + "\n\nTry a bigger plot, fewer rooms, or a second floor.")
         for _m in _info:
             st.info(_m)
+        _gates_card(plan)
 
         # Style View Selector
         style_col1, style_col2 = st.columns([3, 1])
@@ -793,6 +939,9 @@ def render_design_tab():
             view_mode = st.radio("Drawing Style", ["Blueprint Mode (Dark)", "Classic CAD (White)"], horizontal=True)
 
         svg_to_display = st.session_state['gen_svg_blueprint'] if "Blueprint" in view_mode else st.session_state['gen_svg_clean']
+        _upper = getattr(plan, "upper_plan", None)
+        if _upper is not None:                       # a duplex: both floors' drawings
+            st.markdown("##### 🏠 Ground floor")
 
         # Display SVG Drawing
         st.markdown(
@@ -805,6 +954,26 @@ def render_design_tab():
             """,
             unsafe_allow_html=True
         )
+        if _upper is not None:
+            _key = ("upper_svg", id(_upper), view_mode)
+            if st.session_state.get("_upper_svg_key") != _key:
+                from floorplan_renderer.svg_renderer import SVGRenderer as _SVG
+                st.session_state["_upper_svg"] = _SVG().render_to_string(
+                    _upper, mode='blueprint' if "Blueprint" in view_mode else 'clean')
+                st.session_state["_upper_svg_key"] = _key
+            st.markdown("##### 🛏️ First floor — the same stair lands in the upper lobby")
+            st.markdown(
+                f"""
+                <div style="background: {'#0A2342' if 'Blueprint' in view_mode else '#FFFFFF'};
+                            padding: 15px; border-radius: 8px; border: 2px solid #334155; text-align: center; overflow-x: auto;">
+                    {st.session_state["_upper_svg"]}
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+            st.download_button("🎨 First-floor drawing (.svg)", data=st.session_state["_upper_svg"].encode("utf-8"),
+                               file_name=f"{plan.bhk_config}_duplex_first_floor.svg", mime="image/svg+xml",
+                               key="dl_upper_svg")
 
         st.write("")
 
@@ -900,4 +1069,4 @@ def render_design_tab():
         # ---------------------------------------------------------
         # 3D walk-through: the plan as a house you can walk inside (bottom of the page)
         # ---------------------------------------------------------
-        _importlib.import_module("model_folder.walkthrough_ui").render_walkthrough(plan, land)
+        _importlib.import_module("model_folder.walkthrough_ui").render_walkthrough(plan, land, cost_params=_cost_params)

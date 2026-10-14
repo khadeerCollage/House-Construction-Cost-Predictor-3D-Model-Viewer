@@ -112,8 +112,8 @@ class TestWalkthrough(unittest.TestCase):
         self.assertAlmostEqual(sc["shell"]["roof_z"], lv["ffl"] + 2 * lv["storey"], places=2)
         inner = [s for s in sc["stairs"] if not s["external"]]
         self.assertTrue(inner)
-        top = max(b[5] for b in inner[0]["boxes"])
-        self.assertAlmostEqual(top, lv["ffl"] + lv["storey"], delta=0.02)          # stairs reach the next floor
+        self.assertAlmostEqual(inner[0]["top"], lv["ffl"] + lv["storey"], delta=0.02)   # stairs reach the next floor
+        self.assertTrue(inner[0]["exit"])                                         # … and step out onto it
         self.assertTrue(sc["shell"]["mumty"] is not None)
         # stilt parking: the house sits one storey up, columns and the car below
         plan, sc = _plan("N", 9.55, 12.71, "2BHK", {'car_parking': {'enabled': True, 'slots': 1, 'mode': 'stilt'}}, 2)
@@ -226,9 +226,9 @@ class TestWalkthrough(unittest.TestCase):
             plan, sc = _plan(*args)
             nav, nav1 = sc["nav"], sc["nav1"]
             g0, g1 = grid(nav), grid(nav1)
-            self.assertEqual(sc["upper"]["kind"], kind)
+            self.assertEqual(sc["upper_level"]["kind"], kind)
             st = next(s for s in sc["stairs"] if s["external"] == external)
-            self.assertAlmostEqual(st["top"], sc["upper"]["z"], delta=0.02, msg=args)      # reaches the level above
+            self.assertAlmostEqual(st["top"], sc["upper_level"]["z"], delta=0.02, msg=args)   # reaches the level above
             self.assertLessEqual(st["riser_mm"], 190)
             if external:
                 self.assertTrue(st["bridge"], args)
@@ -251,6 +251,56 @@ class TestWalkthrough(unittest.TestCase):
             self.assertTrue(connected(g1, t, goal), f"{args}: cannot get from the stairs onto the {kind}")
             # the yard is not reachable on the upper level except by the stairs
             self.assertFalse(g1[cell(nav1, sc["plot"]["w"] / 2, sc["plot"]["h"] + 1.5)[::-1]])
+
+    def test_10_every_floor_is_built(self):
+        """G+2 house, a 5-floor apartment with 2 flats per floor, and a stilt house: levels, balconies,
+        entrances closed above the ground, stairs on every floor, the tour inside one flat."""
+        def grid(nav):
+            bits = np.unpackbits(np.frombuffer(base64.b64decode(nav["bits"]), dtype=np.uint8))[: nav["nx"] * nav["ny"]]
+            return bits.reshape(nav["ny"], nav["nx"]).astype(bool)
+
+        plan, sc = _plan("N", 12.0, 16.0, "2BHK", None, 3)
+        self.assertEqual([l["label"] for l in sc["levels_list"]], ["Ground floor", "Floor 1", "Floor 2", "Terrace"])
+        H = sc["levels"]["storey"]
+        for a, b in zip(sc["levels_list"], sc["levels_list"][1:]):
+            self.assertAlmostEqual(b["z"] - a["z"], H, places=2)
+        self.assertAlmostEqual(sc["levels_list"][-1]["z"], sc["shell"]["roof_z"], places=2)
+        # a home on every floor: the stair and each floor's front door open onto the stair lobby at the front
+        self.assertEqual(sc["apartment"]["kind"], "house")
+        main = next(d for d in sc["doors"] if d["kind"] == "main")
+        self.assertEqual(main["room"], "Stair Lobby")
+        self.assertEqual(main["upper"], "parapet")                 # upstairs the lobby's front is an open sit-out
+        self.assertEqual(sum(1 for d in sc["doors"] if d["kind"] == "flatdoor"), 1)
+        self.assertTrue(any("home on each" in s["say"] for s in sc["tour"]))
+        self.assertTrue(sc["nav_typ"])
+        gt = grid(sc["nav_typ"])
+        nav = sc["nav_typ"]
+        lob = next(r for r in sc["rooms"] if r["name"] == "Stair Lobby")["r"]
+        i, j = int(((lob[0] + lob[2]) / 2 - nav["x0"]) / nav["cell"]), int(((lob[1] + lob[3]) / 2 - nav["y0"]) / nav["cell"])
+        self.assertTrue(gt[j, i], "the lobby upstairs can be stood on")
+        x0, y0 = int((0.3 - nav["x0"]) / nav["cell"]), int((0.3 - nav["y0"]) / nav["cell"])
+        self.assertFalse(gt[y0, x0], "upper floors have no garden to walk into")
+        st = next(s for s in sc["stairs"] if not s["external"])
+        segs = {b[6] for b in st["boxes"]}
+        self.assertEqual(segs, {0, 1})
+        self.assertLess(max(b[5] for b in st["boxes"] if b[6] == 0), min(b[5] for b in st["boxes"] if b[6] == 1) + 1e-6)
+
+        apt = LayoutEngine(18.0, 24.0, "2BHK", True, "E", num_floors=5, building_type="Apartment",
+                           has_lift=True).generate()
+        sa = wt.build_scene(apt)
+        self.assertEqual(len(sa["levels_list"]), 6)
+        self.assertEqual(sa["apartment"]["flats_per_floor"], 2)
+        self.assertEqual(next(d for d in sa["doors"] if d["kind"] == "main")["upper"], "parapet")
+        self.assertEqual(sum(1 for d in sa["doors"] if d["kind"] == "flatdoor"), 2)
+        rooms_toured = [s["room"] for s in sa["tour"] if s.get("room")]
+        self.assertTrue(rooms_toured and all(r.startswith("A · ") or "Gallery" in r for r in rooms_toured), rooms_toured)
+        self.assertTrue(any("apartment building" in s["say"] for s in sa["tour"]))
+        self.assertTrue(sa["walls"]["parapet"])
+
+        plan, ss = _plan("N", 9.55, 12.71, "2BHK", {'car_parking': {'enabled': True, 'slots': 1, 'mode': 'stilt'}}, 2)
+        self.assertEqual([l["kind"] for l in ss["levels_list"]], ["stilt", "rooms", "rooms", "terrace"])
+        self.assertEqual(ss["tour_level"], 1)
+        self.assertAlmostEqual(ss["levels_list"][1]["z"], ss["levels"]["ffl"], places=2)
 
     def test_08_viewer_is_offline(self):
         d = os.path.join(ROOT, "model_folder", "walkthrough3d")

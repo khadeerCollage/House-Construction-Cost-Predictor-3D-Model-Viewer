@@ -171,6 +171,8 @@ class SVGRenderer:
         else:
             self._draw_windows(d, plan.windows, plan.walls, colors)
         self._draw_doors(d, plan.doors, colors)
+        if layer and layer.gates:
+            self._draw_prims(d, layer.gates, S, colors)
         anchors = None
         if layer:
             self._draw_rwp(d, layer, S, colors)
@@ -200,6 +202,8 @@ class SVGRenderer:
             'fix_d': dict(stroke=colors['fixture'], stroke_width=0.55, fill='none'),
             'dash': dict(stroke=colors['furn_detail'], stroke_width=0.6, fill='none', stroke_dasharray='3,2'),
             'tile': dict(stroke=colors['tile'], stroke_width=0.5, fill='none'),
+            'gate': dict(stroke=colors['door'], stroke_width=1.4, fill=colors['door'], fill_opacity=0.25),
+            'gate_d': dict(stroke=colors['door'], stroke_width=0.7, fill='none', stroke_dasharray='4,3'),
         }
 
     def _draw_prims(self, d, prims, S, colors):
@@ -310,13 +314,15 @@ class SVGRenderer:
         """Road strip beyond the front (entrance) boundary."""
         names = {"N": "NORTH", "E": "EAST", "S": "SOUTH", "W": "WEST"}
         face = names.get((plan.orientation or "N").upper()[:1], "NORTH")
+        road = (getattr(plan, "engineering", None) or {}).get("road_m")
+        width = f"{int(round(road / 0.3048 / 5) * 5)} FT ({road:g} M)  ·  " if road else ""
         x0, x1 = -0.6 * PPM, (plan.plot_width + 0.6) * PPM
         y_near, y_far = -1.25 * PPM, -2.75 * PPM
         for y in (y_near, y_far):
             d.append(draw.Line(x0, y, x1, y, stroke=colors['dim_line'], stroke_width=1.0))
         d.append(draw.Line(x0, (y_near + y_far) / 2, x1, (y_near + y_far) / 2, stroke=colors['dim_line'],
                            stroke_width=0.8, stroke_dasharray='14,8', stroke_opacity=0.7))
-        d.append(draw.Text(f"ROAD  ·  {face} FACING  ·  MAIN ENTRANCE", 10, (x0 + x1) / 2, y_near - 0.3 * PPM,
+        d.append(draw.Text(f"ROAD  ·  {width}{face} FACING  ·  MAIN ENTRANCE", 10, (x0 + x1) / 2, y_near - 0.3 * PPM,
                            fill=colors['text_dim'], text_anchor='middle', font_weight='bold',
                            font_family='Arial, Helvetica, sans-serif', letter_spacing='1'))
 
@@ -338,7 +344,7 @@ class SVGRenderer:
     def _draw_tags(self, d, layer, S, colors):
         for x, y, text, kind in layer.tags:
             sx, sy = S(x, y)
-            col = colors['door'] if kind == 'door' else colors['window_glass']
+            col = colors['door'] if kind in ('door', 'gate') else colors['window_glass']
             w = 6 + 5.2 * len(text)
             d.append(draw.Rectangle(sx - w / 2, sy - 5.5, w, 11, rx=2.5, fill=colors['plate'], fill_opacity=0.9,
                                     stroke=col, stroke_width=0.6))
@@ -374,7 +380,8 @@ class SVGRenderer:
             return y + 16
 
         # --- schedule of openings
-        y = header("SCHEDULE OF DOORS & WINDOWS", y)
+        y = header("SCHEDULE OF DOORS, WINDOWS & GATES" if any(r['kind'] == 'gate' for r in layer.schedule)
+                   else "SCHEDULE OF DOORS & WINDOWS", y)
         cols = [(6, "TAG"), (36, "SIZE (mm)"), (104, "SILL"), (136, "NOS"), (164, "SPECIFICATION")]
         top = y
         for cx, lab in cols:
@@ -382,7 +389,7 @@ class SVGRenderer:
         y += 14
         d.append(draw.Line(x0, y - 1, x0 + width, y - 1, stroke=colors['title_stroke'], stroke_width=0.5))
         for row in layer.schedule:
-            col = colors['door'] if row['kind'] == 'door' else colors['window_glass']
+            col = colors['door'] if row['kind'] in ('door', 'gate') else colors['window_glass']
             vals = [row['tag'], row['size'], row['sill'], str(row['nos']), row['spec']]
             for (cx, _), v in zip(cols, vals):
                 d.append(draw.Text(v, 7, x0 + cx, y + 9, fill=col if cx == 6 else tc,

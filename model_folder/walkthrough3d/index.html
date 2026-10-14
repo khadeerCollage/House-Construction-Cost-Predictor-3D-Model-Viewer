@@ -47,7 +47,31 @@
     font-size: 14px; max-width: min(560px, 92%); }
   #hud b { color: #fff; font-size: 15.5px; }
   #hud .sub { color: var(--dim); font-size: 12.5px; margin-top: 2px; }
-  #hud .row { margin-top: 6px; display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; }
+  #hud .row { margin-top: 6px; display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; align-items: center; }
+  #hud .fl { color: #FFE29A; font-weight: 600; }
+  #floors { left: 10px; top: 50%; transform: translateY(-50%); padding: 6px; display: none; flex-direction: column; gap: 4px;
+    max-height: 70%; overflow-y: auto; z-index: 6; }
+  #floors .b { justify-content: center; min-width: 58px; padding: 6px 8px; }
+  .lbl.flat { border-color: #FFC857; background: rgba(60, 40, 0, 0.82); font-weight: 700; }
+  .lbl.floor { border-color: #00FFFF; background: rgba(0, 40, 60, 0.85); font-weight: 700; }
+  .lbl.xr { border-color: #FFC857; background: rgba(40, 28, 0, 0.86); font-weight: 600; }
+
+  #cop { right: 10px; top: 56px; width: 212px; padding: 10px; display: none; z-index: 7; text-align: center;
+    background: linear-gradient(180deg, rgba(150,160,170,0.96), rgba(108,118,128,0.96)); border-color: #C9D2DA; color: #10161C; }
+  #cop .disp { background: #05080B; color: #FFB000; font: 700 28px/1.2 ui-monospace, Consolas, monospace; border-radius: 8px;
+    padding: 4px 6px; letter-spacing: 1px; box-shadow: inset 0 0 8px #000; }
+  #cop .sub { font-size: 11.5px; margin: 4px 0 8px; color: #1B242C; }
+  #cop .fbs { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-bottom: 8px; }
+  #cop .fb { width: 48px; height: 48px; border-radius: 50%; border: 3px solid #5E6870; background: radial-gradient(circle at 35% 30%, #F4F6F8, #B9C1C8);
+    font: 700 17px system-ui; color: #10161C; cursor: pointer; }
+  #cop .fb.lit { border-color: #FFE29A; background: radial-gradient(circle at 35% 30%, #FFE7A8, #FFB000); box-shadow: 0 0 12px #FFB000; }
+  #cop .ops { display: flex; gap: 6px; justify-content: center; margin-bottom: 6px; }
+  #cop .ops button, #cop .tools button { border: 1px solid #4B555E; background: #E3E7EB; color: #10161C; border-radius: 8px;
+    padding: 6px 8px; font-weight: 700; cursor: pointer; }
+  #cop .tools { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; }
+  #cop .tools .on { background: #FFE29A; }
+  #cop .how { text-align: left; font-size: 11.5px; line-height: 1.45; margin-top: 8px; background: rgba(255,255,255,0.55);
+    border-radius: 8px; padding: 6px 8px; max-height: 38vh; overflow-y: auto; }
 
   #pad { left: 10px; bottom: 10px; padding: 8px; display: none; }
   #pad .grid { display: grid; grid-template-columns: 52px 52px 52px; grid-template-rows: 52px 52px; gap: 6px; }
@@ -103,6 +127,10 @@
     #hud { top: 96px; }
     #pad .grid { grid-template-columns: 46px 46px 46px; grid-template-rows: 46px 46px; }
     #pad button { width: 46px; height: 46px; }
+    #floors .b { min-width: 44px; padding: 4px 6px; }
+    #cop { width: 172px; top: 96px; padding: 8px; }
+    #cop .fb { width: 40px; height: 40px; font-size: 15px; }
+    #cop .how { max-height: 26vh; }
   }
 </style>
 </head>
@@ -123,6 +151,9 @@
       <button class="b on" id="btnTheme" title="Blueprint look or real colours"><span>🎨</span><span class="tx" id="themeTx">Blueprint</span></button>
       <button class="b" id="btnSun" title="Sunlight by time and season"><span>☀️</span><span class="tx">Sun</span></button>
       <button class="b" id="btnVastu" title="Show the Vastu zones on the floor"><span>🕉️</span><span class="tx">Vastu</span></button>
+      <button class="b" id="btnExplode" title="Pull the floors apart to see every level at once" style="display:none"><span>🧱</span><span class="tx">Floors apart</span></button>
+      <button class="b" id="btnLift" title="See how the lift works — car, counterweight, ropes and motor" style="display:none"><span>🛗</span><span class="tx">Lift</span></button>
+      <button class="b" id="btnDrive" title="Watch your car turn in from the road through its gate" style="display:none"><span>🚗</span><span class="tx">Drive in</span></button>
       <button class="b on" id="btnFurn" title="Show or hide furniture"><span>🛋️</span><span class="tx">Furniture</span></button>
       <button class="b" id="btnShot" title="Save a picture of this view"><span>📷</span></button>
       <button class="b" id="btnFull" title="Full screen"><span>⛶</span></button>
@@ -131,6 +162,15 @@
   </div>
 
   <div id="hud" class="panel"></div>
+  <div id="cop" class="panel" title="Lift buttons">
+    <div class="disp" id="copDisp">G</div>
+    <div class="sub" id="copInfo"></div>
+    <div class="fbs" id="copBtns"></div>
+    <div class="ops"><button data-op="open" title="Open the doors">◀|▶</button><button data-op="close" title="Close the doors">▶|◀</button><button data-op="bell" title="Alarm">🔔</button></div>
+    <div class="tools"><button id="copOut" title="Walk out of the lift">🚶 Step out</button><button id="copFast" title="Ride three times faster">⏩</button><button id="copSnd" title="Sound on / off">🔊</button><button id="copClose" title="Hide">✕</button></div>
+    <div class="how" id="copHow"></div>
+  </div>
+  <div id="floors" class="panel" title="Floors"></div>
 
   <div id="sun" class="panel">
     <div><b>☀️ Sunlight</b> — <span id="sunTime">9:00 AM</span></div>
@@ -181,6 +221,16 @@
     <div style="text-align:right;margin-top:8px"><button class="b" id="wishClose">Close</button></div>
   </div>
 
+  <div id="liftMove" class="panel" style="left:50%;top:150px;transform:translateX(-50%);padding:12px;display:none;width:min(380px,92%);z-index:8">
+    <h4 style="margin:0 0 4px;font-size:15px">🛗 Where should the lift stand?</h4>
+    <p style="margin:0 0 8px;color:var(--dim);font-size:12.5px">Your design is re-made with the lift there — the drawing, the cost and this 3D house change together. Undo any time in 🧠 Smart Re-Plan.</p>
+    <div style="display:grid;gap:6px">
+      <button class="b" data-pos="inside">🏠 Inside the home — opens into the house</button>
+      <button class="b" data-pos="entrance">🚪 Outside, beside the main door</button>
+      <button class="b" data-pos="side">↔️ Outside, at the side of the house</button>
+    </div>
+    <div style="text-align:right;margin-top:8px"><button class="b" id="liftMoveClose">Close</button></div>
+  </div>
   <div id="toast" class="panel"></div>
 
   <div id="help" class="panel">
@@ -191,6 +241,7 @@
     <div>🗺️ <b>Tap the small map</b> to go to any room.</div>
     <div>🏠 In <b>All rooms</b> / <b>Outside</b>: drag to turn, scroll or pinch to zoom, right-drag to move.</div>
     <div>▶ <b>Guided walk</b> takes you through every room and tells you about it.</div>
+    <div>🛗 Near the <b>lift</b>: call it, step in and press a floor. The <b>🛗 Lift</b> button shows how it works.</div>
     <div style="text-align:right;margin-top:8px"><button class="b" id="helpClose">Got it</button></div>
   </div>
 
