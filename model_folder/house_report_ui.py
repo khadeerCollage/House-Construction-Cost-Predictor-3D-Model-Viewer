@@ -324,6 +324,99 @@ def _option_card(option: Dict, plan, cost_params: Dict[str, Any], why: str, key:
 
 
 # =============================================================================
+# Property worth (land + house) — Cost tab, first section
+# =============================================================================
+
+def _property_section(plan, cost_data: Dict[str, Any], cost_params: Dict[str, Any]) -> None:
+    from floorplan_generator import land_value as lv
+    land = cost_params.get("land")
+    if land is None:
+        return
+    ss = st.session_state
+    country = cost_data["country"]
+    money = lambda v: _money(v, country)               # noqa: E731
+    st.markdown("###### 🏡 Property worth — land + house, for your exact location")
+    reg_preview = lv.registration_charges(land, False)
+    if reg_preview["female_saves"] > 0:
+        st.toggle(f"Register the plot in a woman's name (saves about {money(reg_preview['female_saves'])} "
+                  f"stamp duty in {land.state})", key="loc_female")
+    pw = lv.property_worth(land, cost_data, already_own=ss.get("loc_own", False),
+                           buyer_female=ss.get("loc_female", False))
+    reg = pw["registration"]
+    cents = land.plot_sqft / lv.UNITS["per cent"]
+    lo, mid, hi = land.rate_sqft
+    rows = [
+        {"Item": "🏷️ Land", "How it is worked out":
+            f"{cents:.2f} cents ({land.plot_sqft:,.0f} sq ft) × {lv.rate_text(lv.per_unit(mid, land.unit))} {land.unit} "
+            f"(range {lv.rate_text(lv.per_unit(lo, land.unit))}–{lv.rate_text(lv.per_unit(hi, land.unit))})",
+         "Amount": money(land.value[1])},
+    ]
+    if not pw["already_own"]:
+        rows += [{"Item": f"📜 {i['label']}", "How it is worked out": f"{i['pct']:g}% of the {reg['on']} "
+                                                                       f"({money(reg['base'])})",
+                  "Amount": money(i["amount"])} for i in reg["items"]]
+    soft = cost_data.get("soft_costs", {})
+    rows += [
+        {"Item": "🏠 House construction", "How it is worked out":
+            f"{cost_data['area_sqft']:,.0f} sq ft × ₹{cost_data.get('effective_rate', 0):,.0f}/sqft builder rate, "
+            "kitchen & bath fittings, site works", "Amount": money(cost_data["construction_cost"])},
+        {"Item": "📐 Fees, approvals & contingency", "How it is worked out":
+            f"design & engineering {soft.get('pct', {}).get('fees', 0):g}%, building permission "
+            f"{soft.get('pct', {}).get('approvals', 0):g}%, contingency {soft.get('pct', {}).get('contingency', 0):g}%",
+         "Amount": money(cost_data["total_cost"] - cost_data["construction_cost"])},
+        {"Item": "💳 You will spend", "How it is worked out":
+            "house only (the plot is already yours)" if pw["already_own"] else "land + registration + house",
+         "Amount": money(pw["investment"])},
+        {"Item": "💎 Property worth when finished", "How it is worked out":
+            "land at today's market rate + the new building at what it costs to build (land-and-building method)",
+         "Amount": f"{money(pw['worth'][1])}  ({money(pw['worth'][0])} – {money(pw['worth'][2])})"},
+    ]
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+    sunk = (0 if pw["already_own"] else reg["total"]) + (cost_data["total_cost"] - cost_data["construction_cost"])
+    st.caption(f"Of what you spend, about **{money(sunk)}** (registration, fees, approvals, contingency) does not "
+               "add resale value — that is why the worth is lower than the spend on day one. Land usually grows "
+               "in value; the building slowly loses value with age.")
+
+    st.markdown(f"**Land rates in {land.place} by street position** "
+                f"<span style='color:#94A3B8;font-size:12px'>— your plot is the ▶ row</span>",
+                unsafe_allow_html=True)
+    comp = []
+    for key, label, icon, _, _ in lv.AREA_TYPES:
+        e = _same_place(land, key)
+        comp.append({"Street": ("▶ " if key == land.area_type else "") + f"{icon} {label}",
+                     f"Rate {land.unit}": lv.rate_text(lv.per_unit(e.rate_sqft[1], land.unit)),
+                     f"Rate {land.alt_unit}": lv.rate_text(lv.per_unit(e.rate_sqft[1], land.alt_unit)),
+                     "Your plot would cost": money(e.value[1])})
+    st.dataframe(comp, use_container_width=True, hide_index=True)
+
+    tag = {"your rate": "✅ Land priced at **your local rate**.",
+           "official value": "🏛️ Land priced from the **official guideline value** of the town, adjusted for the street.",
+           "indicative": "⚠️ Land is an **indicative estimate** for this state and town size — for a real figure, "
+                         "enter the local rate in *Where is the plot?*."}[land.confidence]
+    st.markdown(f"{tag}  \n*How:* {land.basis}.")
+    for n in land.notes:
+        st.caption(f"ℹ️ {n}")
+    name, url = land.portal
+    if url:
+        st.caption(f"🔎 Check the official value for your exact survey / door number: [{name}]({url}). "
+                   "Stamp duty is charged on the higher of the sale price and that value. Rates: 2025-26; "
+                   "registration percentages vary for some slabs — confirm at the Sub-Registrar office.")
+
+
+def _same_place(land, area_type: str):
+    """The same town re-priced for another street position (keeps the official / estimated base)."""
+    from floorplan_generator import land_value as lv
+    _, _, _, g_now, e_now = lv.AREA[land.area_type]
+    _, _, _, g_new, e_new = lv.AREA[area_type]
+    f = (g_new[1] / g_now[1]) if land.guideline_sqft else (e_new[1] / e_now[1])
+    lo, mid, hi = (r * f for r in land.rate_sqft)
+    return lv.LandEstimate(state=land.state, place=land.place, area_type=area_type, rate_sqft=(lo, mid, hi),
+                           value=(lo * land.plot_sqft, mid * land.plot_sqft, hi * land.plot_sqft),
+                           plot_sqft=land.plot_sqft, basis=land.basis, confidence=land.confidence,
+                           unit=land.unit, alt_unit=land.alt_unit)
+
+
+# =============================================================================
 # 3. Cost & material BOQ
 # =============================================================================
 
@@ -334,6 +427,7 @@ def render_cost(plan, cost_data: Dict[str, Any], cost_params: Dict[str, Any], qu
     disp = cost_data["display"]
     md = lambda s: s.replace("$", r"\$")   # noqa: E731
     boq = CostEngine.boq_for_plan(plan, cost_data, quality)
+    _property_section(plan, cost_data, cost_params)
 
     chips = [(disp["total_compact"], f"total project cost · {disp['rate']}"),
              (_money(cost_data["construction_cost"], country), "construction (hard) cost")]

@@ -1,0 +1,2834 @@
+{
+ "source": "Official guideline (market) values — IGRS Andhra Pradesh and Telangana Registration / Bhu Bharati, via the Assetly Guidance Value Explorer; representative open-plot rate per sq yd per town",
+ "year": {
+  "Andhra Pradesh": "FY 2025-26",
+  "Telangana": "FY 2026-27"
+ },
+ "collected": "2026-10-14",
+ "agency_districts": [
+  "Alluri Sitharama Raju",
+  "Polavaram"
+ ],
+ "andhra_pradesh": {
+  "Alluri Sitharama Raju": {
+   "hq": "Paderu",
+   "district_range": [
+    50,
+    1400
+   ],
+   "district_median": 150,
+   "towns": [
+    {
+     "town": "Paderu",
+     "rate": 500,
+     "range": null,
+     "mandal": "Paderu"
+    },
+    {
+     "town": "Chintapalle",
+     "rate": 1000,
+     "range": null,
+     "mandal": "Chintapalle"
+    },
+    {
+     "town": "Araku",
+     "rate": 480,
+     "range": null,
+     "mandal": "Dumbriguda"
+    }
+   ]
+  },
+  "Anakapalli": {
+   "hq": "Anakapalli",
+   "district_range": [
+    1000,
+    22000
+   ],
+   "district_median": 1500,
+   "towns": [
+    {
+     "town": "Anakapalli",
+     "rate": 22000,
+     "range": [
+      18000,
+      25000
+     ],
+     "mandal": "Anakapalli"
+    },
+    {
+     "town": "Yelamanchili",
+     "rate": 7500,
+     "range": null,
+     "mandal": "Yelamanchili"
+    },
+    {
+     "town": "Narsipatnam",
+     "rate": 6000,
+     "range": [
+      6000,
+      7500
+     ],
+     "mandal": "Narsipatnam"
+    },
+    {
+     "town": "Payakaraopeta",
+     "rate": 8000,
+     "range": [
+      8000,
+      15000
+     ],
+     "mandal": "Payakaraopeta"
+    },
+    {
+     "town": "Chodavaram",
+     "rate": 4000,
+     "range": [
+      2500,
+      7000
+     ],
+     "mandal": "Chodavaram"
+    }
+   ]
+  },
+  "Anantapur": {
+   "hq": "Anantapur",
+   "district_range": [
+    600,
+    20000
+   ],
+   "district_median": 800,
+   "towns": [
+    {
+     "town": "Anantapur",
+     "rate": 20000,
+     "range": [
+      10000,
+      44000
+     ],
+     "mandal": "Anantapur"
+    },
+    {
+     "town": "Guntakal",
+     "rate": 4500,
+     "range": [
+      4000,
+      18000
+     ],
+     "mandal": "Guntakal"
+    },
+    {
+     "town": "Tadipatri",
+     "rate": 5000,
+     "range": [
+      5000,
+      22000
+     ],
+     "mandal": "Tadpatri"
+    },
+    {
+     "town": "Rayadurg",
+     "rate": 9000,
+     "range": [
+      5500,
+      10000
+     ],
+     "mandal": "Rayadurg"
+    },
+    {
+     "town": "Kalyandurg",
+     "rate": 5000,
+     "range": [
+      5000,
+      12000
+     ],
+     "mandal": "Kalyandurg"
+    },
+    {
+     "town": "Gooty",
+     "rate": 7500,
+     "range": [
+      4000,
+      11000
+     ],
+     "mandal": "Gooty"
+    }
+   ]
+  },
+  "Annamayya": {
+   "hq": "Madanapalle",
+   "district_range": [
+    300,
+    11300
+   ],
+   "district_median": 600,
+   "towns": [
+    {
+     "town": "Madanapalle",
+     "rate": 11000,
+     "range": [
+      11000,
+      32700
+     ],
+     "mandal": "Madanapalle"
+    },
+    {
+     "town": "Rayachoti",
+     "rate": 11300,
+     "range": [
+      4100,
+      35400
+     ],
+     "mandal": "Rayachoti"
+    },
+    {
+     "town": "Pileru",
+     "rate": 4400,
+     "range": [
+      4400,
+      13200
+     ],
+     "mandal": "Pileru"
+    }
+   ]
+  },
+  "Bapatla": {
+   "hq": "Bapatla (West)",
+   "district_range": [
+    750,
+    16000
+   ],
+   "district_median": 1500,
+   "towns": [
+    {
+     "town": "Bapatla (West)",
+     "rate": 10000,
+     "range": [
+      7000,
+      32000
+     ],
+     "mandal": "Bapatla"
+    },
+    {
+     "town": "Bapatla (East)",
+     "rate": 7000,
+     "range": [
+      4500,
+      32000
+     ],
+     "mandal": "Bapatla"
+    },
+    {
+     "town": "Chirala",
+     "rate": 14000,
+     "range": [
+      5000,
+      42000
+     ],
+     "mandal": "Chirala"
+    },
+    {
+     "town": "Repalle",
+     "rate": 16000,
+     "range": [
+      7000,
+      26500
+     ],
+     "mandal": "Repalle"
+    },
+    {
+     "town": "Addanki",
+     "rate": 8000,
+     "range": [
+      4000,
+      22000
+     ],
+     "mandal": "Addanki"
+    }
+   ]
+  },
+  "Chittoor": {
+   "hq": "Chittoor",
+   "district_range": [
+    480,
+    15900
+   ],
+   "district_median": 600,
+   "towns": [
+    {
+     "town": "Chittoor",
+     "rate": 15900,
+     "range": [
+      5500,
+      51700
+     ],
+     "mandal": "Chittoor Urban"
+    },
+    {
+     "town": "Palamaner",
+     "rate": 7500,
+     "range": [
+      4600,
+      19000
+     ],
+     "mandal": "Palamaner"
+    },
+    {
+     "town": "Kuppam",
+     "rate": 4600,
+     "range": [
+      3400,
+      6300
+     ],
+     "mandal": "Kuppam"
+    },
+    {
+     "town": "Nagari",
+     "rate": 4100,
+     "range": [
+      3700,
+      16100
+     ],
+     "mandal": "Nagari"
+    }
+   ]
+  },
+  "Dr. B.R. Ambedkar Konaseema": {
+   "hq": "Amalapuram",
+   "district_range": [
+    700,
+    20000
+   ],
+   "district_median": 2000,
+   "towns": [
+    {
+     "town": "Amalapuram",
+     "rate": 20000,
+     "range": [
+      10000,
+      42000
+     ],
+     "mandal": "Amalapuram"
+    },
+    {
+     "town": "Ramachandrapuram",
+     "rate": 12500,
+     "range": [
+      7100,
+      31500
+     ],
+     "mandal": "Ramachandrapuram"
+    },
+    {
+     "town": "Ravulapalem",
+     "rate": 5400,
+     "range": [
+      5400,
+      6600
+     ],
+     "mandal": "Ravulapalem"
+    },
+    {
+     "town": "Kothapeta",
+     "rate": 4000,
+     "range": [
+      3000,
+      4500
+     ],
+     "mandal": "Kothapeta"
+    },
+    {
+     "town": "Mummidivaram",
+     "rate": 3300,
+     "range": [
+      2500,
+      7000
+     ],
+     "mandal": "Mummidivaram"
+    }
+   ]
+  },
+  "East Godavari": {
+   "hq": "Rajamahendravaram",
+   "district_range": [
+    130,
+    36000
+   ],
+   "district_median": 2000,
+   "towns": [
+    {
+     "town": "Rajamahendravaram",
+     "rate": 36000,
+     "range": [
+      12000,
+      90000
+     ],
+     "mandal": "Rajamahendravaram Urban"
+    },
+    {
+     "town": "Katheru (Rajahmundry outskirts)",
+     "rate": 19000,
+     "range": [
+      15000,
+      19000
+     ],
+     "mandal": "Rajamahendravaram Rural"
+    },
+    {
+     "town": "Kovvur",
+     "rate": 10000,
+     "range": [
+      7000,
+      20000
+     ],
+     "mandal": "Kovvur"
+    },
+    {
+     "town": "Nidadavole",
+     "rate": 5000,
+     "range": [
+      5000,
+      12500
+     ],
+     "mandal": "Nidadavole"
+    },
+    {
+     "town": "Rajanagaram",
+     "rate": 8000,
+     "range": [
+      6000,
+      10000
+     ],
+     "mandal": "Rajanagaram"
+    }
+   ]
+  },
+  "Eluru": {
+   "hq": "Eluru",
+   "district_range": [
+    600,
+    25000
+   ],
+   "district_median": 1500,
+   "towns": [
+    {
+     "town": "Eluru",
+     "rate": 25000,
+     "range": [
+      14000,
+      61000
+     ],
+     "mandal": "Eluru"
+    },
+    {
+     "town": "Nuzvid",
+     "rate": 9500,
+     "range": [
+      9500,
+      33000
+     ],
+     "mandal": "Nuzvid"
+    },
+    {
+     "town": "Kaikalur",
+     "rate": 8200,
+     "range": null,
+     "mandal": "Kaikalur"
+    },
+    {
+     "town": "Jangareddigudem",
+     "rate": 4000,
+     "range": null,
+     "mandal": "Jangareddigudem"
+    },
+    {
+     "town": "Chintalapudi",
+     "rate": 2900,
+     "range": null,
+     "mandal": "Chintalapudi"
+    }
+   ]
+  },
+  "Guntur": {
+   "hq": "Guntur",
+   "district_range": [
+    700,
+    54000
+   ],
+   "district_median": 3000,
+   "towns": [
+    {
+     "town": "Guntur",
+     "rate": 54000,
+     "range": [
+      9000,
+      95000
+     ],
+     "mandal": "Guntur East"
+    },
+    {
+     "town": "Tenali",
+     "rate": 24000,
+     "range": [
+      10000,
+      60000
+     ],
+     "mandal": "Tenali"
+    },
+    {
+     "town": "Mangalagiri",
+     "rate": 16000,
+     "range": [
+      10000,
+      20000
+     ],
+     "mandal": "Mangalagiri"
+    },
+    {
+     "town": "Tadepalli",
+     "rate": 20000,
+     "range": [
+      9000,
+      20000
+     ],
+     "mandal": "Thadepalle"
+    },
+    {
+     "town": "Ponnur",
+     "rate": 11000,
+     "range": [
+      9000,
+      42000
+     ],
+     "mandal": "Ponnur"
+    }
+   ]
+  },
+  "Kakinada": {
+   "hq": "Kakinada",
+   "district_range": [
+    130,
+    28000
+   ],
+   "district_median": 1800,
+   "towns": [
+    {
+     "town": "Kakinada",
+     "rate": 28000,
+     "range": [
+      10000,
+      110000
+     ],
+     "mandal": "Kakinada (Urban)"
+    },
+    {
+     "town": "Tuni",
+     "rate": 20000,
+     "range": [
+      11000,
+      75000
+     ],
+     "mandal": "Tuni"
+    },
+    {
+     "town": "Pithapuram",
+     "rate": 14000,
+     "range": [
+      8000,
+      18000
+     ],
+     "mandal": "Pithapuram"
+    },
+    {
+     "town": "Peddapuram",
+     "rate": 10500,
+     "range": [
+      6500,
+      28000
+     ],
+     "mandal": "Peddapuram"
+    },
+    {
+     "town": "Samalkota",
+     "rate": 10000,
+     "range": [
+      5500,
+      58000
+     ],
+     "mandal": "Samalkota"
+    }
+   ]
+  },
+  "Krishna": {
+   "hq": "Machilipatnam",
+   "district_range": [
+    1000,
+    20000
+   ],
+   "district_median": 2000,
+   "towns": [
+    {
+     "town": "Machilipatnam",
+     "rate": 13000,
+     "range": [
+      4000,
+      28500
+     ],
+     "mandal": "Machilipatnam"
+    },
+    {
+     "town": "Gudivada",
+     "rate": 13200,
+     "range": [
+      6600,
+      33000
+     ],
+     "mandal": "Gudivada"
+    },
+    {
+     "town": "Vuyyuru",
+     "rate": 9500,
+     "range": [
+      7800,
+      34000
+     ],
+     "mandal": "Vuyyuru"
+    },
+    {
+     "town": "Kanuru (Vijayawada suburb)",
+     "rate": 20000,
+     "range": null,
+     "mandal": "Penamaluru"
+    },
+    {
+     "town": "Kankipadu",
+     "rate": 12000,
+     "range": [
+      12000,
+      20000
+     ],
+     "mandal": "Kankipadu"
+    }
+   ]
+  },
+  "Kurnool": {
+   "hq": "Kurnool",
+   "district_range": [
+    600,
+    17250
+   ],
+   "district_median": 1000,
+   "towns": [
+    {
+     "town": "Kurnool",
+     "rate": 17250,
+     "range": [
+      1650,
+      51750
+     ],
+     "mandal": "Kurnool Urban"
+    },
+    {
+     "town": "Kallur (Kurnool suburb)",
+     "rate": 11000,
+     "range": [
+      7000,
+      30000
+     ],
+     "mandal": "Kallur"
+    },
+    {
+     "town": "Adoni",
+     "rate": 4500,
+     "range": [
+      4500,
+      27000
+     ],
+     "mandal": "Adoni"
+    },
+    {
+     "town": "Yemmiganur",
+     "rate": 4200,
+     "range": [
+      4200,
+      19000
+     ],
+     "mandal": "Yemmiganur"
+    }
+   ]
+  },
+  "Markapuram": {
+   "hq": "Markapur",
+   "district_range": [
+    290,
+    10000
+   ],
+   "district_median": 450,
+   "towns": [
+    {
+     "town": "Markapur",
+     "rate": 7300,
+     "range": [
+      2100,
+      34000
+     ],
+     "mandal": "Markapur"
+    },
+    {
+     "town": "Kanigiri",
+     "rate": 10000,
+     "range": [
+      2600,
+      15000
+     ],
+     "mandal": "Kanigiri"
+    },
+    {
+     "town": "Giddalur",
+     "rate": 6500,
+     "range": [
+      2200,
+      16000
+     ],
+     "mandal": "Giddaluru"
+    },
+    {
+     "town": "Cumbum",
+     "rate": 4800,
+     "range": [
+      1900,
+      9500
+     ],
+     "mandal": "Cumbum"
+    },
+    {
+     "town": "Yerragondapalem",
+     "rate": 3700,
+     "range": [
+      2200,
+      10500
+     ],
+     "mandal": "Yerragondapalem"
+    }
+   ]
+  },
+  "NTR": {
+   "hq": "Vijayawada (Central/East/North SROs)",
+   "district_range": [
+    850,
+    83000
+   ],
+   "district_median": 1600,
+   "towns": [
+    {
+     "town": "Vijayawada (Central/East/North SROs)",
+     "rate": 26000,
+     "range": [
+      11000,
+      115000
+     ],
+     "mandal": "Vijayawada Central"
+    },
+    {
+     "town": "Vijayawada (West SRO)",
+     "rate": 83000,
+     "range": [
+      11000,
+      115000
+     ],
+     "mandal": "Vijayawada West"
+    },
+    {
+     "town": "Ibrahimpatnam",
+     "rate": 9000,
+     "range": [
+      9000,
+      11500
+     ],
+     "mandal": "Ibrahimpatnam"
+    },
+    {
+     "town": "Nandigama",
+     "rate": 7000,
+     "range": null,
+     "mandal": "Nandigama"
+    },
+    {
+     "town": "Jaggayyapeta",
+     "rate": 3600,
+     "range": [
+      3600,
+      5400
+     ],
+     "mandal": "Jaggayyapeta"
+    },
+    {
+     "town": "Tiruvuru",
+     "rate": 4550,
+     "range": [
+      3900,
+      6800
+     ],
+     "mandal": "Tiruvuru"
+    }
+   ]
+  },
+  "Nandyal": {
+   "hq": "Nandyal",
+   "district_range": [
+    450,
+    13000
+   ],
+   "district_median": 1000,
+   "towns": [
+    {
+     "town": "Nandyal",
+     "rate": 13000,
+     "range": [
+      2500,
+      29000
+     ],
+     "mandal": "Nandyal (Urban)"
+    },
+    {
+     "town": "Allagadda",
+     "rate": 4000,
+     "range": [
+      3500,
+      8000
+     ],
+     "mandal": "Allagadda"
+    },
+    {
+     "town": "Nandikotkur",
+     "rate": 2800,
+     "range": [
+      2000,
+      7500
+     ],
+     "mandal": "Nandi Kotkur"
+    },
+    {
+     "town": "Dhone",
+     "rate": 2400,
+     "range": [
+      2400,
+      6000
+     ],
+     "mandal": "Dhone"
+    },
+    {
+     "town": "Atmakur",
+     "rate": 2000,
+     "range": [
+      1500,
+      4500
+     ],
+     "mandal": "Atmakur"
+    },
+    {
+     "town": "Banaganapalle",
+     "rate": 2000,
+     "range": [
+      2000,
+      5000
+     ],
+     "mandal": "Banaganapalle"
+    }
+   ]
+  },
+  "Palnadu": {
+   "hq": "Narasaraopet",
+   "district_range": [
+    900,
+    21000
+   ],
+   "district_median": 1100,
+   "towns": [
+    {
+     "town": "Narasaraopet",
+     "rate": 21000,
+     "range": [
+      8000,
+      80000
+     ],
+     "mandal": "Narasaraopeta"
+    },
+    {
+     "town": "Chilakaluripet",
+     "rate": 17000,
+     "range": [
+      5000,
+      50000
+     ],
+     "mandal": "Chilakaluripet"
+    },
+    {
+     "town": "Vinukonda",
+     "rate": 18000,
+     "range": [
+      5000,
+      38000
+     ],
+     "mandal": "Vinukonda"
+    },
+    {
+     "town": "Piduguralla",
+     "rate": 11000,
+     "range": [
+      3000,
+      25000
+     ],
+     "mandal": "Piduguralla"
+    },
+    {
+     "town": "Sattenapalle",
+     "rate": 6000,
+     "range": [
+      3500,
+      50000
+     ],
+     "mandal": "Sattenapalle"
+    },
+    {
+     "town": "Macherla",
+     "rate": 6000,
+     "range": [
+      3000,
+      19000
+     ],
+     "mandal": "Macherla"
+    }
+   ]
+  },
+  "Parvathipuram Manyam": {
+   "hq": "Parvathipuram",
+   "district_range": [
+    500,
+    8500
+   ],
+   "district_median": 1200,
+   "towns": [
+    {
+     "town": "Parvathipuram",
+     "rate": 8500,
+     "range": [
+      6000,
+      26500
+     ],
+     "mandal": "Parvathipuram"
+    },
+    {
+     "town": "Salur",
+     "rate": 6500,
+     "range": [
+      2100,
+      12000
+     ],
+     "mandal": "Salur"
+    },
+    {
+     "town": "Veeraghattam",
+     "rate": 4000,
+     "range": [
+      1200,
+      5100
+     ],
+     "mandal": "Veeraghattam"
+    }
+   ]
+  },
+  "Polavaram": {
+   "hq": "Rampachodavaram",
+   "district_range": [
+    130,
+    800
+   ],
+   "district_median": 260,
+   "towns": [
+    {
+     "town": "Rampachodavaram",
+     "rate": 160,
+     "range": null,
+     "mandal": "Rampachodavaram"
+    },
+    {
+     "town": "Chintur",
+     "rate": 600,
+     "range": null,
+     "mandal": "Chintur"
+    },
+    {
+     "town": "Kunavaram",
+     "rate": 600,
+     "range": null,
+     "mandal": "Kunavaram"
+    },
+    {
+     "town": "Yetapaka",
+     "rate": 700,
+     "range": null,
+     "mandal": "Yetapaka"
+    }
+   ]
+  },
+  "Prakasam": {
+   "hq": "Ongole",
+   "district_range": [
+    340,
+    28000
+   ],
+   "district_median": 1000,
+   "towns": [
+    {
+     "town": "Ongole",
+     "rate": 23000,
+     "range": [
+      6000,
+      49000
+     ],
+     "mandal": "Ongole"
+    },
+    {
+     "town": "Tangutur",
+     "rate": 7000,
+     "range": [
+      3200,
+      12500
+     ],
+     "mandal": "Tangutur"
+    },
+    {
+     "town": "Darsi",
+     "rate": 5800,
+     "range": [
+      1800,
+      15800
+     ],
+     "mandal": "Darsi"
+    },
+    {
+     "town": "Chimakurthi",
+     "rate": 4400,
+     "range": [
+      2700,
+      15500
+     ],
+     "mandal": "Chimakurthi"
+    }
+   ]
+  },
+  "SPSR Nellore": {
+   "hq": "Nellore",
+   "district_range": [
+    370,
+    17000
+   ],
+   "district_median": 800,
+   "towns": [
+    {
+     "town": "Nellore",
+     "rate": 17000,
+     "range": [
+      5700,
+      50600
+     ],
+     "mandal": "Nellore (Urban)"
+    },
+    {
+     "town": "Kavali",
+     "rate": 8700,
+     "range": [
+      1900,
+      40000
+     ],
+     "mandal": "Kavali"
+    },
+    {
+     "town": "Kovur",
+     "rate": 4000,
+     "range": [
+      3400,
+      12000
+     ],
+     "mandal": "Kovur"
+    },
+    {
+     "town": "Atmakur",
+     "rate": 4500,
+     "range": [
+      2600,
+      10000
+     ],
+     "mandal": "Atmakur"
+    }
+   ]
+  },
+  "Sri Sathya Sai": {
+   "hq": "Puttaparthi",
+   "district_range": [
+    300,
+    14000
+   ],
+   "district_median": 600,
+   "towns": [
+    {
+     "town": "Puttaparthi",
+     "rate": 7700,
+     "range": [
+      7700,
+      13200
+     ],
+     "mandal": "Puttaparthi"
+    },
+    {
+     "town": "Hindupur",
+     "rate": 8000,
+     "range": [
+      5000,
+      23000
+     ],
+     "mandal": "Hindupur"
+    },
+    {
+     "town": "Dharmavaram",
+     "rate": 12000,
+     "range": [
+      6000,
+      30000
+     ],
+     "mandal": "Dharmavaram"
+    },
+    {
+     "town": "Kadiri",
+     "rate": 11000,
+     "range": [
+      5500,
+      11000
+     ],
+     "mandal": "Kadiri"
+    },
+    {
+     "town": "Penukonda",
+     "rate": 5000,
+     "range": [
+      4500,
+      8000
+     ],
+     "mandal": "Penukonda"
+    },
+    {
+     "town": "Madakasira",
+     "rate": 4500,
+     "range": [
+      3600,
+      6500
+     ],
+     "mandal": "Madakasira"
+    }
+   ]
+  },
+  "Srikakulam": {
+   "hq": "Srikakulam",
+   "district_range": [
+    500,
+    17000
+   ],
+   "district_median": 1300,
+   "towns": [
+    {
+     "town": "Srikakulam",
+     "rate": 17000,
+     "range": [
+      9000,
+      55000
+     ],
+     "mandal": "Srikakulam"
+    },
+    {
+     "town": "Amadalavalasa",
+     "rate": 10000,
+     "range": [
+      5000,
+      15000
+     ],
+     "mandal": "Amadalavalasa"
+    },
+    {
+     "town": "Palasa",
+     "rate": 6850,
+     "range": [
+      6000,
+      28000
+     ],
+     "mandal": "Palasa"
+    },
+    {
+     "town": "Tekkali",
+     "rate": 8000,
+     "range": [
+      6000,
+      8000
+     ],
+     "mandal": "Tekkali"
+    },
+    {
+     "town": "Sompeta",
+     "rate": 6000,
+     "range": [
+      4500,
+      7500
+     ],
+     "mandal": "Sompeta"
+    }
+   ]
+  },
+  "Tirupati": {
+   "hq": "Tirupati",
+   "district_range": [
+    450,
+    45000
+   ],
+   "district_median": 1000,
+   "towns": [
+    {
+     "town": "Tirupati",
+     "rate": 40000,
+     "range": [
+      18000,
+      78000
+     ],
+     "mandal": "Tirupati Urban"
+    },
+    {
+     "town": "Renigunta",
+     "rate": 24000,
+     "range": [
+      12000,
+      50000
+     ],
+     "mandal": "Renigunta"
+    },
+    {
+     "town": "Srikalahasti",
+     "rate": 12000,
+     "range": [
+      6000,
+      19200
+     ],
+     "mandal": "Srikalahasti"
+    },
+    {
+     "town": "Sullurpeta",
+     "rate": 16000,
+     "range": [
+      5000,
+      36000
+     ],
+     "mandal": "Sullurpeta"
+    },
+    {
+     "town": "Gudur",
+     "rate": 10000,
+     "range": [
+      3400,
+      45000
+     ],
+     "mandal": "Gudur"
+    },
+    {
+     "town": "Puttur",
+     "rate": 7600,
+     "range": [
+      4000,
+      16000
+     ],
+     "mandal": "Puttur"
+    },
+    {
+     "town": "Venkatagiri",
+     "rate": 7000,
+     "range": [
+      4000,
+      25000
+     ],
+     "mandal": "Venkatagiri"
+    },
+    {
+     "town": "Naidupeta",
+     "rate": 7000,
+     "range": [
+      5200,
+      11500
+     ],
+     "mandal": "Naidupeta"
+    }
+   ]
+  },
+  "Visakhapatnam": {
+   "hq": "Visakhapatnam (city, Maharanipeta SRO)",
+   "district_range": [
+    1000,
+    85000
+   ],
+   "district_median": 7500,
+   "towns": [
+    {
+     "town": "Visakhapatnam (city, Maharanipeta SRO)",
+     "rate": 35000,
+     "range": [
+      35000,
+      100000
+     ],
+     "mandal": "Maharanipeta"
+    },
+    {
+     "town": "Gajuwaka",
+     "rate": 32000,
+     "range": [
+      32000,
+      40000
+     ],
+     "mandal": "Gajuwaka"
+    },
+    {
+     "town": "Madhurawada",
+     "rate": 33000,
+     "range": [
+      20000,
+      54000
+     ],
+     "mandal": "Visakhapatnam"
+    },
+    {
+     "town": "Pendurthi",
+     "rate": 22000,
+     "range": [
+      8000,
+      35000
+     ],
+     "mandal": "Pendurthi"
+    },
+    {
+     "town": "Gopalapatnam",
+     "rate": 45000,
+     "range": [
+      27000,
+      65000
+     ],
+     "mandal": "Gopalapatnam"
+    }
+   ]
+  },
+  "Vizianagaram": {
+   "hq": "Vizianagaram",
+   "district_range": [
+    800,
+    15000
+   ],
+   "district_median": 1500,
+   "towns": [
+    {
+     "town": "Vizianagaram",
+     "rate": 10000,
+     "range": [
+      6000,
+      65000
+     ],
+     "mandal": "Vizianagaram"
+    },
+    {
+     "town": "Bobbili",
+     "rate": 11000,
+     "range": [
+      6000,
+      24000
+     ],
+     "mandal": "Bobbili"
+    },
+    {
+     "town": "Rajam",
+     "rate": 9000,
+     "range": [
+      4500,
+      15000
+     ],
+     "mandal": "Rajam"
+    },
+    {
+     "town": "Kothavalasa",
+     "rate": 10000,
+     "range": [
+      9000,
+      14000
+     ],
+     "mandal": "Kothavalasa"
+    }
+   ]
+  },
+  "West Godavari": {
+   "hq": "Bhimavaram",
+   "district_range": [
+    1300,
+    46000
+   ],
+   "district_median": 2500,
+   "towns": [
+    {
+     "town": "Bhimavaram",
+     "rate": 16000,
+     "range": [
+      13000,
+      26000
+     ],
+     "mandal": "Bheemavaram"
+    },
+    {
+     "town": "Palakollu",
+     "rate": 46000,
+     "range": [
+      19000,
+      46000
+     ],
+     "mandal": "Palacole"
+    },
+    {
+     "town": "Tanuku",
+     "rate": 30000,
+     "range": [
+      10000,
+      30000
+     ],
+     "mandal": "Tanuku"
+    },
+    {
+     "town": "Tadepalligudem",
+     "rate": 24500,
+     "range": [
+      14500,
+      24500
+     ],
+     "mandal": "Tadepalligudem"
+    },
+    {
+     "town": "Narasapuram",
+     "rate": 11000,
+     "range": null,
+     "mandal": "Narasapuram"
+    }
+   ]
+  },
+  "YSR Kadapa": {
+   "hq": "Kadapa",
+   "district_range": [
+    370,
+    18700
+   ],
+   "district_median": 700,
+   "towns": [
+    {
+     "town": "Kadapa",
+     "rate": 18700,
+     "range": [
+      7600,
+      74800
+     ],
+     "mandal": "Cuddapah"
+    },
+    {
+     "town": "Proddatur",
+     "rate": 11300,
+     "range": [
+      4500,
+      54300
+     ],
+     "mandal": "Proddutur"
+    },
+    {
+     "town": "Pulivendula",
+     "rate": 6100,
+     "range": [
+      1600,
+      10500
+     ],
+     "mandal": "Pulivendla"
+    },
+    {
+     "town": "Jammalamadugu",
+     "rate": 3000,
+     "range": [
+      2600,
+      11000
+     ],
+     "mandal": "Jammalamadugu"
+    },
+    {
+     "town": "Mydukur",
+     "rate": 3000,
+     "range": [
+      1300,
+      12000
+     ],
+     "mandal": "S Mydukur"
+    },
+    {
+     "town": "Badvel",
+     "rate": 2040,
+     "range": [
+      1540,
+      11550
+     ],
+     "mandal": "Badvel"
+    }
+   ]
+  }
+ },
+ "telangana": {
+  "Adilabad": {
+   "hq": "Adilabad",
+   "district_range": [
+    700,
+    9800
+   ],
+   "district_median": 700,
+   "towns": [
+    {
+     "town": "Adilabad",
+     "rate": 9800,
+     "range": [
+      2800,
+      30400
+     ],
+     "mandal": "Adilabad (Urban)"
+    }
+   ]
+  },
+  "Bhadradri Kothagudem": {
+   "hq": "Kothagudem",
+   "district_range": [
+    600,
+    14300
+   ],
+   "district_median": 800,
+   "towns": [
+    {
+     "town": "Kothagudem",
+     "rate": 8700,
+     "range": [
+      5500,
+      37400
+     ],
+     "mandal": "Kothagudem"
+    },
+    {
+     "town": "Bhadrachalam",
+     "rate": 8700,
+     "range": [
+      7200,
+      28800
+     ],
+     "mandal": "Bhadrachalam"
+    },
+    {
+     "town": "Palwancha",
+     "rate": 7200,
+     "range": [
+      4700,
+      37400
+     ],
+     "mandal": "Palwancha"
+    },
+    {
+     "town": "Yellandu",
+     "rate": 5500,
+     "range": [
+      3200,
+      10200
+     ],
+     "mandal": "Yellandu"
+    },
+    {
+     "town": "Manuguru",
+     "rate": 2300,
+     "range": [
+      2000,
+      16700
+     ],
+     "mandal": "Manuguru"
+    }
+   ]
+  },
+  "Hanumakonda": {
+   "hq": "Hanamkonda",
+   "district_range": [
+    1100,
+    17300
+   ],
+   "district_median": 1300,
+   "towns": [
+    {
+     "town": "Hanamkonda",
+     "rate": 16700,
+     "range": [
+      7200,
+      69000
+     ],
+     "mandal": "Hanamkonda"
+    },
+    {
+     "town": "Kazipet",
+     "rate": 8700,
+     "range": [
+      6200,
+      39600
+     ],
+     "mandal": "Khazipet"
+    },
+    {
+     "town": "Parkal",
+     "rate": 5700,
+     "range": [
+      3200,
+      22800
+     ],
+     "mandal": "Parkal"
+    }
+   ]
+  },
+  "Hyderabad": {
+   "hq": "Hyderabad (Hyderabad Division wards)",
+   "district_range": [
+    14000,
+    71500
+   ],
+   "district_median": 34000,
+   "towns": [
+    {
+     "town": "Hyderabad (Hyderabad Division wards)",
+     "rate": 32200,
+     "range": [
+      14000,
+      116000
+     ],
+     "mandal": "Hyderabad Division"
+    },
+    {
+     "town": "Secunderabad (Secunderabad Division wards)",
+     "rate": 48000,
+     "range": [
+      29000,
+      73200
+     ],
+     "mandal": "Secunderabad Division"
+    },
+    {
+     "town": "Secunderabad Cantonment",
+     "rate": 35000,
+     "range": [
+      22000,
+      78700
+     ],
+     "mandal": "Secunderabad Cantonment Board"
+    }
+   ]
+  },
+  "Jagtial": {
+   "hq": "Jagtial",
+   "district_range": [
+    600,
+    13200
+   ],
+   "district_median": 1100,
+   "towns": [
+    {
+     "town": "Jagtial",
+     "rate": 11000,
+     "range": [
+      4800,
+      30800
+     ],
+     "mandal": "Jagtial"
+    },
+    {
+     "town": "Korutla",
+     "rate": 13200,
+     "range": [
+      6200,
+      40100
+     ],
+     "mandal": "Koratla"
+    },
+    {
+     "town": "Metpalle",
+     "rate": 5700,
+     "range": [
+      2000,
+      24500
+     ],
+     "mandal": "Metpalle"
+    }
+   ]
+  },
+  "Jangaon": {
+   "hq": "Jangaon",
+   "district_range": [
+    900,
+    6200
+   ],
+   "district_median": 1300,
+   "towns": [
+    {
+     "town": "Jangaon",
+     "rate": 6200,
+     "range": [
+      3200,
+      43300
+     ],
+     "mandal": "Jangaon"
+    },
+    {
+     "town": "Station Ghanpur",
+     "rate": 4700,
+     "range": [
+      4700,
+      8700
+     ],
+     "mandal": "Ghanpur(Stn)"
+    }
+   ]
+  },
+  "Jayashankar Bhupalpally": {
+   "hq": "Bhupalpally",
+   "district_range": [
+    800,
+    3450
+   ],
+   "district_median": 1100,
+   "towns": [
+    {
+     "town": "Bhupalpally",
+     "rate": 3450,
+     "range": [
+      3200,
+      8000
+     ],
+     "mandal": "Bhupalpally"
+    }
+   ]
+  },
+  "Jogulamba Gadwal": {
+   "hq": "Gadwal",
+   "district_range": [
+    900,
+    7200
+   ],
+   "district_median": 1100,
+   "towns": [
+    {
+     "town": "Gadwal",
+     "rate": 7200,
+     "range": [
+      4200,
+      15700
+     ],
+     "mandal": "Gadwal"
+    },
+    {
+     "town": "Aiza",
+     "rate": 3600,
+     "range": [
+      2500,
+      10200
+     ],
+     "mandal": "Ieeja"
+    },
+    {
+     "town": "Alampur",
+     "rate": 2600,
+     "range": [
+      2600,
+      4800
+     ],
+     "mandal": "Alampur"
+    }
+   ]
+  },
+  "Kamareddy": {
+   "hq": "Kamareddy",
+   "district_range": [
+    600,
+    7200
+   ],
+   "district_median": 900,
+   "towns": [
+    {
+     "town": "Kamareddy",
+     "rate": 7200,
+     "range": [
+      3200,
+      26400
+     ],
+     "mandal": "Kamareddy"
+    },
+    {
+     "town": "Banswada",
+     "rate": 3700,
+     "range": [
+      1900,
+      10200
+     ],
+     "mandal": "Banswada"
+    },
+    {
+     "town": "Yellareddy",
+     "rate": 2300,
+     "range": [
+      2300,
+      4200
+     ],
+     "mandal": "Yellareddy"
+    }
+   ]
+  },
+  "Karimnagar": {
+   "hq": "Karimnagar",
+   "district_range": [
+    1100,
+    20200
+   ],
+   "district_median": 1300,
+   "towns": [
+    {
+     "town": "Karimnagar",
+     "rate": 20200,
+     "range": [
+      2600,
+      63000
+     ],
+     "mandal": "Karimnagar"
+    },
+    {
+     "town": "Jammikunta",
+     "rate": 7200,
+     "range": [
+      3200,
+      16200
+     ],
+     "mandal": "Jammikunta"
+    },
+    {
+     "town": "Huzurabad",
+     "rate": 3200,
+     "range": [
+      2600,
+      14300
+     ],
+     "mandal": "Huzurabad"
+    },
+    {
+     "town": "Kothapalli (Karimnagar suburb)",
+     "rate": 4900,
+     "range": [
+      3200,
+      7200
+     ],
+     "mandal": "Kothapalli"
+    }
+   ]
+  },
+  "Khammam": {
+   "hq": "Khammam",
+   "district_range": [
+    600,
+    18900
+   ],
+   "district_median": 1200,
+   "towns": [
+    {
+     "town": "Khammam",
+     "rate": 11000,
+     "range": [
+      3200,
+      51700
+     ],
+     "mandal": "Khammam Urban"
+    },
+    {
+     "town": "Madhira",
+     "rate": 7850,
+     "range": [
+      5600,
+      20300
+     ],
+     "mandal": "Madhira"
+    },
+    {
+     "town": "Sathupalli",
+     "rate": 5700,
+     "range": [
+      1300,
+      24500
+     ],
+     "mandal": "Sathupalle"
+    }
+   ]
+  },
+  "Komaram Bheem Asifabad": {
+   "hq": "Asifabad",
+   "district_range": [
+    700,
+    5200
+   ],
+   "district_median": 700,
+   "towns": [
+    {
+     "town": "Asifabad",
+     "rate": 2500,
+     "range": [
+      2500,
+      7300
+     ],
+     "mandal": "Asifabad"
+    },
+    {
+     "town": "Kagaznagar",
+     "rate": 5200,
+     "range": [
+      2800,
+      8500
+     ],
+     "mandal": "Kagaz Nagar"
+    }
+   ]
+  },
+  "Mahabubabad": {
+   "hq": "Mahabubabad",
+   "district_range": [
+    600,
+    6200
+   ],
+   "district_median": 1100,
+   "towns": [
+    {
+     "town": "Mahabubabad",
+     "rate": 6200,
+     "range": [
+      1600,
+      56100
+     ],
+     "mandal": "Mahabubabad"
+    },
+    {
+     "town": "Thorrur",
+     "rate": 6200,
+     "range": [
+      1600,
+      39600
+     ],
+     "mandal": "Thorrur"
+    },
+    {
+     "town": "Maripeda",
+     "rate": 3200,
+     "range": [
+      1600,
+      26400
+     ],
+     "mandal": "Maripeda"
+    },
+    {
+     "town": "Dornakal",
+     "rate": 3200,
+     "range": [
+      1100,
+      11700
+     ],
+     "mandal": "Dornakal"
+    }
+   ]
+  },
+  "Mahabubnagar": {
+   "hq": "Mahabubnagar",
+   "district_range": [
+    600,
+    11700
+   ],
+   "district_median": 1100,
+   "towns": [
+    {
+     "town": "Mahabubnagar",
+     "rate": 10200,
+     "range": [
+      3600,
+      22000
+     ],
+     "mandal": "Mahabubanagar (Urban)"
+    },
+    {
+     "town": "Jadcherla",
+     "rate": 3700,
+     "range": [
+      3700,
+      10200
+     ],
+     "mandal": "Jadcherla"
+    },
+    {
+     "town": "Badepalle (Jadcherla municipality)",
+     "rate": 7200,
+     "range": [
+      3700,
+      18800
+     ],
+     "mandal": "Jadcherla"
+    }
+   ]
+  },
+  "Mancherial": {
+   "hq": "Mancherial",
+   "district_range": [
+    600,
+    8300
+   ],
+   "district_median": 700,
+   "towns": [
+    {
+     "town": "Mancherial",
+     "rate": 8300,
+     "range": [
+      3600,
+      23900
+     ],
+     "mandal": "Mancherial"
+    },
+    {
+     "town": "Bellampalli",
+     "rate": 3000,
+     "range": [
+      3000,
+      6200
+     ],
+     "mandal": "Bellampalle"
+    },
+    {
+     "town": "Mandamarri",
+     "rate": 2000,
+     "range": [
+      2000,
+      4800
+     ],
+     "mandal": "Mandamarri"
+    },
+    {
+     "town": "Naspur",
+     "rate": 2000,
+     "range": [
+      2000,
+      4200
+     ],
+     "mandal": "Naspur"
+    }
+   ]
+  },
+  "Medak": {
+   "hq": "Medak",
+   "district_range": [
+    1100,
+    7200
+   ],
+   "district_median": 1100,
+   "towns": [
+    {
+     "town": "Medak",
+     "rate": 6200,
+     "range": [
+      3500,
+      22000
+     ],
+     "mandal": "Medak"
+    },
+    {
+     "town": "Toopran",
+     "rate": 7200,
+     "range": [
+      5500,
+      23400
+     ],
+     "mandal": "Toopran"
+    },
+    {
+     "town": "Narsapur",
+     "rate": 3700,
+     "range": [
+      3700,
+      10700
+     ],
+     "mandal": "Narsapur"
+    },
+    {
+     "town": "Ramayampet",
+     "rate": 3200,
+     "range": [
+      2000,
+      11000
+     ],
+     "mandal": "Ramayampet"
+    }
+   ]
+  },
+  "Medchal-Malkajgiri": {
+   "hq": "Medchal",
+   "district_range": [
+    3200,
+    48300
+   ],
+   "district_median": 5200,
+   "towns": [
+    {
+     "town": "Medchal",
+     "rate": 10500,
+     "range": [
+      6000,
+      23700
+     ],
+     "mandal": "Medchal"
+    },
+    {
+     "town": "Malkajgiri",
+     "rate": 26600,
+     "range": [
+      9600,
+      58000
+     ],
+     "mandal": "Malkajgiri"
+    },
+    {
+     "town": "Kukatpally",
+     "rate": 33400,
+     "range": [
+      33400,
+      67400
+     ],
+     "mandal": "Kukatpally"
+    },
+    {
+     "town": "Uppal",
+     "rate": 27500,
+     "range": [
+      21300,
+      46800
+     ],
+     "mandal": "Uppal"
+    },
+    {
+     "town": "Kapra",
+     "rate": 28400,
+     "range": [
+      13900,
+      67400
+     ],
+     "mandal": "Kapra"
+    }
+   ]
+  },
+  "Mulugu": {
+   "hq": "Mulugu",
+   "district_range": [
+    900,
+    4700
+   ],
+   "district_median": 900,
+   "towns": [
+    {
+     "town": "Mulugu",
+     "rate": 4700,
+     "range": [
+      3000,
+      9200
+     ],
+     "mandal": "Mulug"
+    }
+   ]
+  },
+  "Nagarkurnool": {
+   "hq": "Nagarkurnool",
+   "district_range": [
+    600,
+    4700
+   ],
+   "district_median": 900,
+   "towns": [
+    {
+     "town": "Nagarkurnool",
+     "rate": 3600,
+     "range": [
+      2200,
+      11700
+     ],
+     "mandal": "Nagarkurnool"
+    },
+    {
+     "town": "Kalwakurthy",
+     "rate": 4700,
+     "range": [
+      3000,
+      16700
+     ],
+     "mandal": "Kalwakurthy"
+    },
+    {
+     "town": "Achampet",
+     "rate": 3200,
+     "range": [
+      1400,
+      5500
+     ],
+     "mandal": "Achampet"
+    },
+    {
+     "town": "Kollapur",
+     "rate": 3000,
+     "range": [
+      3000,
+      4200
+     ],
+     "mandal": "Kollapur"
+    }
+   ]
+  },
+  "Nalgonda": {
+   "hq": "Nalgonda",
+   "district_range": [
+    600,
+    7950
+   ],
+   "district_median": 900,
+   "towns": [
+    {
+     "town": "Nalgonda",
+     "rate": 4200,
+     "range": [
+      1500,
+      40700
+     ],
+     "mandal": "Nalgonda"
+    },
+    {
+     "town": "Miryalaguda",
+     "rate": 7950,
+     "range": [
+      3200,
+      40700
+     ],
+     "mandal": "Miryalaguda"
+    },
+    {
+     "town": "Devarakonda",
+     "rate": 3000,
+     "range": [
+      2000,
+      24900
+     ],
+     "mandal": "Devarakonda"
+    },
+    {
+     "town": "Nakrekal",
+     "rate": 3700,
+     "range": [
+      2000,
+      13700
+     ],
+     "mandal": "Nakrekal"
+    }
+   ]
+  },
+  "Narayanpet": {
+   "hq": "Narayanpet",
+   "district_range": [
+    600,
+    8400
+   ],
+   "district_median": 900,
+   "towns": [
+    {
+     "town": "Narayanpet",
+     "rate": 8400,
+     "range": [
+      6200,
+      11900
+     ],
+     "mandal": "Narayanpet"
+    },
+    {
+     "town": "Kosgi",
+     "rate": 6950,
+     "range": [
+      3700,
+      10200
+     ],
+     "mandal": "Kosgi"
+    },
+    {
+     "town": "Makthal",
+     "rate": 3200,
+     "range": [
+      900,
+      7900
+     ],
+     "mandal": "Makthal"
+    }
+   ]
+  },
+  "Nirmal": {
+   "hq": "Nirmal",
+   "district_range": [
+    600,
+    4400
+   ],
+   "district_median": 600,
+   "towns": [
+    {
+     "town": "Nirmal",
+     "rate": 3900,
+     "range": [
+      2500,
+      26400
+     ],
+     "mandal": "Nirmal"
+    },
+    {
+     "town": "Bhainsa",
+     "rate": 4400,
+     "range": [
+      3600,
+      12500
+     ],
+     "mandal": "Bhainsa"
+    },
+    {
+     "town": "Khanapur",
+     "rate": 2500,
+     "range": [
+      900,
+      6700
+     ],
+     "mandal": "Khanapur"
+    }
+   ]
+  },
+  "Nizamabad": {
+   "hq": "Nizamabad",
+   "district_range": [
+    600,
+    17300
+   ],
+   "district_median": 900,
+   "towns": [
+    {
+     "town": "Nizamabad",
+     "rate": 17300,
+     "range": [
+      5700,
+      56100
+     ],
+     "mandal": "Nizamabad South"
+    },
+    {
+     "town": "Bodhan",
+     "rate": 5400,
+     "range": [
+      1900,
+      27800
+     ],
+     "mandal": "Bodhan"
+    },
+    {
+     "town": "Armoor",
+     "rate": 2600,
+     "range": [
+      1800,
+      14700
+     ],
+     "mandal": "Armoor"
+    }
+   ]
+  },
+  "Peddapalli": {
+   "hq": "Peddapalli",
+   "district_range": [
+    1100,
+    10200
+   ],
+   "district_median": 1300,
+   "towns": [
+    {
+     "town": "Peddapalli",
+     "rate": 10200,
+     "range": [
+      3700,
+      26400
+     ],
+     "mandal": "Peddapalle"
+    },
+    {
+     "town": "Ramagundam",
+     "rate": 8700,
+     "range": [
+      3700,
+      49700
+     ],
+     "mandal": "Ramagundam"
+    },
+    {
+     "town": "Manthani",
+     "rate": 3700,
+     "range": [
+      2600,
+      13700
+     ],
+     "mandal": "Manthani"
+    }
+   ]
+  },
+  "Rajanna Sircilla": {
+   "hq": "Sircilla",
+   "district_range": [
+    800,
+    7200
+   ],
+   "district_median": 1100,
+   "towns": [
+    {
+     "town": "Sircilla",
+     "rate": 7200,
+     "range": [
+      2600,
+      20300
+     ],
+     "mandal": "Sirsilla"
+    },
+    {
+     "town": "Vemulawada",
+     "rate": 4800,
+     "range": [
+      2600,
+      13200
+     ],
+     "mandal": "Vemulawada"
+    }
+   ]
+  },
+  "Rangareddy": {
+   "hq": "Kongara Kalan",
+   "district_range": [
+    1100,
+    78600
+   ],
+   "district_median": 3700,
+   "towns": [
+    {
+     "town": "Kongara Kalan",
+     "rate": 4200,
+     "range": [
+      4200,
+      4800
+     ],
+     "mandal": "Ibrahimpatnam"
+    },
+    {
+     "town": "Ibrahimpatnam",
+     "rate": 4100,
+     "range": [
+      4100,
+      13000
+     ],
+     "mandal": "Ibrahimpatnam"
+    },
+    {
+     "town": "Gachibowli (Serilingampally)",
+     "rate": 78600,
+     "range": [
+      40100,
+      78600
+     ],
+     "mandal": "Srilingampalle"
+    },
+    {
+     "town": "Manikonda (Gandipet)",
+     "rate": 35700,
+     "range": [
+      35700,
+      41700
+     ],
+     "mandal": "Gandipet"
+    },
+    {
+     "town": "Saroornagar (LB Nagar area)",
+     "rate": 37100,
+     "range": [
+      37100,
+      75200
+     ],
+     "mandal": "Saroornagar"
+    },
+    {
+     "town": "Attapur (Rajendranagar)",
+     "rate": 30500,
+     "range": [
+      30500,
+      56400
+     ],
+     "mandal": "Rajendranagar"
+    },
+    {
+     "town": "Shamshabad",
+     "rate": 11100,
+     "range": [
+      11100,
+      40100
+     ],
+     "mandal": "Shamshabad"
+    },
+    {
+     "town": "Shadnagar (Farooqnagar)",
+     "rate": 8000,
+     "range": [
+      4100,
+      25200
+     ],
+     "mandal": "Farooqnagar"
+    }
+   ]
+  },
+  "Sangareddy": {
+   "hq": "Sangareddy",
+   "district_range": [
+    1000,
+    21300
+   ],
+   "district_median": 1300,
+   "towns": [
+    {
+     "town": "Sangareddy",
+     "rate": 4000,
+     "range": [
+      4000,
+      21000
+     ],
+     "mandal": "Sangareddy"
+    },
+    {
+     "town": "Ramachandrapuram (BHEL)",
+     "rate": 21300,
+     "range": [
+      15300,
+      49000
+     ],
+     "mandal": "Ramachandrapuram"
+    },
+    {
+     "town": "Patancheru",
+     "rate": 10500,
+     "range": [
+      10200,
+      29800
+     ],
+     "mandal": "Patancheru"
+    },
+    {
+     "town": "Zaheerabad",
+     "rate": 11700,
+     "range": [
+      6200,
+      40100
+     ],
+     "mandal": "Zahirabad"
+    },
+    {
+     "town": "Sadasivpet",
+     "rate": 5200,
+     "range": [
+      3700,
+      33000
+     ],
+     "mandal": "Sadasivpet"
+    },
+    {
+     "town": "Narayankhed",
+     "rate": 3700,
+     "range": [
+      3000,
+      7200
+     ],
+     "mandal": "Narayankhed"
+    }
+   ]
+  },
+  "Siddipet": {
+   "hq": "Siddipet",
+   "district_range": [
+    600,
+    9800
+   ],
+   "district_median": 1100,
+   "towns": [
+    {
+     "town": "Siddipet",
+     "rate": 9800,
+     "range": [
+      4700,
+      28800
+     ],
+     "mandal": "Siddipet (Urban)"
+    },
+    {
+     "town": "Gajwel",
+     "rate": 4700,
+     "range": [
+      3200,
+      16200
+     ],
+     "mandal": "Gajwel"
+    },
+    {
+     "town": "Husnabad",
+     "rate": 3600,
+     "range": [
+      2000,
+      11000
+     ],
+     "mandal": "Husnabad"
+    }
+   ]
+  },
+  "Suryapet": {
+   "hq": "Suryapet",
+   "district_range": [
+    600,
+    7200
+   ],
+   "district_median": 800,
+   "towns": [
+    {
+     "town": "Suryapet",
+     "rate": 7200,
+     "range": [
+      5500,
+      33000
+     ],
+     "mandal": "Suryapet"
+    },
+    {
+     "town": "Kodad",
+     "rate": 4700,
+     "range": [
+      1100,
+      26400
+     ],
+     "mandal": "Kodad"
+    },
+    {
+     "town": "Huzurnagar",
+     "rate": 4800,
+     "range": [
+      2600,
+      26400
+     ],
+     "mandal": "Huzurnagar"
+    }
+   ]
+  },
+  "Vikarabad": {
+   "hq": "Vikarabad",
+   "district_range": [
+    600,
+    11700
+   ],
+   "district_median": 900,
+   "towns": [
+    {
+     "town": "Vikarabad",
+     "rate": 4200,
+     "range": [
+      3700,
+      17200
+     ],
+     "mandal": "Vikarabad"
+    },
+    {
+     "town": "Tandur",
+     "rate": 11700,
+     "range": [
+      5500,
+      18800
+     ],
+     "mandal": "Tandur"
+    },
+    {
+     "town": "Pargi",
+     "rate": 3700,
+     "range": [
+      1400,
+      21900
+     ],
+     "mandal": "Pargi"
+    },
+    {
+     "town": "Kodangal",
+     "rate": 2600,
+     "range": [
+      2600,
+      6200
+     ],
+     "mandal": "Kodangal"
+    }
+   ]
+  },
+  "Wanaparthy": {
+   "hq": "Wanaparthy",
+   "district_range": [
+    900,
+    11700
+   ],
+   "district_median": 1550,
+   "towns": [
+    {
+     "town": "Wanaparthy",
+     "rate": 11700,
+     "range": [
+      7200,
+      30900
+     ],
+     "mandal": "Wanaparthy"
+    },
+    {
+     "town": "Kothakota",
+     "rate": 5500,
+     "range": [
+      3700,
+      8200
+     ],
+     "mandal": "Kothakota"
+    },
+    {
+     "town": "Pebbair",
+     "rate": 4200,
+     "range": [
+      3700,
+      6200
+     ],
+     "mandal": "Pebbair"
+    },
+    {
+     "town": "Atmakur",
+     "rate": 3600,
+     "range": [
+      2300,
+      6600
+     ],
+     "mandal": "Atmakur"
+    }
+   ]
+  },
+  "Warangal": {
+   "hq": "Warangal (Girmajipeta)",
+   "district_range": [
+    1100,
+    28400
+   ],
+   "district_median": 1100,
+   "towns": [
+    {
+     "town": "Warangal (Girmajipeta)",
+     "rate": 28400,
+     "range": [
+      14300,
+      56100
+     ],
+     "mandal": "Warangal"
+    },
+    {
+     "town": "Warangal (Mattewada)",
+     "rate": 17300,
+     "range": [
+      4700,
+      44900
+     ],
+     "mandal": "Warangal"
+    },
+    {
+     "town": "Warangal Fort (Khila Warangal)",
+     "rate": 7200,
+     "range": [
+      3700,
+      28400
+     ],
+     "mandal": "Khila Warangal"
+    },
+    {
+     "town": "Narsampet",
+     "rate": 8700,
+     "range": [
+      3600,
+      23900
+     ],
+     "mandal": "Narsampet"
+    }
+   ]
+  },
+  "Yadadri Bhuvanagiri": {
+   "hq": "Bhongir",
+   "district_range": [
+    600,
+    12600
+   ],
+   "district_median": 2000,
+   "towns": [
+    {
+     "town": "Bhongir",
+     "rate": 9500,
+     "range": [
+      3700,
+      48300
+     ],
+     "mandal": "Bhongir"
+    },
+    {
+     "town": "Choutuppal",
+     "rate": 3700,
+     "range": [
+      3700,
+      31500
+     ],
+     "mandal": "Choutuppal"
+    },
+    {
+     "town": "Yadagirigutta",
+     "rate": 4900,
+     "range": [
+      2500,
+      7400
+     ],
+     "mandal": "Yadagirigutta"
+    },
+    {
+     "town": "Alair",
+     "rate": 4400,
+     "range": [
+      3200,
+      17200
+     ],
+     "mandal": "Alair"
+    },
+    {
+     "town": "Pochampally",
+     "rate": 3200,
+     "range": [
+      3200,
+      6200
+     ],
+     "mandal": "B.Pochampally"
+    }
+   ]
+  }
+ }
+}

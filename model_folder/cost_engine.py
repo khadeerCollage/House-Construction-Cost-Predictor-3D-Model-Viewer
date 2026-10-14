@@ -579,6 +579,7 @@ class CostEngine:
         country: Optional[str] = None,
         region: Optional[str] = None,
         _extras_raw: Optional[Dict[str, float]] = None,
+        location: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Estimate total project cost (excl. land) and a material BOQ.
@@ -593,6 +594,10 @@ class CostEngine:
         quality = cls.normalize_quality(quality_level)
         m = MARKETS[country]
         mult, over = cls._region_params(m, region)
+        if location and location.get("index"):
+            # a plot-level location (floorplan_generator.land_value: state × town size) replaces the region list
+            mult, over = float(location["index"]), {}
+            region = location.get("name") or region
         floors = max(1, int(num_floors or 1))
         extras_raw = dict(_extras_raw or {})
         area_sqft = max(0.0, float(area_sqm or 0)) * SQFT_PER_M2 * floors
@@ -777,7 +782,8 @@ class CostEngine:
     def estimate_for_plan(cls, plan, city_tier: str = "Tier-2 (Urban)",
                           quality_level: str = "Standard (Medium)",
                           num_floors: int = None, country: Optional[str] = None,
-                          region: Optional[str] = None) -> Dict[str, Any]:
+                          region: Optional[str] = None,
+                          location: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Estimate a GeneratedFloorPlan: built-up (plinth) area × floors, the plan's
         real kitchen/bath counts, plus lift and site works (parking, garden, pool,
@@ -797,7 +803,7 @@ class CostEngine:
                 extras_raw[cls.LAYOUT_LINE] = layout["total"] * floors
         est = cls.estimate_cost(area_sqm=area, bedrooms=bedrooms, bathrooms=baths, kitchens=kitchens,
                                 living_rooms=1, quality_level=quality_level, num_floors=floors,
-                                country=country, region=region, _extras_raw=extras_raw)
+                                country=country, region=region, _extras_raw=extras_raw, location=location)
         mult = est["region_multiplier"]
         est["extras"] = {k: round(v * mult, 2) for k, v in extras_raw.items()}
         if layout is not None:

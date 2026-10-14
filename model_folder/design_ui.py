@@ -28,6 +28,7 @@ for _name in ("floorplan_generator.room_specs", "floorplan_generator.vastu_engin
               "floorplan_generator.wish_parser",
               "floorplan_generator.layout_engine", "floorplan_generator.vastu_analyzer",
               "floorplan_generator.takeoff", "floorplan_generator.house_report",
+              "floorplan_generator.land_value",
               "floorplan_renderer._common", "floorplan_renderer.svg_renderer",
               "floorplan_renderer.dxf_renderer", "floorplan_renderer.pdf_renderer",
               "floorplan_renderer.png_renderer", "model_folder.cost_engine",
@@ -115,6 +116,102 @@ def _amenity_toggle(label, key, fit, help=None, show_ok=False) -> bool:
     elif on and show_ok:
         st.caption(f"✅ {fit.reason[0].upper()}{fit.reason[1:]}.")
     return on
+
+
+def _lakh(v: float) -> str:
+    return CostEngine.format_money(v, "India", compact=True)
+
+
+def _location_picker(plot_area_sqm: float):
+    """'📍 Where is the plot?' (India): state → district → town → street position → optional local rate.
+    Returns the land estimate (floorplan_generator.land_value) or None outside India."""
+    from floorplan_generator import land_value as lv
+    ss = st.session_state
+    if ss.get("cost_country", "India") != "India":
+        return None
+    st.markdown("**📍 Where is the plot?** <span style='color:#94A3B8;font-size:12px'>— land price depends on "
+                "the street, so tell us where</span>", unsafe_allow_html=True)
+    states = list(lv.STATES)
+    state = st.selectbox("State", states, index=states.index(lv.DEFAULT_STATE), key="loc_state")
+    dlist = lv.districts(state)
+    town_class = "town"
+    if dlist:
+        dkey = f"loc_district_{state}"
+        if ss.get(dkey) not in dlist:
+            ss[dkey] = "Palnadu" if "Palnadu" in dlist else dlist[0]
+        district = st.selectbox("District", dlist, key=dkey)
+        tlist = lv.towns(state, district)
+        tkey = f"loc_town_{state}_{district}"
+        opts = tlist + ["Other town or village…"]
+        if ss.get(tkey) not in opts:
+            ss[tkey] = "Chilakaluripet" if "Chilakaluripet" in tlist else opts[0]
+        town = st.selectbox("Town", opts, key=tkey)
+        if town.startswith("Other"):
+            town = st.text_input("Town / village name", key="loc_town_other").strip()
+            town_class = st.radio("It is a", ["town", "village"], horizontal=True, key="loc_class_other",
+                                  format_func=lambda c: lv.TOWN_CLASSES[c][0])
+    else:
+        cities = [c for c, v in lv.CITIES.items() if v[0] == state]
+        town = st.selectbox("City / town", cities + ["Other town or village…"], key=f"loc_city_{state}")
+        district = ""
+        if town.startswith("Other"):
+            town = st.text_input("Town / village name", key="loc_town_other_s").strip()
+            district = st.text_input("District (optional)", key="loc_district_txt").strip()
+            town_class = st.radio("It is a", list(lv.TOWN_CLASSES), horizontal=False, key="loc_class",
+                                  format_func=lambda c: lv.TOWN_CLASSES[c][0])
+    area = st.radio("The plot is on a", [a[0] for a in lv.AREA_TYPES], key="loc_area", index=1,
+                    format_func=lambda k: f"{lv.AREA[k][2]} {lv.AREA[k][1]}")
+    st_info = lv.STATES[state]
+    units = [st_info["unit"], st_info["alt_unit"]] + [u for u in lv.UNITS if u not in (st_info["unit"], st_info["alt_unit"])]
+    with st.expander("✍️ I know the local land rate (more accurate)"):
+        c1, c2 = st.columns([1.2, 1])
+        known = c1.number_input("Rate (₹)", min_value=0, step=1000, value=0, key="loc_rate",
+                                help="What plots on your street sell for now — ask a local broker or recent buyer.")
+        unit = c2.selectbox("Unit", units, key=f"loc_unit_{state}")
+    st.toggle("We already own this plot", key="loc_own",
+              help="Then the land is counted in what the property is worth, not in what you still have to spend.")
+    land = lv.estimate_land(plot_area_sqm, state, district, town, area, town_class,
+                            known_rate=known or None, known_unit=unit)
+    mid = land.rate_sqft[1]
+    tag = {"your rate": "your rate", "official value": "from the official guideline value",
+           "indicative": "indicative estimate — enter your local rate for accuracy"}[land.confidence]
+    st.caption(f"🏷️ Land here ≈ **{lv.rate_text(lv.per_unit(mid, land.unit))} {land.unit}** "
+               f"({lv.rate_text(lv.per_unit(mid, land.alt_unit))} {land.alt_unit}) · {tag}. "
+               f"Your plot ≈ **{_lakh(land.value[1])}**.")
+    return land
+
+
+def _money_card(plan, cost_data: dict, land) -> None:
+    """Land + registration + house = what the family spends; land + building = what it is worth."""
+    from floorplan_generator import land_value as lv
+    ss = st.session_state
+    pw = lv.property_worth(land, cost_data, already_own=ss.get("loc_own", False),
+                           buyer_female=ss.get("loc_female", False))
+    reg = pw["registration"]
+    own = pw["already_own"]
+    cells = [
+        ("🏷️ Land", _lakh(land.value[1]), f"{land.place} · {lv.AREA[land.area_type][1].split(' /')[0].lower()}"
+         + (" · already yours" if own else "")),
+        ("📜 Registration", "—" if own else _lakh(reg["total"]),
+         "not needed (already yours)" if own else f"{reg['pct']:g}% stamp & registration ({land.state})"),
+        ("🏠 House (all-in)", cost_data["display"]["total_compact"],
+         f"builder rate ≈ ₹{cost_data.get('effective_rate', 0):,.0f}/sqft"),
+        ("💳 You will spend", _lakh(pw["investment"]), "house only" if own else "land + registration + house"),
+        ("💎 Property worth", _lakh(pw["worth"][1]),
+         f"{_lakh(pw['worth'][0])} – {_lakh(pw['worth'][2])} when finished"),
+    ]
+    html = "".join(
+        f"<div style='flex:1 1 150px;background:#111827;border:1px solid {'#22C55E' if i == 4 else '#1F2937'};"
+        f"border-radius:10px;padding:9px 12px'><div style='color:#94A3B8;font-size:12px'>{t}</div>"
+        f"<div style='color:#F8FAFC;font-size:19px;font-weight:700'>{v}</div>"
+        f"<div style='color:#94A3B8;font-size:11.5px'>{sub}</div></div>"
+        for i, (t, v, sub) in enumerate(cells))
+    st.markdown(f"<div style='display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 4px'>{html}</div>",
+                unsafe_allow_html=True)
+    conf = {"your rate": "using your local land rate",
+            "official value": "land from the official guideline value",
+            "indicative": "land is an indicative estimate — add your local rate in ‘Where is the plot?’"}[land.confidence]
+    st.caption(f"💰 Money report · {conf}. Details in **Cost & Material BOQ → Property worth**.")
 
 
 def _count_input(label, key, lo, top, step, default, unit) -> int:
@@ -240,6 +337,7 @@ def render_design_tab():
             help="Which side faces the main access road / North direction"
         )
         orient_code = orientation[0]  # 'N', 'E', 'S', 'W'
+        land = _location_picker(plot_area_sqm)
 
     with col_family:
         st.markdown("### 👨‍👩‍👧‍👦 2. Family & Intent")
@@ -294,13 +392,22 @@ def render_design_tab():
 
         quality = st.selectbox("Construction Quality", options=["Economy", "Standard", "Premium", "Luxury"], index=1)
         country = st.selectbox(
-            "🌍 Country / Market", options=CostEngine.markets(), index=0,
+            "🌍 Country / Market", options=CostEngine.markets(), index=0, key="cost_country",
             help="Currency, construction system and 2026 cost benchmarks for the market")
         _regions = CostEngine.regions(country)
-        city_tier = st.selectbox(
-            "📍 City / Region", options=_regions,
-            index=_regions.index(CostEngine.default_region(country)), key=f"cost_region_{country}",
-            help="Location cost index applied to labour, materials and site works")
+        cost_location = None
+        if country == "India" and land is not None:
+            # building cost follows the plot's location (state × town size), not a fixed city list
+            city_tier = CostEngine.default_region(country)
+            cost_location = {"name": f"{land.place}, {land.state}" if land.place != land.state else land.state,
+                             "index": land.construction_index}
+            st.caption(f"📍 Building cost for **{cost_location['name']}** — location index "
+                       f"×{land.construction_index:.2f} (labour & materials there).")
+        else:
+            city_tier = st.selectbox(
+                "📍 City / Region", options=_regions,
+                index=_regions.index(CostEngine.default_region(country)), key=f"cost_region_{country}",
+                help="Location cost index applied to labour, materials and site works")
         bldg_type = st.selectbox(
             "🏢 Building Type",
             ["Independent House / Villa", "Apartment / Multi-Storey Building", "Duplex Home"],
@@ -600,6 +707,7 @@ def render_design_tab():
                 # counts, lift and site works (UI labels are normalised inside CostEngine)
                 cost_data = CostEngine.estimate_for_plan(
                     plan,
+                    location=cost_location,
                     city_tier=city_tier,
                     quality_level=quality,
                     num_floors=floors,
@@ -644,7 +752,8 @@ def render_design_tab():
         # Re-price live so the Country / City / Quality dropdowns update the estimate without regenerating
         _plan_floors = getattr(plan, "num_floors", None) or floors
         cost_data = CostEngine.estimate_for_plan(
-            plan, city_tier=city_tier, quality_level=quality, num_floors=_plan_floors, country=country)
+            plan, city_tier=city_tier, quality_level=quality, num_floors=_plan_floors, country=country,
+            location=cost_location)
         st.session_state['gen_cost'] = cost_data
 
         st.markdown("---")
@@ -667,6 +776,8 @@ def render_design_tab():
         m3.metric("Built-up Area", f"{plan.total_built_up_area:.1f} m2", f"{cents_plot:.2f} Cents Plot ({plan.total_built_up_area * 10.764:.0f} sq ft)")
         
         m4.metric("Est. Total Cost", cost_data['display']['total_compact'], cost_data['display']['rate'])
+        if land is not None:
+            _money_card(plan, cost_data, land)
 
         # Amenities the owner asked for but the plot could not take — say so instead of silently dropping them
         _missing, _info = _site_request_status(plan)
@@ -706,6 +817,7 @@ def render_design_tab():
             FloorPlanEditor.render_editor_section(
                 plan,
                 cost_params={"city_tier": city_tier, "quality": quality, "floors": _plan_floors,
+                             "location": cost_location,
                              "country": country}
             )
 
@@ -761,7 +873,8 @@ def render_design_tab():
         # ---------------------------------------------------------
         # import_module (not `from model_folder import …`) so an edited module is re-imported on rerun
         _report = _importlib.import_module("model_folder.house_report_ui")
-        _cost_params = {"city_tier": city_tier, "quality": quality, "floors": _plan_floors, "country": country}
+        _cost_params = {"city_tier": city_tier, "quality": quality, "floors": _plan_floors, "country": country,
+                        "location": cost_location, "land": land}
         # stateful tabs: the open tab survives button reruns, and hidden tabs are not computed
         t1, t2, t3, t4 = st.tabs([
             "📊 Room Schedule",

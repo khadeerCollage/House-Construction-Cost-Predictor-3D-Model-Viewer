@@ -86,7 +86,7 @@ def _estimate(plan, cp: Dict[str, Any]) -> Optional[Dict]:
         return CostEngine.estimate_for_plan(plan, city_tier=cp.get("city_tier", "Tier-2 (Urban)"),
                                            quality_level=cp.get("quality", "Standard"),
                                            num_floors=cp.get("floors", getattr(plan, "num_floors", 1)),
-                                           country=cp.get("country"))
+                                           country=cp.get("country"), location=cp.get("location"))
     except Exception:
         return None
 

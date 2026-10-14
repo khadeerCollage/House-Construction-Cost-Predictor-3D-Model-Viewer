@@ -77,6 +77,11 @@ floorplan_generator/          LIVE+WIP  generative engine (pure Python, metres, 
                   slabs, net brickwork, plaster, tiles, paint, doors/windows, points, pipes) + STAGES (2026-10-12)
   house_report.py  the 4 result tabs' analysis: room_schedule (inside sizes, ft-in, NBC 2016 Part 3 checks),
                   vastu_ledger (exact split of vastu_score), vastu_checks, vastu_plan_svg, health_card
+  land_value.py    property worth (2026-10-14): land = official guideline value of the town (AP + Telangana,
+                  IGRS FY 2025-26 in data/land_rates_ap_ts.json) × street factor (main road 1.30 / inner 0.85 /
+                  outskirts 0.43 / village 0.25, calibrated on Chilakaluripet market rates) — else state
+                  district-town rate × town size × street (indicative) — the owner's own rate always wins;
+                  STATES: stamp/transfer/registration % (on max(market, guideline)), construction index, units, portal
   structure.py     RCC column grid (bays 2.4-4.5 m on wall centrelines); used by engineering report + drafting
 floorplan_renderer/           LIVE  plan -> files. SVG(drawsvg) DXF(ezdxf) PDF(reportlab) PNG(matplotlib)
   drafting.py      build_drafting(plan): wall poche, column grid, Vastu-aware furniture, tiles, levels, door/window tags + schedule (SVG only so far)
@@ -390,6 +395,7 @@ the original list below describes the pre-upgrade engine.
 18. **[V] Test side-effects:** see §11. Detector has zero tests.
 
 ## 11. Tests
+**2026-10-14:** + `tests/test_land_value.py` (5: Chilakaluripet market calibration, AP/TS district coverage, registration rules incl. TS rural + women's concession, own rate wins, location-driven building cost + money report).
 **2026-10-12: 56/56 pass** (+ `tests/test_house_report.py`, 6: ledger = score, inside sizes/NBC, Vastu checks + SVG, take-off thumb-rule bands, BOQ stages = construction cost, health card; + `tests/test_site_feasibility.py`, 6: 3-cent 2BHK = bikes not car on N/E/S/W, bigger plot
 unlocks the car, stilt parking for G+1, BHK options, garden % = real lawn, apply_fit). Before that 44/44 (`tests/test_intent_editing.py` now 12: + everyday-language parsing, edit pricing, parking
 on a 3-cent plot for N/E/S/W). **2026-10-11: 41/41 pass** (+ `tests/test_intent_editing.py`, 9 tests, ~25 s: parser, every intent type, refusals with
@@ -425,6 +431,14 @@ respect Windows paths (`os.path.join`), CRLF repo.
 - **New site amenity:** category + Vastu row → reservation in `SitePlanner.plan_footprint` if it needs a deep strip →
   `put(...)` call in `place_amenities` (Vastu-ranked) → add to `SITE_CATEGORIES` (layout_engine) and the amenity sets in
   `svg_renderer.py`/`floorplan_editor.py` → `CostEngine.SITE_RATES` → tests.
+- **Location & money (2026-10-14):** India plots get '📍 Where is the plot?' in the Land & Plot column
+  (`design_ui._location_picker`: state → district → town → street position → optional local rate, 'already own').
+  The building cost then uses `CostEngine.estimate_for_plan(..., location={'name','index'})` — index = state
+  `build` × town size (city 1.00 / town 0.95 / village 0.88; metro list in `land_value.CITIES`) instead of the
+  region dropdown; every estimate (re-plan options too, `cost_params['location']`) passes it. `_money_card` under
+  the top metrics = land + registration + house = spend, and worth = land (market) + construction cost
+  (land-and-building method); Cost tab starts with `_property_section` (breakdown, street comparison, portal).
+  Calibration check: Chilakaluripet inner ₹6–8 L/cent, main road ₹10–11 L, outskirts ₹3–4 L (tests/test_land_value).
 - **Result tabs (2026-10-12):** `st.tabs(..., key="report_tab", on_change="rerun")` — stateful, only the open tab
   (`tN.open`) is computed. Everything is measured from the plan: `house_report.vastu_ledger` must keep reproducing
   `plan.vastu_score` (same terms as `layout_engine.audit_vastu`: w·(s+50)/60 per placement + door pada, −8 per taboo /
