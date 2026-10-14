@@ -186,6 +186,72 @@ class TestWalkthrough(unittest.TestCase):
         self.assertIsNone(it)
         self.assertIn("Garden", why)
 
+    def test_09_stairs_can_be_climbed(self):
+        """Ground → stairs → terrace (one storey, outside stair) and → first floor (G+1, inside stair)."""
+        from collections import deque
+
+        def grid(nav):
+            bits = np.unpackbits(np.frombuffer(base64.b64decode(nav["bits"]), dtype=np.uint8))[: nav["nx"] * nav["ny"]]
+            return bits.reshape(nav["ny"], nav["nx"]).astype(bool)
+
+        def cell(nav, x, y):
+            return int((x - nav["x0"]) / nav["cell"]), int((y - nav["y0"]) / nav["cell"])
+
+        def near(g, c, k=12):
+            best = None
+            for dj in range(-k, k + 1):
+                for di in range(-k, k + 1):
+                    i, j = c[0] + di, c[1] + dj
+                    if 0 <= j < g.shape[0] and 0 <= i < g.shape[1] and g[j, i]:
+                        d = di * di + dj * dj
+                        if best is None or d < best[0]:
+                            best = (d, (i, j))
+            return best[1] if best else None
+
+        def connected(g, a, b):
+            seen, dq = {a}, deque([a])
+            while dq:
+                i, j = dq.popleft()
+                if (i, j) == b:
+                    return True
+                for n in ((i + 1, j), (i - 1, j), (i, j + 1), (i, j - 1)):
+                    if 0 <= n[1] < g.shape[0] and 0 <= n[0] < g.shape[1] and g[n[1], n[0]] and n not in seen:
+                        seen.add(n)
+                        dq.append(n)
+            return False
+
+        cases = [(("N",), "terrace", True), (("W", 16.0, 22.0, "3BHK", COMPS), "terrace", True),
+                 (("N", 12.0, 16.0, "2BHK", None, 2), "floor", False)]
+        for args, kind, external in cases:
+            plan, sc = _plan(*args)
+            nav, nav1 = sc["nav"], sc["nav1"]
+            g0, g1 = grid(nav), grid(nav1)
+            self.assertEqual(sc["upper"]["kind"], kind)
+            st = next(s for s in sc["stairs"] if s["external"] == external)
+            self.assertAlmostEqual(st["top"], sc["upper"]["z"], delta=0.02, msg=args)      # reaches the level above
+            self.assertLessEqual(st["riser_mm"], 190)
+            if external:
+                self.assertTrue(st["bridge"], args)
+                gap_ok = all(not (p[0] < st["bridge"][2] and p[2] > st["bridge"][0] and p[1] < st["bridge"][3]
+                                  and p[3] > st["bridge"][1]) for p in sc["shell"]["parapet"])
+                self.assertTrue(gap_ok, "the parapet is open where the stair arrives")
+            # half-way tread: walkable on both levels (the walker changes level there)
+            mid = min(st["boxes"], key=lambda b: abs(b[5] - st["mid"]) + (0 if b[5] > st["mid"] else 0.001))
+            t = cell(nav, (mid[0] + mid[2]) / 2, (mid[1] + mid[3]) / 2)
+            self.assertTrue(g0[t[1], t[0]] and g1[t[1], t[0]], args)
+            if external:
+                x0, y0, x1, y1 = st["r"]
+                start = near(g0, cell(nav, (x0 + x1) / 2, (y0 + y1) / 2), 40)
+            else:
+                lr = next(r for r in sc["rooms"] if "Living" in r["name"])
+                start = near(g0, cell(nav, (lr["r"][0] + lr["r"][2]) / 2, (lr["r"][1] + lr["r"][3]) / 2))
+            fx, fy, fw, fd = sc["footprint"]
+            goal = near(g1, cell(nav1, fx + fw / 4, fy + fd / 4), 30)
+            self.assertTrue(connected(g0, start, t), f"{args}: cannot reach the stairs")
+            self.assertTrue(connected(g1, t, goal), f"{args}: cannot get from the stairs onto the {kind}")
+            # the yard is not reachable on the upper level except by the stairs
+            self.assertFalse(g1[cell(nav1, sc["plot"]["w"] / 2, sc["plot"]["h"] + 1.5)[::-1]])
+
     def test_08_viewer_is_offline(self):
         d = os.path.join(ROOT, "model_folder", "walkthrough3d")
         for f in ("index.html", "walk.js", "vendor/three.module.min.js", "vendor/three.core.min.js",

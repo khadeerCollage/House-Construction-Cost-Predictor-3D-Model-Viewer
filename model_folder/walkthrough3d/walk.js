@@ -389,8 +389,8 @@ let S = null;            // scene data
 let SID = null;
 let canWish = false;
 let G = {};              // groups
-let nav = null, vis = null;
-const walker = { x: 0, y: 0, yaw: 0, pitch: -0.05, eye: 1.6, h: 2.0, path: [], lastLook: 0, room: null };
+let nav = null, vis = null, navs = [null, null];     // walking grids: 0 = house / ground, 1 = terrace / first floor
+const walker = { x: 0, y: 0, yaw: 0, pitch: -0.05, eye: 1.6, h: 2.0, path: [], lastLook: 0, room: null, level: 0 };
 const orbit = { target: new THREE.Vector3(), r: 20, theta: 0, phi: 1.0, auto: false };
 const trans = { on: false, t: 0, dur: 1, fromP: new THREE.Vector3(), fromT: new THREE.Vector3(), toP: new THREE.Vector3(), toT: new THREE.Vector3(), done: null };
 const keys = new Set();
@@ -498,8 +498,11 @@ function build(data) {
     ceil.box([o[0], o[1], o[2], o[3], z0 + lv.ceiling, z0 + H], "ghost", "ghost");
   }
   const roofZ = S.shell.roof_z;
-  for (const b of perimeter(o, 0.15, roofZ, roofZ + lv.parapet)) ceil.box(b, "parapet", "wall");
-  if (S.shell.mumty) {
+  for (const b of S.shell.parapet || perimeter(o, 0.15, roofZ, roofZ + lv.parapet)) ceil.box(b, "parapet", "wall");
+  if (S.shell.mumty_walls) {
+    for (const b of S.shell.mumty_walls) ceil.box(b, "wall_out", "wall");
+    ceil.box(S.shell.mumty_roof, "slab", "wall");
+  } else if (S.shell.mumty) {
     const m = S.shell.mumty, mh = 2.4, t = 0.115;
     const walls = perimeter([m[0] - t / 2, m[1] - t / 2, m[2] + t / 2, m[3] + t / 2], t, roofZ, roofZ + mh);
     walls.forEach((b, i) => { if (i !== 1) ceil.box(b, "wall_out", "wall"); });   // one side open: the terrace door
@@ -513,7 +516,7 @@ function build(data) {
     const lx = (x1 - x0) >= (y1 - y0) ? cx + off : cx, ly = (x1 - x0) >= (y1 - y0) ? cy : cy + off;
     ceil.cyl(lx, ly, 0.16, ffl + lv.ceiling - 0.035, ffl + lv.ceiling - 0.005, "lamp", 20);
   }
-  ceil.emit(G.ceil);
+  ceil.emit(G.ceil, new Set(["slab"]));          // the terrace floor can be tapped to walk there
 
   // —— furniture + ceiling fans
   const furn = new Builder();
@@ -539,7 +542,7 @@ function build(data) {
       const to = side === 1 ? d.other : d.room;     // the room side reads where the door goes
       if (!to) continue;
       const px = d.mid[0] + d.n[0] * side * 0.12, py = d.mid[1] + d.n[1] * side * 0.12;
-      addLabel(`→ ${esc(to === "Outside" ? "Outside" : to)}`, [px, py, ffl + 2.32], "sign", () => state.mode === "walk", { door: d, side });
+      addLabel(`→ ${esc(to === "Outside" ? "Outside" : to)}`, [px, py, ffl + 2.32], "sign", () => state.mode === "walk" && walker.level === 0, { door: d, side });
     }
   }
   for (const g of S.mandala) addLabel(`${g.word}`, [(g.r[0] + g.r[2]) / 2, (g.r[1] + g.r[3]) / 2, ffl + 0.05], "lbl zone",
@@ -550,7 +553,9 @@ function build(data) {
   if (floors > 1) addLabel(`Upper floor${floors > 2 ? "s" : ""} — shell only (rooms not designed yet)`,
     [fx + fw / 2, fy + fd / 2, ffl + H * (floors - 0.4)], "lbl", () => state.mode === "outside");
 
-  nav = decodeNav(S.nav);
+  navs = [decodeNav(S.nav), S.nav1 ? decodeNav(S.nav1) : null];
+  nav = navs[0];
+  if (walker.level === 1 && !navs[1]) walker.level = 0;
   vis = buildVis();
   drawMinimapBase();
   applyTheme();
@@ -994,19 +999,22 @@ function decodeNav(n) {
   return Object.assign({}, n, { free });
 }
 const cellOf = (x, y) => [Math.floor((x - nav.x0) / nav.cell), Math.floor((y - nav.y0) / nav.cell)];
-const okCell = (i, j) => i >= 0 && j >= 0 && i < nav.nx && j < nav.ny && nav.free[j * nav.nx + i] === 1;
-const freeAt = (x, y) => { const [i, j] = cellOf(x, y); return okCell(i, j); };
-function nearestFree(x, y, within = 1.5) {
-  const [ci, cj] = cellOf(x, y); if (okCell(ci, cj)) return [ci, cj];
+const okCell = (i, j, L = walker.level) => {
+  const g = navs[L] || nav;
+  return i >= 0 && j >= 0 && i < g.nx && j < g.ny && g.free[j * g.nx + i] === 1;
+};
+const freeAt = (x, y, L = walker.level) => { const [i, j] = cellOf(x, y); return okCell(i, j, L); };
+function nearestFree(x, y, within = 1.5, L = walker.level) {
+  const [ci, cj] = cellOf(x, y); if (okCell(ci, cj, L)) return [ci, cj];
   const k = Math.ceil(within / nav.cell); let best = null;
   for (let dj = -k; dj <= k; dj++) for (let di = -k; di <= k; di++) {
-    if (okCell(ci + di, cj + dj)) { const d = di * di + dj * dj; if (!best || d < best[0]) best = [d, [ci + di, cj + dj]]; }
+    if (okCell(ci + di, cj + dj, L)) { const d = di * di + dj * dj; if (!best || d < best[0]) best = [d, [ci + di, cj + dj]]; }
   }
   return best ? best[1] : null;
 }
 const centreOf = (c) => [nav.x0 + (c[0] + 0.5) * nav.cell, nav.y0 + (c[1] + 0.5) * nav.cell];
-function astar(sx, sy, gx, gy) {
-  const s = nearestFree(sx, sy, 1.0), g = nearestFree(gx, gy, 1.2);
+function astar(sx, sy, gx, gy, L = walker.level) {
+  const s = nearestFree(sx, sy, 1.0, L), g = nearestFree(gx, gy, 1.2, L);
   if (!s || !g) return null;
   const nx = nav.nx, N = nx * nav.ny, gs = new Float32Array(N).fill(Infinity), came = new Int32Array(N).fill(-1), closed = new Uint8Array(N);
   const si = s[1] * nx + s[0], gi = g[1] * nx + g[0];
@@ -1021,8 +1029,8 @@ function astar(sx, sy, gx, gy) {
     const x = i % nx, y = (i / nx) | 0;
     for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
       if (!dx && !dy) continue;
-      const a = x + dx, b = y + dy; if (!okCell(a, b)) continue;
-      if (dx && dy && !(okCell(a, y) && okCell(x, b))) continue;
+      const a = x + dx, b = y + dy; if (!okCell(a, b, L)) continue;
+      if (dx && dy && !(okCell(a, y, L) && okCell(x, b, L))) continue;
       const j = b * nx + a; if (closed[j]) continue;
       const ng = gs[i] + (dx && dy ? 1.414 : 1);
       if (ng < gs[j]) { gs[j] = ng; came[j] = i; push([ng + hf(j), j]); }
@@ -1033,12 +1041,12 @@ function astar(sx, sy, gx, gy) {
   cells.reverse();
   // string-pull
   const out = [cells[0]]; let k = 0;
-  while (k < cells.length - 1) { let m = cells.length - 1; while (m > k + 1 && !losCells(cells[k], cells[m])) m--; out.push(cells[m]); k = m; }
+  while (k < cells.length - 1) { let m = cells.length - 1; while (m > k + 1 && !losCells(cells[k], cells[m], L)) m--; out.push(cells[m]); k = m; }
   return out.map(centreOf);
 }
-function losCells(a, b) {
+function losCells(a, b, L = walker.level) {
   const n = Math.ceil(Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1])) * 2) + 1;
-  for (let k = 0; k <= n; k++) { const f = k / n; if (!okCell(Math.round(a[0] + (b[0] - a[0]) * f), Math.round(a[1] + (b[1] - a[1]) * f))) return false; }
+  for (let k = 0; k <= n; k++) { const f = k / n; if (!okCell(Math.round(a[0] + (b[0] - a[0]) * f), Math.round(a[1] + (b[1] - a[1]) * f), L)) return false; }
   return true;
 }
 function buildVis() {              // full-height walls only: what blocks the eye
@@ -1059,10 +1067,26 @@ function losClear(x0, y0, x1, y1) {
   }
   return true;
 }
-function groundAt(x, y) {
+function stairAt(x, y) {          // the step / landing under the feet, if any
+  for (const st of S.stairs) {
+    const w = st.wr || st.r; if (x < w[0] || x > w[2] || y < w[1] || y > w[3]) continue;
+    let h = null;
+    for (const b of st.boxes) if (x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3]) h = h === null ? b[5] : Math.max(h, b[5]);
+    if (h !== null) return { h, st };
+  }
+  return null;
+}
+function groundAt(x, y, L = walker.level) {
+  const s = stairAt(x, y); if (s) return s.h;
+  if (L === 1 && S.upper) return S.upper.z;
   let z = 0;
   for (const g of S.ground) if (x >= g[0] && x <= g[2] && y >= g[1] && y <= g[3]) z = Math.max(z, g[4]);
   return z;
+}
+function updateLevel() {           // half-way up a flight you belong to the floor above
+  if (!navs[1]) return;
+  const s = stairAt(walker.x, walker.y);
+  if (s) walker.level = s.h > s.st.mid + 0.01 ? 1 : 0;
 }
 
 // ───────────────────────────── modes & camera
@@ -1079,8 +1103,8 @@ function setMode(m, opts = {}) {
   const [fx, fy, fw, fd] = S.footprint;
   const centre = new THREE.Vector3(fx + fw / 2, S.levels.ffl + 0.5, -(fy + fd / 2));
   if (m === "walk") {
-    if (opts.at) { walker.x = opts.at[0]; walker.y = opts.at[1]; }
-    else if (prev !== "walk") placeWalkerDefault();
+    if (opts.at) { walker.x = opts.at[0]; walker.y = opts.at[1]; walker.level = opts.level || 0; }
+    else if (prev !== "walk") { placeWalkerDefault(); walker.level = 0; }
     if (opts.yaw !== undefined) walker.yaw = opts.yaw;
     walker.pitch = -0.05; walker.h = groundAt(walker.x, walker.y) + walker.eye; walker.path = [];
     const toP = new THREE.Vector3(walker.x, walker.h, -walker.y);
@@ -1189,16 +1213,34 @@ function tap(cx, cy) {
   const rect = canvas.getBoundingClientRect();
   const ndc = new THREE.Vector2(((cx - rect.left) / rect.width) * 2 - 1, -((cy - rect.top) / rect.height) * 2 + 1);
   ray.setFromCamera(ndc, camera);
-  const hits = ray.intersectObjects(registry.pick.filter((m) => m.visible && m.parent && m.parent.visible), false);
+  const hits = ray.intersectObjects(registry.pick.filter((m) => m.visible && m.parent && m.parent.visible), false)
+    .filter((h) => !h.face || h.face.normal.y > 0.5);                 // floors, steps and the terrace — not ceilings
   if (!hits.length) return;
   const p = hits[0].point, x = p.x, y = -p.z;
-  if (state.mode === "walk") { tourInterrupt(); walkTo(x, y); }
-  else if (inFootprint(x, y)) { const c = nearestFree(x, y, 1.2); if (c) { const q = centreOf(c); setMode("walk", { at: q, yaw: Math.atan2(S.footprint[1] + S.footprint[3] / 2 - q[1], S.footprint[0] + S.footprint[2] / 2 - q[0]) }); } }
+  const st = stairAt(x, y);
+  let L = st ? (st.h > st.st.mid + 0.01 ? 1 : 0) : (navs[1] && S.upper && Math.abs(p.y - S.upper.z) < 0.35 ? 1 : 0);
+  if (!navs[1]) L = 0;
+  if (state.mode === "walk") { tourInterrupt(); walkTo(x, y, L); }
+  else if (inFootprint(x, y) || L === 1) {
+    const c = nearestFree(x, y, 1.2, L);
+    if (c) { const q = centreOf(c); setMode("walk", { at: q, level: L, yaw: Math.atan2(S.footprint[1] + S.footprint[3] / 2 - q[1], S.footprint[0] + S.footprint[2] / 2 - q[0]) }); }
+  }
 }
-function walkTo(x, y) {
-  const path = astar(walker.x, walker.y, x, y);
+function walkTo(x, y, L = walker.level) {
+  let path = null;
+  if (L === walker.level) path = astar(walker.x, walker.y, x, y, L);
+  else {                            // to the other floor: walk to the half-way step of a stair, then on from there
+    let best = null;
+    for (const st of S.stairs) {
+      const b = st.boxes.reduce((m, q) => (Math.abs(q[5] - st.mid) < Math.abs(m[5] - st.mid) ? q : m), st.boxes[0]);
+      const T = [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2];
+      const a = astar(walker.x, walker.y, T[0], T[1], walker.level), c = a && astar(T[0], T[1], x, y, L);
+      if (a && c && (!best || a.length + c.length < best.length)) best = a.concat(c.slice(1));
+    }
+    path = best;
+  }
   if (path && path.length) { walker.path = path.slice(1); if (!walker.path.length) walker.path = [path[0]]; poke(); }
-  else toast("Can't walk there — that spot is inside a wall or furniture.");
+  else toast(L !== walker.level ? "No way up there from here." : "Can't walk there — that spot is inside a wall or furniture.");
 }
 function stepWalker(fwd, side) {
   const fx = Math.cos(walker.yaw), fy = Math.sin(walker.yaw), sx = Math.cos(walker.yaw - Math.PI / 2), sy = Math.sin(walker.yaw - Math.PI / 2);
@@ -1206,6 +1248,7 @@ function stepWalker(fwd, side) {
   if (freeAt(nx, ny)) { walker.x = nx; walker.y = ny; }
   else if (freeAt(nx, walker.y)) walker.x = nx;
   else if (freeAt(walker.x, ny)) walker.y = ny;
+  updateLevel();
 }
 
 // ───────────────────────────── guided tour
@@ -1232,7 +1275,8 @@ function tourStart() {
   hideStart(); tour.on = true; tour.paused = false; tour.i = -1;
   $("cap").style.display = "block"; $("tPause").textContent = "⏸ Pause";
   const st0 = S.tour[0];
-  setMode("walk", { at: st0.path[0], yaw: yawTo(st0.path[0], st0.look) });
+  walker.level = 0;
+  setMode("walk", { at: st0.path[0], level: 0, yaw: yawTo(st0.path[0], st0.look) });
   setTimeout(tourNext, 1150);
 }
 function yawTo(from, to) { return to ? Math.atan2(to[1] - from[1], to[0] - from[0]) : walker.yaw; }
@@ -1385,11 +1429,28 @@ $("sDoll").addEventListener("click", () => { hideStart(); setMode("dollhouse"); 
 // ───────────────────────────── HUD + "change this room" wishes → Smart Re-Plan
 let hudRoom;
 function updateHud() {
-  const r = roomAt(walker.x, walker.y);
-  if (r === hudRoom) return;
-  hudRoom = r;
+  if (walker.level === 1) {
+    if (hudRoom === "upper") return;
+    hudRoom = "upper";
+    const z = S.upper.z, ft = Math.round(z / 0.3048);
+    $("hud").innerHTML = S.upper.kind === "terrace"
+      ? `<b>🏙️ On the terrace</b><div class="sub">${z.toFixed(2)} m (${ft} ft) above the ground · parapet ${S.levels.parapet.toFixed(1)} m high</div>`
+      : `<b>🏢 First floor</b><div class="sub">Only the outline — the rooms of this floor are not designed yet</div>`;
+    return;
+  }
+  const rr = roomAt(walker.x, walker.y), r = rr && rr.cat === "STAIRS" ? null : rr;     // on a stair: show the steps
+  const sa = r ? null : stairAt(walker.x, walker.y) ||
+    (rr ? { st: S.stairs.find((q) => q.name === rr.name) || S.stairs[0], h: 0 } : null);
+  const key = r || (sa ? "stair:" + sa.st.name : inFootprint(walker.x, walker.y) ? "in" : "out");
+  if (key === hudRoom) return;
+  hudRoom = key;
   const lv = S.levels, ch = lv.ceiling, ft = Math.round(ch / 0.3048 * 12);
-  if (!r) { $("hud").innerHTML = `<b>${inFootprint(walker.x, walker.y) ? "Inside" : "Outside the house"}</b>`; return; }
+  if (!r) {
+    $("hud").innerHTML = sa ? `<b>🪜 ${esc(sa.st.name)}</b><div class="sub">${sa.st.steps} steps of ${sa.st.riser_mm} mm, ` +
+      `treads ${sa.st.tread_mm} mm · goes up to the ${S.upper && S.upper.kind === "terrace" ? "terrace" : "first floor"}</div>`
+      : `<b>${inFootprint(walker.x, walker.y) ? "Inside" : "Outside the house"}</b>`;
+    return;
+  }
   const badge = { best: "🟢 best Vastu spot", good: "🟢 good Vastu", ok: "🟡 acceptable Vastu", poor: "🔴 not ideal for Vastu" }[r.vastu] || "";
   $("hud").innerHTML = `<b>📍 ${esc(r.name)}</b><div class="sub">${r.size} (${r.ft}) · ${r.area} m² · ${r.sqft} sq ft · ` +
     `${r.zone_word ? esc(r.zone_word) + " · " : ""}ceiling ${ch.toFixed(2)} m (${Math.floor(ft / 12)}'${ft % 12}")${badge ? " · " + badge : ""}</div>` +
@@ -1489,6 +1550,7 @@ function update(dt) {
       const [tx, ty] = walker.path[0], dx = tx - walker.x, dy = ty - walker.y, d = Math.hypot(dx, dy), step = 1.25 * dt;
       if (d <= step) { walker.x = tx; walker.y = ty; walker.path.shift(); }
       else { walker.x += dx / d * step; walker.y += dy / d * step; }
+      updateLevel();
       if (performance.now() - walker.lastLook > 1500 && d > 0.05) {
         const want = Math.atan2(dy, dx), diff = ((want - walker.yaw + 3 * Math.PI) % (2 * Math.PI)) - Math.PI;
         walker.yaw += clamp(diff, -2.6 * dt, 2.6 * dt);
@@ -1510,7 +1572,7 @@ function update(dt) {
   // doors open as you come near (always open in the roof-off views), gates likewise
   for (const o of registry.doors) {
     if (o.still) continue;
-    const near = Math.hypot(walker.x - o.d.mid[0], walker.y - o.d.mid[1]) < 1.7;
+    const near = walker.level === 0 && Math.hypot(walker.x - o.d.mid[0], walker.y - o.d.mid[1]) < 1.7;
     o.target = state.mode === "walk" ? (near ? 1 : 0) : (state.mode === "outside" ? 0 : 1);
     if (Math.abs(o.target - o.cur) > 1e-3) { o.cur += clamp(o.target - o.cur, -dt * 1.6, dt * 1.6); o.pivot.rotation.y = o.d.closed * DEG + o.delta * ease(o.cur); active = true; }
   }
@@ -1566,7 +1628,8 @@ if (qs.get("scene")) {             // standalone preview: ?scene=path/to/scene.j
 resize();
 requestAnimationFrame(frame);
 // debugging handle (read-only use from the browser console)
-window.__walk = { scene, camera, renderer, registry, state, walker, get S() { return S; },
+window.__walk = { scene, camera, renderer, registry, state, walker, get S() { return S; }, walkTo, stairAt, groundAt,
+  tick(n = 1, dt = 1 / 30) { for (let k = 0; k < n; k++) update(dt); renderer.render(scene, camera); updateLabels(canvas.clientWidth, canvas.clientHeight); drawMinimap(); },
   pick(x, y) {
     const r = canvas.getBoundingClientRect(); ray.setFromCamera(new THREE.Vector2((x / r.width) * 2 - 1, -(y / r.height) * 2 + 1), camera);
     return ray.intersectObjects(registry.meshes, false).slice(0, 4).map((h) => [h.object.userData.role, +h.distance.toFixed(2), [+h.point.x.toFixed(2), +(-h.point.z).toFixed(2), +h.point.y.toFixed(2)]]);

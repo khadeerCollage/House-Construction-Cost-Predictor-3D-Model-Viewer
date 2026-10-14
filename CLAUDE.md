@@ -201,6 +201,12 @@ Intent editing loop (2026-10-11, UI reworked 2026-10-12) — the Design tab's "�
   Heights: FFL +0.45, storey = stair risers × riser (else 3.0), slab from engineering, door head 2.1, window sills from
   the drawing's schedule (0.9, kitchen 1.05, ventilators 1.8), arch 2.4, compound 1.5, parapet 1.0; stilt parking →
   house one storey up over the structural-grid columns. Upper floors are a translucent shell only (one floor is designed).
+  Two walking levels (2026-10-14 later): `nav` = house / ground with every stair climbable, `nav1` = terrace (one storey)
+  or the first-floor slab (G+1), `upper.z` = FFL + storey; the walker switches level half-way up a flight
+  (`stairs[k].mid`). The outside terrace stair starts on the ground, so the 3D rebuilds it to climb the plinth too
+  (19 × 182 mm to 3.45 m, the engine's `design_staircase` sizes it for 3.0 m only) and lands on a bridge through a gap
+  in the parapet (`shell.parapet` comes from Python). Dog-leg flights are oriented so the foot faces the stair-room
+  door and the exit lands on the floor; the mumty door sits at that exit.
 ```
 Flask `/generate-plan` now passes the same profile/multi-storey/amenity args and returns `setbacks`, `engineering`,
 `vastu_breakdown`, `design_notes`. Typical solve time 0.3–1.5 s (4BHK + everything ≈ 4 s).
@@ -421,6 +427,8 @@ the original list below describes the pre-upgrade engine.
 18. **[V] Test side-effects:** see §11. Detector has zero tests.
 
 ## 11. Tests
+**2026-10-14 (latest): 70/70 pass** (+ test_walkthrough test_09: yard → outside stair → terrace and living room →
+inside stair → first floor on the two walking grids; parapet open at the bridge).
 **2026-10-14 (later): 69/69 pass** + `tests/test_walkthrough.py` (8: scene for N/E/S/W, windows/doors really open with
 lintels above, heights from the engineering report incl. G+1 shell and stilt, 3D furniture = drawing furniture, every
 room walkable + toured from the road, sun inputs, 3D wishes → intents, viewer offline).

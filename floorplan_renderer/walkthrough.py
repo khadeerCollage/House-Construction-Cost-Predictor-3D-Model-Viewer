@@ -16,8 +16,11 @@ Walls are plan.walls (already cut at doors, arches and gates) split around every
 sill piece and a head piece, with lintels over doors/arches and corner posts at junctions (as
 the drafting poché). Door leaves keep the plan's hinge and swing (floorplan_renderer._common).
 
-Walking: a 0.1 m occupancy grid (walls, furniture, water, cars … grown by the walker's radius)
-goes to the browser for collision and tap-to-walk, and the guided tour is planned on it here —
+Walking: two 0.1 m occupancy grids (walls, furniture, water, cars … grown by the walker's radius) —
+the house / ground level and the level the stairs reach (the terrace of a one-storey house, else the
+first-floor slab) — go to the browser for collision and tap-to-walk; every stair is climbable and
+switches level half-way up. An outside terrace stair starts on the ground, so it is built to climb the
+plinth too, and arrives over a bridge through a gap in the parapet. The guided tour is planned here —
 road → gate → main door → every room, nearest one next — each stop with a plain-words note:
 inside size in metres and feet, Vastu zone, daylight and what furniture fits.
 
@@ -292,6 +295,12 @@ def _walls(plan, lv, windows, footprint) -> Tuple[Dict[str, List], List[Dict], L
     return out, wins, doors, arches
 
 
+def _ring(o, t) -> List[List[float]]:
+    """Four strips of width t on the inside of rectangle o."""
+    return [[o[0], o[1], o[2], o[1] + t], [o[0], o[3] - t, o[2], o[3]],
+            [o[0], o[1] + t, o[0] + t, o[3] - t], [o[2] - t, o[1] + t, o[2], o[3] - t]]
+
+
 def _minus(rect, holes) -> List[List[float]]:
     """Axis-aligned rectangle minus holes → list of rectangles (for the slab's stair openings)."""
     pieces = [list(rect)]
@@ -318,32 +327,108 @@ def _minus(rect, holes) -> List[List[float]]:
 # Stairs
 # =============================================================================
 
-def _stair(sc, base: float, storey: float, external: bool) -> Dict:
-    """Treads, landing and rails of a staircase (boxes in plan metres, absolute heights)."""
+def _stair(sc, base: float, storey: float, external: bool, top: Optional[float] = None,
+           entries: Sequence[Tuple[float, float]] = (), outer: Optional[Sequence[float]] = None) -> Dict:
+    """
+    Treads, landings and rails of a staircase (boxes in plan metres, absolute heights) and how it is
+    walked: rectangles closed on the lower level (block0) or the upper one (block1), rectangles open
+    upstairs (free1: arrival, exit, bridge), barriers (rails, the well) and the balustrade round the
+    opening upstairs (ring). `top` = the level the stair must reach; an outside stair starts on the
+    ground, so it also climbs the plinth and arrives over a bridge onto the roof next to it.
+    """
     along_y = sc.h >= sc.w
     L, Wd = (sc.h, sc.w) if along_y else (sc.w, sc.h)
     n = max(4, int(sc.num_steps or 15))
-    r = (sc.riser_height_m or storey / n)
+    r = sc.riser_height_m or storey / n
     t = sc.tread_depth_m or 0.25
+    if top is not None and abs(base + n * r - top) > 0.02:
+        n = max(4, math.ceil((top - base) / 0.19 - 1e-9))
+        r = (top - base) / n
+    z_top = base + n * r
+    x0, y0, x1, y1 = sc.x, sc.y, sc.x + sc.w, sc.y + sc.h
 
-    def P(s, q):           # local (s along the flight, q across) → plan
-        return (sc.x + q, sc.y + s) if along_y else (sc.x + s, sc.y + q)
+    def frame(fs, fq):     # local (s along the flight, q across) → plan, optionally mirrored
+        def P(s_, q_):
+            s_, q_ = (L - s_ if fs else s_), (Wd - q_ if fq else q_)
+            return (sc.x + q_, sc.y + s_) if along_y else (sc.x + s_, sc.y + q_)
+        return P
 
-    def box(s0, s1, q0, q1, za, zb):
-        (x0, y0), (x1, y1) = P(s0, q0), P(s1, q1)
-        return _rect(x0, y0, x1, y1) + [_r(za), _r(zb)]
+    def rect_of(P, s0, s1, q0, q1):
+        (ax, ay), (bx, by) = P(s0, q0), P(s1, q1)
+        return _rect(ax, ay, bx, by)
 
-    boxes, rails = [], []
+    out = {"boxes": [], "rails": [], "block0": [], "block1": [], "free1": [], "barrier": [], "ring": [],
+           "exit": None, "bridge": None}
+
+    def rail(pts):
+        if len(pts) > 1:
+            out["rails"].append([[_r(a), _r(b), _r(c)] for a, b, c in pts])
+
     stype = (sc.stair_type or "dog_leg").lower()
     if stype == "straight" or external or Wd < 1.6:
-        tt = min(t, (L - 0.3) / max(1, n - 1))
-        s0 = max(0.0, L - (n - 1) * tt - 0.3)
-        for k in range(1, n):
-            boxes.append(box(s0 + (k - 1) * tt, s0 + k * tt, 0, Wd, base, base + k * r))
-        boxes.append(box(s0 + (n - 1) * tt, L, 0, Wd, base + n * r - 0.15, base + n * r))
-        rail = [P(s0 + (k - 0.5) * tt, Wd - 0.05) + (base + k * r + 0.9,) for k in range(1, n)]
-        rails.append([[_r(a), _r(b), _r(c)] for a, b, c in rail])
-        return {"boxes": boxes, "rails": rails, "top": _r(base + n * r)}
+        flights = 2 if (getattr(sc, "has_landing", False) and n > 6) else 1
+        n1 = (n + 1) // 2 if flights == 2 else n
+        mid_land = (sc.landing_depth_m or Wd) if flights == 2 else 0.0
+        treads = n - flights                     # each flight's last riser lands on a landing / the floor
+        tt = min(t, (L - mid_land) / max(1, treads))
+        s0 = max(0.0, L - mid_land - treads * tt)
+        P, side = frame(False, False), None
+        if external and outer is not None:       # rise towards the end that lies alongside the house
+            best = None
+            for fs in (False, True):
+                a = rect_of(frame(fs, False), L - 0.9, L, 0, Wd)
+                lo, hi = (a[1], a[3]) if along_y else (a[0], a[2])
+                olo, ohi = (outer[1], outer[3]) if along_y else (outer[0], outer[2])
+                ov = min(hi, ohi - 0.2) - max(lo, olo + 0.2)
+                if best is None or ov > best[0] + 1e-6:
+                    best = (ov, fs)
+            P = frame(best[1], False)
+            gaps = ({"+": outer[0] - x1, "-": x0 - outer[2]} if along_y else {"+": outer[1] - y1, "-": y0 - outer[3]})
+            near = sorted((g, k) for k, g in gaps.items() if g > -0.05)
+            if near and near[0][0] <= 0.8 and best[0] >= 0.6:
+                side = near[0][1]
+        steps, sp = [], s0
+        for k in range(1, n1):
+            steps.append((sp, sp + tt, base + k * r))
+            sp += tt
+        if flights == 2:
+            steps.append((sp, sp + mid_land, base + n1 * r))
+            sp += mid_land
+            for k in range(n1 + 1, n):
+                steps.append((sp, sp + tt, base + k * r))
+                sp += tt
+        for a, b, h in steps:
+            out["boxes"].append(rect_of(P, a, b, 0, Wd) + [_r(base), _r(h)])
+        house_q = None if side is None else (Wd if side == "+" else 0.0)
+        open_qs = [0.0, Wd] if house_q is None else [Wd - house_q]
+        first = next((a for a, b, h in steps if h - base > 0.45), s0)
+        for q in open_qs:                         # rails where a fall is possible, and across the top end
+            qq = 0.05 if q == 0.0 else Wd - 0.05
+            rail([P((a + b) / 2, qq) + (h + 0.9,) for a, b, h in steps if h - base > 0.45]
+                 + [P(L - 0.05, qq) + (z_top - r + 0.9,)])
+            out["barrier"].append(rect_of(P, first, L, max(0.0, qq - 0.03), min(Wd, qq + 0.03)))
+        rail([P(L - 0.05, 0.05) + (z_top - r + 0.9,), P(L - 0.05, Wd - 0.05) + (z_top - r + 0.9,)])
+        out["barrier"].append(rect_of(P, L - 0.06, L, 0, Wd))
+        if house_q is not None:                  # bridge from the top steps over the gap and the parapet
+            span0, reach = L - 0.9, 0.15 + 0.4
+            a = rect_of(P, span0, L, 0, Wd)
+            if along_y:
+                bx = (x1, outer[0] + reach) if side == "+" else (outer[2] - reach, x0)
+                bridge = _rect(bx[0], a[1], bx[1], a[3])
+            else:
+                by = (y1, outer[1] + reach) if side == "+" else (outer[3] - reach, y0)
+                bridge = _rect(a[0], by[0], a[2], by[1])
+            out["boxes"].append(bridge + [_r(z_top - 0.15), _r(z_top)])
+            out["bridge"] = bridge
+            out["free1"].append(bridge)
+            # the top steps reach over the house wall (it ends under the roof slab) onto the bridge
+            out["free1"].append(rect_of(P, span0, L, Wd - 0.35, Wd) if house_q == Wd else rect_of(P, span0, L, 0, 0.35))
+            hq = Wd - 0.05 if house_q == Wd else 0.05
+            out["barrier"].append(rect_of(P, first, span0, max(0.0, hq - 0.03), min(Wd, hq + 0.03)))
+        if s0 > 0.05:
+            out["block1"].append(rect_of(P, 0, s0, 0, Wd))
+        out.update(top=_r(z_top), n=n, riser=r, tread=tt)
+        return out
 
     gap = 0.1
     fw = (Wd - gap) / 2
@@ -355,26 +440,65 @@ def _stair(sc, base: float, storey: float, external: bool) -> Dict:
         tt = max(0.2, (L - landing) / max(1, n1 - 1))
         landing = max(0.8, L - (n1 - 1) * tt)
     s_land = L - landing
+    s_start = max(0.0, s_land - (n1 - 1) * tt)
+    s_end = max(0.0, s_land - (n2 - 1) * tt)
+
+    # orientation: the first flight starts next to the way in, and upstairs you step out onto the floor
+    opts = ([(True, False), (False, False), (True, True), (False, True)] if along_y
+            else [(False, False), (True, False), (False, True), (True, True)])
+
+    def score(o):
+        Pf = frame(*o)
+        fx, fy = Pf(max(0.15, s_start / 2), fw / 2)
+        d = min((math.hypot(fx - ex, fy - ey) for ex, ey in entries), default=0.0)
+        ex_ = rect_of(Pf, -0.9, 0.0, Wd - fw, Wd)
+        inside = outer is None or (ex_[0] >= outer[0] - 0.01 and ex_[1] >= outer[1] - 0.01
+                                   and ex_[2] <= outer[2] + 0.01 and ex_[3] <= outer[3] + 0.01)
+        return (0 if inside else 1, round(d, 1), opts.index(o))
+    P = frame(*min(opts, key=score))
+
+    def box(s0, s1, q0, q1, za, zb):
+        return rect_of(P, s0, s1, q0, q1) + [_r(za), _r(zb)]
+
     # flight 1 (solid, from the floor), landing, flight 2 (stepped waist slab back over the start)
     for k in range(1, n1):
         s_a = s_land - (n1 - k) * tt
-        boxes.append(box(max(0, s_a), s_land - (n1 - k - 1) * tt, 0, fw, base, base + k * r))
+        out["boxes"].append(box(max(0, s_a), s_land - (n1 - k - 1) * tt, 0, fw, base, base + k * r))
     zl = base + n1 * r
-    boxes.append(box(s_land, L, 0, Wd, zl - 0.15, zl))
+    out["boxes"].append(box(s_land, L, 0, Wd, zl - 0.15, zl))
     for j in range(1, n2):
-        top = zl + j * r
-        s_b = s_land - (j - 1) * tt
-        boxes.append(box(max(0, s_land - j * tt), s_b, Wd - fw, Wd, top - r - 0.15, top))
-    s_end = max(0.0, s_land - (n2 - 1) * tt)
+        top_j = zl + j * r
+        out["boxes"].append(box(max(0, s_land - j * tt), s_land - (j - 1) * tt, Wd - fw, Wd, top_j - r - 0.15, top_j))
     if s_end > 0.05:   # arrival floor of the level above, inside the stair well
-        boxes.append(box(0, s_end, Wd - fw, Wd, base + n * r - 0.15, base + n * r))
+        out["boxes"].append(box(0, s_end, Wd - fw, Wd, z_top - 0.15, z_top))
     # rails along the well (inner edges) and a balustrade across the landing
     r1 = [P(s_land - (n1 - k - 0.5) * tt, fw) + (base + k * r + 0.9,) for k in range(1, n1)]
     r1.append(P(s_land, fw) + (zl + 0.9,))
     r2 = [P(s_land, Wd - fw) + (zl + 0.9,)]
     r2 += [P(s_land - (j - 0.5) * tt, Wd - fw) + (zl + j * r + 0.9,) for j in range(1, n2)]
-    rails += [[[_r(a), _r(b), _r(c)] for a, b, c in rr] for rr in (r1, r2) if len(rr) > 1]
-    return {"boxes": boxes, "rails": rails, "top": _r(base + n * r)}
+    rail(r1)
+    rail(r2)
+    out["barrier"].append(rect_of(P, 0, s_land, fw, Wd - fw))           # the well between the flights
+    if s_end > 0.05:
+        out["block0"].append(rect_of(P, 0, s_end, Wd - fw, Wd))           # the arrival floor is upstairs only
+        out["free1"].append(rect_of(P, 0, s_end, Wd - fw, Wd))
+    if s_start > 0.05:
+        out["block1"].append(rect_of(P, 0, s_start, 0, fw))               # the foot is downstairs only
+    exit_ = rect_of(P, -0.9, 0.0, Wd - fw, Wd)
+    out["exit"] = exit_
+    out["free1"].append(exit_)
+    # balustrade round the opening upstairs, open where you step out
+    ring = [[x0 - 0.12, y0 - 0.12, x1 + 0.12, y0], [x0 - 0.12, y1, x1 + 0.12, y1 + 0.12],
+            [x0 - 0.12, y0, x0, y1], [x1, y0, x1 + 0.12, y1]]
+    for rc in ring:
+        for piece in _minus(rc, [exit_]):
+            out["ring"].append(piece)
+            horiz = piece[2] - piece[0] >= piece[3] - piece[1]
+            c = (piece[1] + piece[3]) / 2 if horiz else (piece[0] + piece[2]) / 2
+            a, b = ((piece[0], c), (piece[2], c)) if horiz else ((c, piece[1]), (c, piece[3]))
+            rail([a + (z_top + 0.9,), b + (z_top + 0.9,)])
+    out.update(top=_r(z_top), n=n, riser=r, tread=tt)
+    return out
 
 
 # =============================================================================
@@ -459,13 +583,33 @@ class _Grid:
         self.ny = int(math.ceil((y1 - y0) / CELL))
         self.free = np.ones((self.ny, self.nx), dtype=bool)
 
+    def like(self, free: bool = True) -> "_Grid":
+        """A grid with exactly the same cells."""
+        g = _Grid.__new__(_Grid)
+        g.x0, g.y0, g.nx, g.ny = self.x0, self.y0, self.nx, self.ny
+        g.free = self.free.copy() if free else np.zeros_like(self.free)
+        return g
+
     def block(self, x0, y0, x1, y1, pad=0.0):
+        self.set((x0, y0, x1, y1), False, pad)
+
+    def span(self, rc, pad=0.0, clip=None):
+        """Index slices of the cells whose centres lie inside rc (grown by pad, cut to clip)."""
+        x0, y0, x1, y1 = rc[0] - pad, rc[1] - pad, rc[2] + pad, rc[3] + pad
+        if clip is not None:
+            x0, y0, x1, y1 = max(x0, clip[0]), max(y0, clip[1]), min(x1, clip[2]), min(y1, clip[3])
         xs = self.x0 + (np.arange(self.nx) + 0.5) * CELL
         ys = self.y0 + (np.arange(self.ny) + 0.5) * CELL
-        ix = np.nonzero((xs > x0 - pad) & (xs < x1 + pad))[0]
-        iy = np.nonzero((ys > y0 - pad) & (ys < y1 + pad))[0]
-        if len(ix) and len(iy):
-            self.free[iy[0]:iy[-1] + 1, ix[0]:ix[-1] + 1] = False
+        ix = np.nonzero((xs > x0) & (xs < x1))[0]
+        iy = np.nonzero((ys > y0) & (ys < y1))[0]
+        if not len(ix) or not len(iy):
+            return None
+        return slice(iy[0], iy[-1] + 1), slice(ix[0], ix[-1] + 1)
+
+    def set(self, rc, value, pad=0.0, clip=None):
+        sl = self.span(rc, pad, clip)
+        if sl:
+            self.free[sl] = value
 
     def keep_only(self, x0, y0, x1, y1):
         mask = np.zeros_like(self.free)
@@ -738,27 +882,43 @@ def build_scene(plan, latitude: Optional[float] = None, state: Optional[str] = N
             "zone_word": ZONE_WORDS.get((vrow or {}).get("zone") or (row or {}).get("zone", ""), ""),
             "vastu": rating, "windows": len(wins_by_room.get(r.name, [])), "say": say})
 
-    # stairs and lift
+    # stairs (each raised to the level it serves) and lift
+    e = 0.115
+    outer = [fx - e, fy - e, fx + fw + e, fy + fd + e]
+    n_floors = max(1, int(getattr(plan, "num_floors", 1) or 1))
+    upper_z = lv["ffl"] + lv["storey"]          # terrace of a one-storey house, else the first-floor slab
+    entries = [tuple(d["mid"]) for d in doors] + [((a["a"][0] + a["b"][0]) / 2, (a["a"][1] + a["b"][1]) / 2) for a in arches]
     stairs = []
     for sc in getattr(plan, "staircases", None) or []:
         external = "External" in sc.name
         base = 0.0 if external else lv["ffl"]
-        g = _stair(sc, base, lv["storey"], external)
+        g = _stair(sc, base, lv["storey"], external, top=None if (external and lv["stilt"]) else upper_z,
+                   entries=entries, outer=outer)
+        xs = [b[0] for b in g["boxes"]] + [b[2] for b in g["boxes"]]
+        ys = [b[1] for b in g["boxes"]] + [b[3] for b in g["boxes"]]
         g.update({"name": sc.name, "r": _rect(sc.x, sc.y, sc.x + sc.w, sc.y + sc.h), "external": external,
-                  "steps": int(sc.num_steps), "riser_mm": round(sc.riser_height_m * 1000),
-                  "tread_mm": round(sc.tread_depth_m * 1000)})
+                  "steps": int(g.pop("n")), "riser_mm": round(g.pop("riser") * 1000), "tread_mm": round(g.pop("tread") * 1000),
+                  "low": _r(base), "mid": _r((base + g["top"]) / 2),
+                  "wr": [_r(min(xs)), _r(min(ys)), _r(max(xs)), _r(max(ys))]})
         stairs.append(g)
     lifts = [_rect(r.x, r.y, r.right, r.top) for r in building if r.category == "LIFT"]
     internal_stairs = [s["r"] for s in stairs if not s["external"]]
 
-    # slab, parapet, plinth, mumty
-    e = 0.115
-    outer = [fx - e, fy - e, fx + fw + e, fy + fd + e]
-    roof_z = lv["ffl"] + lv["storey"] * max(1, int(getattr(plan, "num_floors", 1) or 1))
+    # slab, parapet (open where an outside stair arrives), plinth, mumty
+    roof_z = lv["ffl"] + lv["storey"] * n_floors
+    bridges = [s["bridge"] for s in stairs if s.get("bridge")] if n_floors == 1 else []
+    parapet = [pc + [_r(roof_z), _r(roof_z + PARAPET_H)] for b in _ring(outer, 0.15) for pc in _minus(b, bridges)]
     shell = {"outer": [_r(v) for v in outer], "slab": _minus(outer, internal_stairs),
              "slab_z": [_r(lv["ffl"] + lv["ceiling"]), _r(lv["ffl"] + lv["storey"])],
-             "roof_z": _r(roof_z), "floors": max(1, int(getattr(plan, "num_floors", 1) or 1)),
+             "roof_z": _r(roof_z), "floors": n_floors, "parapet": parapet,
              "mumty": internal_stairs[0] if internal_stairs else None}
+    inner = next((s for s in stairs if not s["external"]), None)
+    if inner is not None:
+        m, tw = inner["r"], 0.115
+        walls_m = _ring([m[0] - tw / 2, m[1] - tw / 2, m[2] + tw / 2, m[3] + tw / 2], tw)
+        cut = [inner["exit"]] if inner.get("exit") else []
+        shell["mumty_walls"] = [pc + [_r(roof_z), _r(roof_z + 2.4)] for w in walls_m for pc in _minus(w, cut)]
+        shell["mumty_roof"] = [_r(m[0] - 0.2), _r(m[1] - 0.2), _r(m[2] + 0.2), _r(m[3] + 0.2), _r(roof_z + 2.4), _r(roof_z + 2.52)]
 
     # floors and ceilings by room
     floors = [{"r": _rect(r.x, r.y, r.right, r.top), "cat": r.category, "name": r.name} for r in building]
@@ -818,9 +978,6 @@ def build_scene(plan, latitude: Optional[float] = None, state: Optional[str] = N
         fr = _furniture_rect(it)
         if fr:
             grid.block(fr[0], fr[1], fr[2], fr[3], 0.1 if fr[4] else 0.05)   # near plane 0.05 m: no clipping
-    for s in stairs:
-        x0, y0, x1, y1 = s["r"]
-        grid.block(x0, y0, x1, y1, 0.05)
     for x0, y0, x1, y1 in lifts:
         grid.block(x0, y0, x1, y1, 0.05)
     for r in building:
@@ -848,6 +1005,39 @@ def build_scene(plan, latitude: Optional[float] = None, state: Optional[str] = N
     grid.block(-5, -5, W + 5, 0.0, BODY_R)
     if lv["stilt"]:
         grid.keep_only(fx, fy, fx + fw, fy + fd)
+
+    # walking grids for the browser: the house / ground level with climbable stairs, and the level above
+    walk0 = grid.like()
+    for s in stairs:
+        for rc in s["barrier"]:
+            walk0.set(rc, False, 0.12, clip=s["r"])
+        for rc in s["block0"]:
+            walk0.set(rc, False, clip=s["r"])
+    walk1 = grid.like(free=False)
+    keep = (0.15 if n_floors == 1 else 0.23) + BODY_R                 # parapet / upper-floor outline
+    walk1.set([outer[0] + keep, outer[1] + keep, outer[2] - keep, outer[3] - keep], True)
+    if n_floors == 1:
+        for b in shell.get("mumty_walls", []):
+            walk1.set(b, False, BODY_R)
+    for s in stairs:
+        sl = walk1.span(s["r"], 0.01)            # +1 cm: cells centred exactly on an edge belong to both sides
+        if sl:
+            walk1.free[sl] = walk0.free[sl]
+        for rc in s["block1"]:
+            walk1.set(rc, False, clip=s["r"])
+        for rc in s["free1"]:
+            walk1.set(rc, True, 0.01)
+        for rc in s["barrier"]:
+            walk1.set(rc, False, 0.12, clip=s["r"])
+        for rc in s["ring"]:
+            walk1.set(rc, False, 0.12)
+    # the tour stays on the ground floor: stairs are only looked at
+    for s in stairs:
+        x0, y0, x1, y1 = s["r"]
+        grid.block(x0, y0, x1, y1, 0.05)
+    for s in stairs:
+        for k in ("block0", "block1", "free1", "barrier", "ring"):
+            s.pop(k, None)
 
     # ground heights the walker stands on (max of the rectangles under the feet)
     ground = [[_r(fx - 0.12), _r(fy - 0.12), _r(fx + fw + 0.12), _r(fy + fd + 0.12), lv["ffl"]]]
@@ -884,8 +1074,11 @@ def build_scene(plan, latitude: Optional[float] = None, state: Optional[str] = N
         "stilt": stilt, "ground": ground, "mandala": mandala,
         "brahmasthan": [_r(v) for v in df.brahmasthan] if df.brahmasthan else None,
         "road": {"y0": _r(H + VERGE), "y1": _r(H + VERGE + ROAD_W)},
-        "nav": {"x0": grid.x0, "y0": grid.y0, "nx": grid.nx, "ny": grid.ny, "cell": CELL, "r": BODY_R,
-                "bits": grid.encode()},
+        "nav": {"x0": walk0.x0, "y0": walk0.y0, "nx": walk0.nx, "ny": walk0.ny, "cell": CELL, "r": BODY_R,
+                "bits": walk0.encode()},
+        "nav1": {"x0": walk1.x0, "y0": walk1.y0, "nx": walk1.nx, "ny": walk1.ny, "cell": CELL, "r": BODY_R,
+                 "bits": walk1.encode()},
+        "upper": {"z": _r(upper_z), "kind": "terrace" if n_floors == 1 else "floor"},
         "tour": tour,
     }
 
