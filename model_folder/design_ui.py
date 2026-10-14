@@ -29,11 +29,11 @@ for _name in ("floorplan_generator.room_specs", "floorplan_generator.vastu_engin
               "floorplan_generator.layout_engine", "floorplan_generator.vastu_analyzer",
               "floorplan_generator.takeoff", "floorplan_generator.house_report",
               "floorplan_generator.land_value",
-              "floorplan_renderer._common", "floorplan_renderer.svg_renderer",
+              "floorplan_renderer._common", "floorplan_renderer.drafting", "floorplan_renderer.svg_renderer",
               "floorplan_renderer.dxf_renderer", "floorplan_renderer.pdf_renderer",
               "floorplan_renderer.png_renderer", "model_folder.cost_engine",
               "model_folder.intent_studio", "model_folder.floorplan_editor",
-              "model_folder.house_report_ui"):
+              "model_folder.house_report_ui", "floorplan_renderer.walkthrough", "model_folder.walkthrough_ui"):
     if _name in sys.modules:
         _importlib.reload(sys.modules[_name])
 
@@ -894,3 +894,10 @@ def render_design_tab():
         if t4.open:
             with t4:
                 _report.render_recommendations(plan, cost_data, _cost_params, quality)
+
+        st.write("---")
+
+        # ---------------------------------------------------------
+        # 3D walk-through: the plan as a house you can walk inside (bottom of the page)
+        # ---------------------------------------------------------
+        _importlib.import_module("model_folder.walkthrough_ui").render_walkthrough(plan, land)

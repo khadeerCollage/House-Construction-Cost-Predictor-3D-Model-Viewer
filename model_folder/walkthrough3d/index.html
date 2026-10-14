@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Walk Through Your House</title>
+<style>
+  :root {
+    --bg: #0A2342; --panel: rgba(6, 22, 43, 0.86); --line: #1F5C8C; --cyan: #00FFFF; --green: #00FF88;
+    --text: #E6F1FF; --dim: #9FC0E0; --warn: #FFD166; --bad: #FF8A80;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); overflow: hidden;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif; -webkit-user-select: none; user-select: none; }
+  #app { position: relative; width: 100%; height: 100%; overflow: hidden; touch-action: none; }
+  #c { position: absolute; inset: 0; width: 100%; height: 100%; display: block; outline: none; }
+  #labels { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+  .lbl { position: absolute; left: 0; top: 0; transform: translate(-50%, -50%); white-space: nowrap; text-align: center;
+    background: rgba(10, 35, 66, 0.82); border: 1px solid #2E7FB8; border-radius: 8px; padding: 3px 8px;
+    font-size: 12px; line-height: 1.25; color: #fff; will-change: transform; }
+  .lbl small { display: block; color: var(--dim); font-size: 10.5px; }
+  .lbl.zone { background: rgba(0, 0, 0, 0.35); border-color: rgba(255,255,255,0.25); font-weight: 600; }
+  .sign { position: absolute; left: 0; top: 0; transform: translate(-50%, -100%); white-space: nowrap;
+    background: rgba(0, 60, 40, 0.88); border: 1px solid var(--green); color: #DFFFF0; border-radius: 6px;
+    padding: 3px 9px; font-size: 13px; font-weight: 600; }
+  .north { position: absolute; left: 0; top: 0; transform: translate(-50%, -50%); color: #fff; font-weight: 800;
+    font-size: 15px; text-shadow: 0 0 6px #000; }
+
+  .bar { position: absolute; display: flex; flex-wrap: wrap; gap: 6px; z-index: 5; }
+  #top { left: 10px; top: 10px; right: 10px; justify-content: space-between; pointer-events: none; }
+  #top > div { display: flex; flex-wrap: wrap; gap: 6px; pointer-events: auto; }
+  .b { appearance: none; border: 1px solid var(--line); background: var(--panel); color: #CFE8FF; border-radius: 10px;
+    padding: 7px 11px; font-size: 13.5px; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+  .b:hover { border-color: #49A6E0; color: #fff; }
+  .b.on { border-color: var(--cyan); color: var(--cyan); box-shadow: inset 0 0 0 1px rgba(0,255,255,0.35); }
+  .b.go { border-color: var(--green); color: #fff; background: rgba(0, 90, 60, 0.85); }
+  .b:disabled { opacity: 0.45; cursor: default; }
+
+  .panel { position: absolute; background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); z-index: 6; }
+  #mini { right: 10px; bottom: 10px; padding: 6px; }
+  #mini canvas { display: block; cursor: pointer; border-radius: 8px; }
+  #mini .cap { font-size: 11px; color: var(--dim); text-align: center; margin-top: 3px; }
+
+  #hud { left: 50%; top: 58px; transform: translateX(-50%); padding: 7px 12px; text-align: center; display: none;
+    font-size: 14px; max-width: min(560px, 92%); }
+  #hud b { color: #fff; font-size: 15.5px; }
+  #hud .sub { color: var(--dim); font-size: 12.5px; margin-top: 2px; }
+  #hud .row { margin-top: 6px; display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; }
+
+  #pad { left: 10px; bottom: 10px; padding: 8px; display: none; }
+  #pad .grid { display: grid; grid-template-columns: 52px 52px 52px; grid-template-rows: 52px 52px; gap: 6px; }
+  #pad button { width: 52px; height: 52px; font-size: 22px; border-radius: 12px; border: 1px solid var(--line);
+    background: rgba(12, 44, 80, 0.95); color: #fff; cursor: pointer; touch-action: none; }
+  #pad button:active { background: #155E8E; }
+  #pad select { margin-top: 6px; width: 100%; background: #0B2A4C; color: #fff; border: 1px solid var(--line);
+    border-radius: 8px; padding: 5px; font-size: 12.5px; }
+
+  #sun { right: 10px; top: 56px; width: 300px; padding: 10px 12px; display: none; font-size: 13px; }
+  #sun input[type=range] { width: 100%; accent-color: #FFC857; }
+  #sun .chips { display: flex; gap: 5px; flex-wrap: wrap; margin: 6px 0; }
+  #sun .chips .b { padding: 4px 8px; font-size: 12px; }
+  #sun .info { color: var(--dim); font-size: 12.5px; line-height: 1.4; }
+  #sun .info b { color: #FFE29A; }
+
+  #cap { left: 50%; bottom: 12px; transform: translateX(-50%); width: min(680px, calc(100% - 24px)); padding: 12px 14px;
+    display: none; z-index: 7; }
+  #cap .t { font-size: 17px; font-weight: 700; color: #fff; display: flex; justify-content: space-between; gap: 8px; }
+  #cap .t span { color: var(--dim); font-size: 12.5px; font-weight: 600; }
+  #cap .s { font-size: 15px; line-height: 1.45; margin-top: 4px; color: #DDEBFF; }
+  #cap .row { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+
+  #wish { left: 50%; top: 150px; transform: translateX(-50%); padding: 12px; display: none; width: min(380px, 92%); z-index: 8; }
+  #wish h4 { margin: 0 0 4px; font-size: 15px; }
+  #wish p { margin: 0 0 8px; color: var(--dim); font-size: 12.5px; }
+  #wish .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  #wish .b { justify-content: center; padding: 10px; }
+
+  #toast { left: 50%; top: 14px; transform: translateX(-50%); padding: 10px 14px; display: none; z-index: 9;
+    border-color: var(--green); max-width: 92%; font-size: 14px; }
+
+  #start { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 10;
+    background: radial-gradient(ellipse at center, rgba(10,35,66,0.55), rgba(5,16,32,0.88)); }
+  #start .card { width: min(560px, 92%); background: rgba(6, 22, 43, 0.92); border: 1px solid #2E7FB8; border-radius: 16px;
+    padding: 20px 22px; text-align: center; box-shadow: 0 0 40px rgba(0, 255, 255, 0.08); }
+  #start h2 { margin: 0 0 4px; font-size: 22px; color: #fff; }
+  #start .meta { color: var(--dim); font-size: 13.5px; margin-bottom: 14px; }
+  #start .big { display: flex; flex-direction: column; gap: 9px; }
+  #start .big .b { justify-content: center; font-size: 16px; padding: 13px; border-radius: 12px; }
+  #start .hint { color: var(--dim); font-size: 12px; margin-top: 12px; line-height: 1.5; }
+
+  #help { left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 16px 18px; display: none; width: min(460px, 92%);
+    z-index: 11; font-size: 14px; line-height: 1.6; }
+  #help h4 { margin: 0 0 6px; }
+  #msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--dim);
+    font-size: 15px; z-index: 12; text-align: center; padding: 20px; }
+
+  @media (max-width: 640px) {
+    .b { padding: 6px 8px; font-size: 12.5px; }
+    .b .tx { display: none; }
+    #sun { width: calc(100% - 20px); }
+    #hud { top: 96px; }
+    #pad .grid { grid-template-columns: 46px 46px 46px; grid-template-rows: 46px 46px; }
+    #pad button { width: 46px; height: 46px; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <canvas id="c" tabindex="0"></canvas>
+  <div id="labels"></div>
+
+  <div id="top" class="bar">
+    <div id="modes">
+      <button class="b" data-mode="outside" title="Look at the house from outside"><span>🌳</span><span class="tx">Outside</span></button>
+      <button class="b" data-mode="dollhouse" title="Roof off — see every room"><span>🏠</span><span class="tx">All rooms</span></button>
+      <button class="b" data-mode="top" title="Straight down, like the drawing"><span>🗺️</span><span class="tx">Top</span></button>
+      <button class="b" data-mode="walk" title="Walk inside at eye height"><span>🚶</span><span class="tx">Walk inside</span></button>
+      <button class="b go" id="btnTour" title="A guided walk through every room, with voice"><span>▶</span><span class="tx">Guided walk</span></button>
+    </div>
+    <div id="tools">
+      <button class="b on" id="btnTheme" title="Blueprint look or real colours"><span>🎨</span><span class="tx" id="themeTx">Blueprint</span></button>
+      <button class="b" id="btnSun" title="Sunlight by time and season"><span>☀️</span><span class="tx">Sun</span></button>
+      <button class="b" id="btnVastu" title="Show the Vastu zones on the floor"><span>🕉️</span><span class="tx">Vastu</span></button>
+      <button class="b on" id="btnFurn" title="Show or hide furniture"><span>🛋️</span><span class="tx">Furniture</span></button>
+      <button class="b" id="btnShot" title="Save a picture of this view"><span>📷</span></button>
+      <button class="b" id="btnFull" title="Full screen"><span>⛶</span></button>
+      <button class="b" id="btnHelp" title="How to use"><span>?</span></button>
+    </div>
+  </div>
+
+  <div id="hud" class="panel"></div>
+
+  <div id="sun" class="panel">
+    <div><b>☀️ Sunlight</b> — <span id="sunTime">9:00 AM</span></div>
+    <input id="sunRange" type="range" min="330" max="1140" step="15" value="540">
+    <div class="chips" id="sunDays">
+      <button class="b" data-day="172">Summer · 21 Jun</button>
+      <button class="b" data-day="227">Monsoon · 15 Aug</button>
+      <button class="b" data-day="355">Winter · 21 Dec</button>
+      <button class="b" data-day="today">Today</button>
+    </div>
+    <div class="info" id="sunInfo"></div>
+  </div>
+
+  <div id="pad" class="panel">
+    <div class="grid">
+      <span></span><button data-k="fwd" title="Walk forward">▲</button><span></span>
+      <button data-k="left" title="Turn left">◀</button><button data-k="back" title="Walk back">▼</button><button data-k="right" title="Turn right">▶</button>
+    </div>
+    <select id="eye" title="Whose eyes?">
+      <option value="1.6">👤 Adult eye height</option>
+      <option value="1.1">🧒 Child eye height</option>
+      <option value="1.2">♿ Wheelchair eye height</option>
+    </select>
+  </div>
+
+  <div id="mini" class="panel"><canvas id="miniC" width="200" height="200"></canvas><div class="cap">Tap the map to walk there</div></div>
+
+  <div id="cap" class="panel">
+    <div class="t"><div id="capT"></div><span id="capN"></span></div>
+    <div class="s" id="capS"></div>
+    <div class="row">
+      <button class="b" id="tPause">⏸ Pause</button>
+      <button class="b" id="tNext">⏭ Next</button>
+      <button class="b" id="tVoice">🔊 Voice on</button>
+      <button class="b" id="tStop">⏹ Stop</button>
+    </div>
+  </div>
+
+  <div id="wish" class="panel">
+    <h4 id="wishT">Change this room</h4>
+    <p>Your wish goes to 🧠 Smart Re-Plan above. It will make 3 new designs for you to compare — nothing changes until you pick one.</p>
+    <div class="grid">
+      <button class="b" data-w="bigger">➕ Make it bigger</button>
+      <button class="b" data-w="smaller">➖ Make it smaller</button>
+      <button class="b" data-w="opposite">🔁 Other side</button>
+      <button class="b" data-w="lock">📌 Keep it here</button>
+    </div>
+    <div style="text-align:right;margin-top:8px"><button class="b" id="wishClose">Close</button></div>
+  </div>
+
+  <div id="toast" class="panel"></div>
+
+  <div id="help" class="panel">
+    <h4>How to move</h4>
+    <div>🖱️ <b>Drag</b> to look around (up, down, all 360°).</div>
+    <div>👆 <b>Tap the floor</b> to walk there — doors open by themselves.</div>
+    <div>⌨️ <b>Arrow keys</b> or <b>W A S D</b> to walk; or the ▲ ◀ ▶ ▼ buttons.</div>
+    <div>🗺️ <b>Tap the small map</b> to go to any room.</div>
+    <div>🏠 In <b>All rooms</b> / <b>Outside</b>: drag to turn, scroll or pinch to zoom, right-drag to move.</div>
+    <div>▶ <b>Guided walk</b> takes you through every room and tells you about it.</div>
+    <div style="text-align:right;margin-top:8px"><button class="b" id="helpClose">Got it</button></div>
+  </div>
+
+  <div id="start">
+    <div class="card">
+      <h2>🏡 Walk through your house</h2>
+      <div class="meta" id="startMeta">Loading your design…</div>
+      <div class="big">
+        <button class="b go" id="sTour">▶ Guided walk — with voice</button>
+        <button class="b" id="sWalk">🚶 Walk in by myself</button>
+        <button class="b" id="sDoll">🏠 See all rooms from above</button>
+      </div>
+      <div class="hint">Built from your drawing: the same walls, doors, windows, stairs and furniture, at real size.<br>
+        Works offline · drag to look · tap the floor to walk</div>
+    </div>
+  </div>
+  <div id="msg">Loading the 3D house…</div>
+</div>
+<script type="module" src="./walk.js"></script>
+</body>
+</html>

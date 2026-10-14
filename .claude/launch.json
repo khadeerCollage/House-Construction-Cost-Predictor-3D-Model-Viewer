@@ -20,6 +20,12 @@
       "port": 8765
     },
     {
+      "name": "walk3d-preview",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "http.server", "8766", "--directory", "C:/Users/USER/Documents/vit_project"],
+      "port": 8766
+    },
+    {
       "name": "streamlit-verify",
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "streamlit", "run", "model_folder/frontend.py", "--server.port", "8502", "--server.headless", "true"],

@@ -20,9 +20,13 @@ Primitives are plain tuples:
   ("poly", [(x, y), ...], closed, style)    ("line", (x1, y1), (x2, y2), style)
   ("circle", (x, y), r, style)              ("text", (x, y), text, size_m, style)
 Styles: furn, furn_d (detail), fix (sanitary), fix_d, dash, tile, text.
+
+Drafting.items records every furniture / fixture symbol semantically (kind, wall frame,
+size, room) so the 3D walk-through builds the same furniture in the same places.
 """
 
 import math
+import threading
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -59,10 +63,41 @@ class Drafting:
     brahmasthan: Optional[Rect] = None
     rwp: List = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+    # furniture as objects: {kind, room, o, u, v (wall frame, plan metres) | x, y, W, D, …}
+    items: List[Dict] = field(default_factory=list)
 
 
 def _overlap(a: Rect, b: Rect) -> bool:
     return a[0] < b[2] - EPS and b[0] < a[2] - EPS and a[1] < b[3] - EPS and b[1] < a[3] - EPS
+
+
+# ---- symbol recorder: build_drafting collects what each sym_* draws (thread-local, so
+# concurrent sessions never mix); outside build_drafting it records nothing
+_REC = threading.local()
+
+
+def _record(kind: str, T=None, **params) -> None:
+    items = getattr(_REC, "items", None)
+    if items is None:
+        return
+    if T is not None:    # local frame → origin + unit axes (u along the wall, v away from it)
+        o, pu, pv = T(0.0, 0.0), T(1.0, 0.0), T(0.0, 1.0)
+        params.update(o=(round(o[0], 4), round(o[1], 4)),
+                      u=(round(pu[0] - o[0], 6), round(pu[1] - o[1], 6)),
+                      v=(round(pv[0] - o[0], 6), round(pv[1] - o[1], 6)))
+    params["kind"] = kind
+    items.append(params)
+
+
+def _rec_mark() -> int:
+    items = getattr(_REC, "items", None)
+    return len(items) if items is not None else 0
+
+
+def _rec_reset(mark: int) -> None:
+    items = getattr(_REC, "items", None)
+    if items is not None:
+        del items[mark:]
 
 
 # =============================================================================
@@ -102,6 +137,7 @@ def _rrect(T, u0, v0, u1, v1, rad, style, n=4):
 
 # ---- furniture & fixture symbols --------------------------------------------
 def sym_bed(T, W, D, double=True):
+    _record("bed", T, W=W, D=D, double=double)
     out = [_rect(T, 0, 0, W, D, "furn"), _rect(T, 0, 0, W, 0.07, "furn_d")]
     if double:
         out += [_rrect(T, 0.10, 0.13, W / 2 - 0.05, 0.43, 0.06, "furn_d"),
@@ -114,10 +150,12 @@ def sym_bed(T, W, D, double=True):
 
 
 def sym_side_table(T, s=0.45):
+    _record("side_table", T, W=s, D=s)
     return [_rect(T, 0, 0, s, s, "furn"), _circle(T, s / 2, s / 2, s * 0.22, "furn_d")]
 
 
 def sym_wardrobe(T, W, D=0.6):
+    _record("wardrobe", T, W=W, D=D)
     out = [_rect(T, 0, 0, W, D, "furn"), _line(T, (0.04, D / 2), (W - 0.04, D / 2), "dash")]
     u = 0.10
     while u < W - 0.08:
@@ -127,6 +165,7 @@ def sym_wardrobe(T, W, D=0.6):
 
 
 def sym_sofa(T, W, D=0.85, seats=3):
+    _record("sofa", T, W=W, D=D, seats=seats)
     arm = 0.18
     out = [_rect(T, 0, 0, W, D, "furn"), _rect(T, 0, 0, W, 0.2, "furn_d"),
            _rect(T, 0, 0.2, arm, D, "furn_d"), _rect(T, W - arm, 0.2, W, D, "furn_d")]
@@ -137,20 +176,24 @@ def sym_sofa(T, W, D=0.85, seats=3):
 
 
 def sym_coffee_table(T, W, D):
+    _record("coffee_table", T, W=W, D=D)
     return [_rect(T, 0, 0, W, D, "furn"), _rect(T, 0.06, 0.06, W - 0.06, D - 0.06, "furn_d")]
 
 
 def sym_tv_unit(T, W, D=0.4):
+    _record("tv_unit", T, W=W, D=D)
     return [_rect(T, 0, 0, W, D, "furn"), _rect(T, W * 0.18, 0.05, W * 0.82, 0.11, "furn_d"),
             ("text", T(W / 2, D * 0.62), "TV", 0.14, "text")]
 
 
 def sym_fridge(T, s=0.7):
+    _record("fridge", T, W=s, D=s)
     return [_rect(T, 0, 0, s, s, "furn"), _line(T, (0, s - 0.06), (s, s - 0.06), "furn_d"),
             ("text", T(s / 2, s / 2), "REF", 0.13, "text")]
 
 
 def sym_sink(T, a, double=True):
+    _record("sink", T, a=a, double=double)
     out = []
     if double:
         out += [_rrect(T, a, 0.09, a + 0.37, 0.5, 0.05, "fix"), _rrect(T, a + 0.43, 0.09, a + 0.8, 0.5, 0.05, "fix"),
@@ -163,6 +206,7 @@ def sym_sink(T, a, double=True):
 
 
 def sym_hob(T, a):
+    _record("hob", T, a=a)
     out = [_rect(T, a, 0.06, a + 0.6, 0.54, "fix_d")]
     for cu, cv in ((a + 0.15, 0.18), (a + 0.45, 0.18), (a + 0.15, 0.42), (a + 0.45, 0.42)):
         out += [_circle(T, cu, cv, 0.08, "fix_d"), _circle(T, cu, cv, 0.035, "fix_d")]
@@ -170,42 +214,50 @@ def sym_hob(T, a):
 
 
 def sym_wc(T, W=0.42, D=0.72):
+    _record("wc", T, W=W, D=D)
     return [_rrect(T, 0.02, 0, W - 0.02, 0.2, 0.03, "fix"), _ellipse(T, W / 2, 0.46, 0.19, 0.26, "fix"),
             _ellipse(T, W / 2, 0.47, 0.12, 0.17, "fix_d")]
 
 
 def sym_basin(T, W=0.55, D=0.42):
+    _record("basin", T, W=W, D=D)
     return [_rrect(T, 0, 0, W, D, 0.04, "fix"), _ellipse(T, W / 2, 0.23, 0.19, 0.13, "fix_d"),
             _circle(T, W / 2, 0.055, 0.02, "fix_d")]
 
 
 def sym_shower(T, W=0.9, D=0.9):
+    _record("shower", T, W=W, D=D)
     return [_rect(T, 0, 0, W, D, "fix"), _line(T, (0, 0), (W, D), "fix_d"), _line(T, (W, 0), (0, D), "fix_d"),
             _circle(T, W / 2, D / 2, 0.045, "fix_d"), _circle(T, W / 2, 0.08, 0.06, "fix_d")]
 
 
 def sym_floor_trap(x, y):
+    _record("floor_trap", x=x, y=y)
     return [("circle", (x, y), 0.07, "fix_d"), ("line", (x - 0.05, y), (x + 0.05, y), "fix_d"),
             ("line", (x, y - 0.05), (x, y + 0.05), "fix_d")]
 
 
 def sym_washer(T, s=0.6):
+    _record("washer", T, W=s, D=s)
     return [_rect(T, 0, 0, s, s, "fix"), _rect(T, 0, 0, s, 0.09, "fix_d"),
             _circle(T, s / 2, s / 2 + 0.03, 0.2, "fix_d"), _circle(T, s / 2, s / 2 + 0.03, 0.12, "fix_d")]
 
 
 def sym_utility_sink(T, W=0.6, D=0.5):
+    _record("utility_sink", T, W=W, D=D)
     return [_rect(T, 0, 0, W, D, "fix"), _rrect(T, 0.06, 0.08, W - 0.06, D - 0.05, 0.05, "fix_d"),
             _circle(T, W / 2, D / 2 + 0.02, 0.025, "fix_d")]
 
 
 def sym_desk(T, W, D=0.6):
+    _record("desk", T, W=W, D=D)
     return [_rect(T, 0, 0, W, D, "furn"), _rect(T, 0.08, 0.05, W * 0.45, 0.3, "furn_d"),
             _rrect(T, W / 2 - 0.22, D + 0.08, W / 2 + 0.22, D + 0.5, 0.06, "furn"),
             _line(T, (W / 2 - 0.2, D + 0.44), (W / 2 + 0.2, D + 0.44), "furn_d")]
 
 
 def sym_bookshelf(T, W, D=0.35):
+    _record("bookshelf", T, W=W, D=D)
     out = [_rect(T, 0, 0, W, D, "furn")]
     n = max(2, int(round(W / 0.3)))
     for i in range(1, n):
@@ -214,6 +266,7 @@ def sym_bookshelf(T, W, D=0.35):
 
 
 def sym_shelves(T, W, D=0.45):
+    _record("shelves", T, W=W, D=D)
     out = [_rect(T, 0, 0, W, D, "furn")]
     n = max(1, int(math.ceil(W / 0.9)))
     for i in range(n):
@@ -223,6 +276,7 @@ def sym_shelves(T, W, D=0.45):
 
 
 def sym_pooja(T, W, D=0.45):
+    _record("pooja", T, W=W, D=D)
     c = W / 2
     return [_rect(T, 0, 0, W, D, "furn"), _rect(T, 0.06, 0.04, W - 0.06, D * 0.55, "furn_d"),
             ("poly", [T(c, 0.08), T(c + 0.07, D * 0.3), T(c, D * 0.5), T(c - 0.07, D * 0.3)], True, "furn_d"),
@@ -230,10 +284,12 @@ def sym_pooja(T, W, D=0.45):
 
 
 def sym_shoe_rack(T, W, D=0.35):
+    _record("shoe_rack", T, W=W, D=D)
     return [_rect(T, 0, 0, W, D, "furn"), _line(T, (0.03, D / 2), (W - 0.03, D / 2), "furn_d")]
 
 
 def sym_planter(x, y, r=0.2):
+    _record("planter", x=x, y=y, r=r)
     out = [("circle", (x, y), r, "furn"), ("circle", (x, y), r * 0.35, "furn_d")]
     for k in range(6):
         a = math.radians(30 + 60 * k)
@@ -242,7 +298,7 @@ def sym_planter(x, y, r=0.2):
     return out
 
 
-def sym_dining(x0, y0, tl, tw, seats, horizontal):
+def sym_dining(x0, y0, tl, tw, seats, horizontal, record=True):
     """Table centred in the footprint (x0, y0) with chairs on the long sides (plan frame)."""
     ch, gap = 0.42, 0.1
     fw, fd = (tl, tw + 2 * (ch + gap)) if horizontal else (tw + 2 * (ch + gap), tl)
@@ -250,6 +306,8 @@ def sym_dining(x0, y0, tl, tw, seats, horizontal):
         T = lambda u, v: (x0 + u, y0 + ch + gap + v)  # noqa: E731
     else:
         T = lambda u, v: (x0 + ch + gap + v, y0 + u)  # noqa: E731
+    if record:
+        _record("dining", T, W=tl, D=tw, seats=seats)
     out = [_rect(T, 0, 0, tl, tw, "furn"), _rect(T, 0.08, 0.08, tl - 0.08, tw - 0.08, "furn_d")]
     n = max(1, seats // 2)
     for i in range(n):
@@ -452,7 +510,7 @@ def _dining_set(sp, target=None, seats_options=(6, 4, 2)):
     for seats in seats_options:
         tl, tw = {6: (1.6, 0.9), 4: (1.2, 0.8), 2: (0.8, 0.75)}[seats]
         for horizontal in ((True, False) if long_x else (False, True)):
-            _, (fw, fd) = sym_dining(0, 0, tl, tw, seats, horizontal)
+            _, (fw, fd) = sym_dining(0, 0, tl, tw, seats, horizontal, record=False)
             r = sp.place_free(fw + 0.2, fd + 0.2, target)
             if r:
                 prims, _ = sym_dining(r[0] + 0.1, r[1] + 0.1, tl, tw, seats, horizontal)
@@ -525,6 +583,7 @@ def _furnish_kitchen(sp, room, P):
     sp.hard.append(sp.rect(side, a, b - a, 0.6))
     T = sp.to_plan(side, 0)
     out.append(_rect(T, a, 0, b, 0.6, "furn"))
+    _record("counter", T, a=a, b=b, D=0.6)
     counters = [(side, a, b, T)]
     # L-shaped return along the adjacent wall at a corner the run reaches
     s2 = None
@@ -546,6 +605,7 @@ def _furnish_kitchen(sp, room, P):
                 sp.hard.append(sp.rect(s2, a2, b2 - a2, 0.6))
                 T2 = sp.to_plan(s2, 0)
                 out.append(_rect(T2, a2, 0, b2, 0.6, "furn"))
+                _record("counter", T2, a=a2, b=b2, D=0.6)
                 counters.append((s2, a2, b2, T2))
             break
     # sink under the window (else a third along the main run); hob ≥ 0.75 m away, prefer the E wall
@@ -589,8 +649,10 @@ def _furnish_utility(sp, room, P):
 def _furnish_bath(sp, room, P):
     wc_pref = P({"N": 1, "S": 1})
     base = len(sp.hard)
+    mark = _rec_mark()
     for order in (("shower", "wc", "basin"), ("wc", "basin", "shower")):
         del sp.hard[base:]
+        _rec_reset(mark)
         out, ok, has_shower = [], True, False
         for item in order:
             if item == "shower":
@@ -618,6 +680,7 @@ def _furnish_bath(sp, room, P):
                 if spot:
                     out += sym_floor_trap((spot[0] + spot[2]) / 2, (spot[1] + spot[3]) / 2)
             return out
+    _rec_reset(mark)
     return []
 
 
@@ -846,6 +909,14 @@ def _schedule(plan, rooms_by_name, windows, footprint):
 def build_drafting(plan, label_size: Optional[Callable] = None) -> Drafting:
     """Compute the full drafting layer for a plan (plan coordinates)."""
     out = Drafting()
+    _REC.items = out.items
+    try:
+        return _build_drafting(plan, label_size, out)
+    finally:
+        _REC.items = None
+
+
+def _build_drafting(plan, label_size: Optional[Callable], out: Drafting) -> Drafting:
     rooms = list(plan.rooms)
     building = [r for r in rooms if getattr(r, "category", "") not in SITE_CATEGORIES and r.w > 0 and r.h > 0]
     fp = getattr(plan, "building_footprint", None)
@@ -912,6 +983,7 @@ def build_drafting(plan, label_size: Optional[Callable] = None) -> Drafting:
             if w["room"] == room.name:
                 sp.windows[w["side"]].append((w["a"], w["b"]))
 
+        mark = _rec_mark()
         try:
             if cat == "BEDROOM":
                 prims = _furnish_bedroom(sp, room, P, has_dress and room.role == "MASTER_BEDROOM")
@@ -939,6 +1011,9 @@ def build_drafting(plan, label_size: Optional[Callable] = None) -> Drafting:
                 prims = []
         except Exception:
             prims = []
+            _rec_reset(mark)
+        for it in out.items[mark:]:
+            it["room"] = room.name
         out.furniture.extend(prims)
 
         # wet-area anti-skid tiles (300 mm grid)

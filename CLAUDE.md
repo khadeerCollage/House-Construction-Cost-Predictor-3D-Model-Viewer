@@ -78,13 +78,19 @@ floorplan_generator/          LIVE+WIP  generative engine (pure Python, metres, 
   house_report.py  the 4 result tabs' analysis: room_schedule (inside sizes, ft-in, NBC 2016 Part 3 checks),
                   vastu_ledger (exact split of vastu_score), vastu_checks, vastu_plan_svg, health_card
   land_value.py    property worth (2026-10-14): land = official guideline value of the town (AP + Telangana,
-                  IGRS FY 2025-26 in data/land_rates_ap_ts.json) × street factor (main road 1.30 / inner 0.85 /
+                  data/land_rates_ap_ts.json: 61 districts / 250 towns, AP FY 2025-26, Telangana FY 2026-27,
+                  representative open-plot ₹/sq yd via Assetly mirror of IGRS) × street factor (main 1.30 / inner 0.85 /
                   outskirts 0.43 / village 0.25, calibrated on Chilakaluripet market rates) — else state
                   district-town rate × town size × street (indicative) — the owner's own rate always wins;
                   STATES: stamp/transfer/registration % (on max(market, guideline)), construction index, units, portal
   structure.py     RCC column grid (bays 2.4-4.5 m on wall centrelines); used by engineering report + drafting
 floorplan_renderer/           LIVE  plan -> files. SVG(drawsvg) DXF(ezdxf) PDF(reportlab) PNG(matplotlib)
   drafting.py      build_drafting(plan): wall poche, column grid, Vastu-aware furniture, tiles, levels, door/window tags + schedule (SVG only so far)
+                   + Drafting.items (2026-10-14): every furniture symbol recorded as an object {kind, room, o/u/v wall frame | x/y, W, D, …}
+                   (thread-local recorder; SVG output byte-identical) — the 3D view's furniture
+  walkthrough.py   build_scene(plan, latitude=None, state=None) → 3D scene JSON (2026-10-14): walls split round windows, lintels,
+                   door leaves (hinge/swing), stairs, slab/parapet/mumty/upper-floor shell, stilt, site (cars, bikes, trees, gates,
+                   road), 0.1 m walking grid (bitset), guided tour (road → gate → main door → every room, nearest next)
 model_folder/
   frontend.py     Streamlit UI (nav radio: Design vs Analyze)                      (1082)
   design_ui.py    `render_design_tab()` — the whole Design tab, direct imports     (675, WIP)
@@ -94,6 +100,10 @@ model_folder/
                   → Smart Re-Plan only (old Move/Add/Delete/Resize tabs + canvas drag/drop retired 2026-10-12)
   intent_studio.py the editing section: tap-a-room house map, action buttons, own-words box, ideas, options,
                   design & price history, commit/undo (2026-10-11/12)
+  walkthrough_ui.py '🚶 Walk through your house' — the LAST section of the Design tab (2026-10-14): declared component
+                  'house_walkthrough' (path=walkthrough3d); a wish made in 3D → intent_studio._add → Smart Re-Plan
+  walkthrough3d/  index.html + walk.js: the 3D house (Three.js r184 vendored in vendor/, MIT licence) — no network, no CDN;
+                  Streamlit component protocol v1 hand-written (componentReady / render / setFrameHeight / setComponentValue)
   app.py          Flask API (11 routes)                                            (943)
   cost_engine.py  CostEngine — canonical INR cost + BOQ                            (200)
   train_cost_model.py, house_cost_model.pkl(3-feat), house_cost_model_v2.pkl(8-feat, 24 MB, untracked), *.csv
@@ -175,6 +185,22 @@ Intent editing loop (2026-10-11, UI reworked 2026-10-12) — the Design tab's "�
     because a button inside a dialog reruns only the dialog); single-series cost line ≥ 3 versions).
   Option cards: label + why, wishes met/blocked_by, 💰 cost vs now with work-item reasons (CostEngine.layout_delta),
   rooms moved, Vastu/NBC warnings.
+
+3D walk-through (2026-10-14) — last section of the Design tab (model_folder/walkthrough_ui.py):
+  floorplan_renderer.walkthrough.build_scene(plan, state=land.state)  (cached in session 'walk3d_scene' by id(plan))
+  → JSON string + sha1 'sid' → component 'house_walkthrough' (iframe kept across reruns; rebuilds only when sid changes
+    and keeps the walker's spot, so an applied re-plan is walked from where you stood)
+  → walk.js: one merged mesh per surface role; themes 'Blueprint' (navy + cyan edges = the 2D blueprint palette) and
+    'Real colours'; modes Outside / All rooms (roof off) / Top / Walk inside (eye 1.6 / child 1.1 / wheelchair 1.2 m;
+    drag to look, tap the floor → A* on the grid, arrows / WASD / on-screen pad; doors and gates open as you near);
+    guided tour (captions + speechSynthesis with *local* voices only, en-IN preferred); sun by time / season /
+    latitude (STATE_LAT) with the rooms that get direct sun now; Vastu 3×3 overlay; minimap; door signs '→ Kitchen';
+    screenshot; full screen. '✏️ Change this room' → setComponentValue({id, action:'wish', kind, room key}) →
+    walkthrough_ui._wish_from_event (bigger 1.2 / smaller 0.85 / lock / opposite_intent) → intent_studio._add,
+    'intent_flash', st.rerun (event ids de-duplicated: a component keeps returning its last value).
+  Heights: FFL +0.45, storey = stair risers × riser (else 3.0), slab from engineering, door head 2.1, window sills from
+  the drawing's schedule (0.9, kitchen 1.05, ventilators 1.8), arch 2.4, compound 1.5, parapet 1.0; stilt parking →
+  house one storey up over the structural-grid columns. Upper floors are a translucent shell only (one floor is designed).
 ```
 Flask `/generate-plan` now passes the same profile/multi-storey/amenity args and returns `setbacks`, `engineering`,
 `vastu_breakdown`, `design_notes`. Typical solve time 0.3–1.5 s (4BHK + everything ≈ 4 s).
@@ -395,7 +421,10 @@ the original list below describes the pre-upgrade engine.
 18. **[V] Test side-effects:** see §11. Detector has zero tests.
 
 ## 11. Tests
-**2026-10-14:** + `tests/test_land_value.py` (5: Chilakaluripet market calibration, AP/TS district coverage, registration rules incl. TS rural + women's concession, own rate wins, location-driven building cost + money report).
+**2026-10-14 (later): 69/69 pass** + `tests/test_walkthrough.py` (8: scene for N/E/S/W, windows/doors really open with
+lintels above, heights from the engineering report incl. G+1 shell and stilt, 3D furniture = drawing furniture, every
+room walkable + toured from the road, sun inputs, 3D wishes → intents, viewer offline).
+**2026-10-14: 61/61 pass** + `tests/test_land_value.py` (5: Chilakaluripet market calibration, AP/TS district coverage, registration rules incl. TS rural + women's concession, own rate wins, location-driven building cost + money report).
 **2026-10-12: 56/56 pass** (+ `tests/test_house_report.py`, 6: ledger = score, inside sizes/NBC, Vastu checks + SVG, take-off thumb-rule bands, BOQ stages = construction cost, health card; + `tests/test_site_feasibility.py`, 6: 3-cent 2BHK = bikes not car on N/E/S/W, bigger plot
 unlocks the car, stilt parking for G+1, BHK options, garden % = real lawn, apply_fit). Before that 44/44 (`tests/test_intent_editing.py` now 12: + everyday-language parsing, edit pricing, parking
 on a 3-cent plot for N/E/S/W). **2026-10-11: 41/41 pass** (+ `tests/test_intent_editing.py`, 9 tests, ~25 s: parser, every intent type, refusals with
@@ -439,6 +468,18 @@ respect Windows paths (`os.path.join`), CRLF repo.
   the top metrics = land + registration + house = spend, and worth = land (market) + construction cost
   (land-and-building method); Cost tab starts with `_property_section` (breakdown, street comparison, portal).
   Calibration check: Chilakaluripet inner ₹6–8 L/cent, main road ₹10–11 L, outskirts ₹3–4 L (tests/test_land_value).
+- **3D walk-through (2026-10-14):** the scene is *measured from the plan* — never invent geometry in walk.js.
+  Window sill/head = `walkthrough._window_heights` (mirror of `drafting._schedule`; change both together); door
+  leaves use `_common.door_span` conventions (closed/open angles in the scene); furniture comes only from
+  `Drafting.items` — a new `sym_*` symbol needs a `_record(...)` call in drafting.py and a model in walk.js
+  `furniture()` (unknown kinds fall back to a 0.6 m box) and, if it should block walking, `_furniture_rect`.
+  A new site amenity needs a branch in walk.js `buildSite` + blocking in `build_scene`'s grid. Walking grid: 0.1 m,
+  walls grown by the 0.2 m walker radius, furniture by 0.05 (tall 0.1); every room must stay reachable and toured
+  (tests/test_walkthrough). The viewer must stay offline: only `./vendor/…` imports, no URLs (test_08). Debug
+  handle in the browser console: `window.__walk` (`pick(x, y)` names the surface under a pixel). Standalone preview:
+  write `build_scene(...)` JSON to `model_folder/temp/` and open
+  `walkthrough3d/index.html?scene=/model_folder/temp/<file>.json` from a static server at the repo root
+  (`.claude/launch.json` → walk3d-preview).
 - **Result tabs (2026-10-12):** `st.tabs(..., key="report_tab", on_change="rerun")` — stateful, only the open tab
   (`tN.open`) is computed. Everything is measured from the plan: `house_report.vastu_ledger` must keep reproducing
   `plan.vastu_score` (same terms as `layout_engine.audit_vastu`: w·(s+50)/60 per placement + door pada, −8 per taboo /
