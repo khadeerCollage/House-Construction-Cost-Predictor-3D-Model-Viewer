@@ -47,6 +47,7 @@ from typing import Dict, List, Optional, Tuple
 GALLERY = 1.5            # open gallery along the front (2 flats / floor)
 CORRIDOR4 = 1.8          # central corridor that is also the lift lobby (4 flats / floor)
 LOBBY_MIN = 1.5          # lift / stair lobby width (1 flat / floor)
+FLOOR_LANDING = 1.25     # an upright stair's floor landing inside its room (narrow plates, 1 flat / floor)
 UNIT_MIN_W = {1: 5.6, 2: 6.6, 3: 7.6, 4: 8.4}
 UNIT_MIN_D = 6.8
 OPPOSITE = {"N": "S", "S": "N", "E": "W", "W": "E"}
@@ -168,20 +169,30 @@ def floor_layout(n: int, footprint: Rect, facing: str, vastu: bool, sw: float, s
             door_exclusion=[(round(a, 3), round(b, 3)) for a, b in excl], notes=[note])
 
     if n == 1:
-        # front band: [stair | lobby | lift] (or mirrored) — both open onto the lobby, the flat's door too
-        cd = _snap(max(sl, ld))
-        lobby_w = _snap(fw - sw - lw)
-        if lobby_w < LOBBY_MIN or fd - cd < UNIT_MIN_D - 0.6:
+        # front band: [stair | lobby | lift] (or mirrored) — both open onto the lobby, the flat's door too.
+        # The dog-leg runs ALONG the front, so the end where a flight starts and the one below arrives faces
+        # the lobby: on every floor you step off the stair straight onto the lobby (the lobby is the floor
+        # landing). A plate too narrow for that keeps the stair upright with a floor landing at its rear
+        # end inside the stair room, open sideways to the lobby.
+        for rotated in (True, False):
+            run = _snap(sl if rotated else sw)                  # stair room along the front
+            sd = _snap(sw if rotated else sl + FLOOR_LANDING)   # and its depth
+            cd = _snap(max(sd, ld))
+            lobby_w = _snap(fw - run - lw)
+            if lobby_w >= LOBBY_MIN and fd - cd >= UNIT_MIN_D - 0.6:
+                break
+        else:
             return None
         by = _snap(fy + fd - cd)
         best = None
         for left in (True, False):
-            sx = fx if left else _snap(fx + fw - sw)
-            stair = (sx, by, sw, cd)
+            sx = fx if left else _snap(fx + fw - run)
+            stair = (sx, by, run, cd)
             sc = stair_score(stair)
             if best is None or sc > best[0] + 1e-6:
                 best = (sc, left, stair)
         _, left, stair = best
+        sw = run
         lobby_x = _snap(fx + sw) if left else _snap(fx + lw)
         lobby = (lobby_x, by, lobby_w, cd)
         common = [("Lift & Stair Lobby", "CORRIDOR", lobby, COMMON_COLORS["lobby"])]
@@ -285,9 +296,9 @@ def _plate_needs(n: int, program, nb: int, sw, sl, lw, ld, mode: str = "apartmen
         width = max(mw, sl + lw + LOBBY_MIN, math.sqrt(unit_t * 1.15))     # the band runs the full width
         core = width * D
         return unit_t + core, unit_min + core, max(mw, sl + lw + LOBBY_MIN), md + D
-    if n == 1:
-        core = (sw + lw + LOBBY_MIN) * max(sl, ld)
-        return unit_t + core, unit_min + core, max(mw, sw + lw + LOBBY_MIN), md + max(sl, ld)
+    if n == 1:                       # the stair turned along the front (floor_layout)
+        core = (sl + lw + LOBBY_MIN) * max(sw, ld)
+        return unit_t + core, unit_min + core, max(mw, sl + lw + LOBBY_MIN), md + max(sw, ld)
     if n == 2:
         cw, cd = sw + lw, max(sl, ld)
         width = 2 * mw + cw
@@ -708,7 +719,7 @@ def compose(eng, lay: FloorLayout, site, planner, unit, unit_turned, stair, lift
             "kind": mode, "flats_per_floor": flats, "flats_total": flats * eng.num_floors, "flat_bhk": unit.bhk_config,
             "flat_carpet_m2": round(unit.total_carpet_area, 2),
             "labels": [s.label for s in lay.slots], "turned": [s.turned for s in lay.slots],
-            "slots": [list(s.rect) for s in lay.slots], "lobby": lay.lobby,
+            "slots": [list(s.rect) for s in lay.slots], "lobby": lay.lobby, "stair_open": lay.stair_side,
             "options": {str(k): v for k, v in report.items()}}
     plan.engineering = engineering
     unit_notes = [n for n in unit.design_notes if not n.startswith(("Setbacks:", "Single storey", "Layout:",

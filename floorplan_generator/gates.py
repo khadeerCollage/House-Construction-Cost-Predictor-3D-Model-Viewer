@@ -336,6 +336,21 @@ def stilt_bays(footprint, shafts, no_park, columns, n: int, car_key: str = "suv"
     return {"bays": bays, "mouth": mouth, "wanted": n, "fitted": len(bays), "front": front}
 
 
+HALLS = ("Stair Lobby", "Entrance Foyer", "Upper Lobby", "Lift & Stair Lobby", "Common Gallery", "Common Corridor")
+
+
+def front_gap(footprint, shafts, columns) -> float:
+    """The widest clear opening at the stilt's front edge between columns and shafts (m)."""
+    fx, fy, fw, fd = footprint
+    front = fy + fd
+    obs = sorted((o[0], o[2]) for o in list(shafts) + list(columns) if o[1] < front + 0.3 and o[3] > front - 0.3)
+    best, pos = 0.0, fx - 0.115
+    for a, b in obs:
+        best = max(best, a - pos)
+        pos = max(pos, b)
+    return round(max(best, fx + fw + 0.115 - pos), 2)
+
+
 def stilt_context(rooms, footprint, is_site) -> Tuple[List, List, List]:
     """(shafts, no-park lobbies, columns) of the floors above, for stilt_bays."""
     from floorplan_generator.structure import structural_grid
@@ -345,7 +360,7 @@ def stilt_context(rooms, footprint, is_site) -> Tuple[List, List, List]:
         rect = (r.x, r.y, r.x + r.w, r.y + r.h)
         if r.category in ("STAIRS", "LIFT") or "Duct" in r.name:
             shafts.append(rect)
-        elif getattr(r, "role", "") == "COMMON" or r.category == "FOYER" or "Lobby" in r.name or "Foyer" in r.name:
+        elif getattr(r, "role", "") == "COMMON" or r.name in HALLS:     # the entrance lobby / hall (not a flat's foyer)
             lobby.append(rect)
     cols = [tuple(c) for c in structural_grid(building, footprint).columns]
     return shafts, lobby, cols
@@ -360,7 +375,14 @@ def stilt_plan(rooms, footprint, components: Dict, quality: str, building_type: 
     info = stilt_bays(footprint, shafts, lobby, cols, n, car)
     info["car"] = car
     tandem = sum(1 for b in info["bays"] if b[4])
-    if info["fitted"] < n:
+    car_d = CARS[car]
+    info["front_gap"] = front_gap(footprint, shafts, cols)
+    info["needs"] = round(car_d["W"] + 0.4, 2)
+    if info["fitted"] == 0:
+        info["note"] = (f"No car fits under the building on this plan: the widest opening between the columns at the front "
+                        f"is {info['front_gap']:.2f} m and a car needs about {info['needs']:.2f} m to drive in (a 2.5 m bay). "
+                        "Two-wheelers can still park on the stilt floor.")
+    elif info["fitted"] < n:
         info["note"] = (f"Only {info['fitted']} of the {n} cars fit under the building: a car must drive straight in "
                         "clear of the stair, the lift, the entrance lobby and the columns.")
     elif tandem:

@@ -431,7 +431,7 @@ function roomAt(x, y, p = planOf(walker.level)) {
   return null;
 }
 const ORD = (n) => n + (["th", "st", "nd", "rd"][(n % 100 > 10 && n % 100 < 14) ? 0 : Math.min(n % 10, 4) % 4] || "th");
-const homeName = (L) => (L - R0() <= 0 ? "Ground-floor home" : `${ORD(L - R0() + (R0() ? 1 : 0))}-floor home`);
+const homeName = (L) => (L <= 0 ? "Ground-floor home" : `${ORD(L)}-floor home`);
 const houseKind = () => (S && S.apartment && S.apartment.kind === "house");
 function inFootprint(x, y, pad = 0) {
   const [fx, fy, fw, fd] = S.footprint;
@@ -668,6 +668,7 @@ function build(data) {
   setFurniture(state.furn);
   applyLevelView();
   $("startMeta").textContent = `${S.meta.title} · ${S.meta.cents} cents · carpet ${S.meta.carpet} m² · Vastu ${S.meta.vastu}/100`;
+  drawLangs();
   $("msg").style.display = "none";
   poke(1500);
 }
@@ -1563,27 +1564,166 @@ function stepWalker(fwd, side) {
 }
 
 // ───────────────────────────── guided tour
-const tour = { on: false, i: -1, phase: "", t: 0, paused: false, base: 0, spoken: true, capAt: 0 };
+const tour = { on: false, i: -1, phase: "", t: 0, paused: false, base: 0, spoken: true, capAt: 0, capWords: "", capMax: 8 };
+// The guide speaks English (Indian), Telugu or Hindi. Its words come with every stop (st.talk[lang], written by
+// narration.py); each sentence has a key k, and a neural voice prepared by the app has spoken it into
+// voice/<voice>/<k>.wav. A sentence without a clip falls back to the browser's own (offline) voice for that
+// language, else the caption is read in silence.
+const LANGS = ["en", "te", "hi"];
+const LANG_NAME = { en: "English", te: "తెలుగు", hi: "हिन्दी" };
+const UI = {
+  walking: { en: "Walking to: ", te: "వెళ్తున్నాం: ", hi: "चल रहे हैं: " },
+  lift: { en: "🛗 Calling the lift — it takes you up, then the doors open.", te: "🛗 లిఫ్ట్ వస్తోంది — పైకి తీసుకెళ్తది, తర్వాత డోర్లు తెరుచుకుంటాయి.",
+    hi: "🛗 लिफ़्ट आ रही है — ऊपर ले जाएगी, फिर दरवाज़े खुलेंगे।" },
+  ready: { en: "voice ready", te: "వాయిస్ రెడీ", hi: "आवाज़ तैयार" },
+  making: { en: "preparing the voice", te: "వాయిస్ తయారవుతోంది", hi: "आवाज़ तैयार हो रही है" },
+  browser: { en: "the browser's voice", te: "బ్రౌజర్ వాయిస్", hi: "ब्राउज़र की आवाज़" },
+  silent: { en: "words on screen (no voice for this language here)", te: "స్క్రీన్ మీద మాటలు మాత్రమే (ఈ భాషకి వాయిస్ లేదు)",
+    hi: "सिर्फ़ स्क्रीन पर शब्द (इस भाषा की आवाज़ यहाँ नहीं है)" },
+};
+let VOICES = {};                                         // from the app: {lang: {url, label, neural, have, total, running}}
+let argLang = null;
+state.lang = "en";
+const browserVoice = {};
 let voice = null;
 function pickVoice() {
   if (!("speechSynthesis" in window)) return;
   const vs = speechSynthesis.getVoices().filter((v) => v.localService !== false);   // offline voices only
-  voice = vs.find((v) => /en[-_]IN/i.test(v.lang)) || vs.find((v) => /^en/i.test(v.lang)) || null;
+  browserVoice.en = vs.find((v) => /en[-_]IN/i.test(v.lang)) || vs.find((v) => /^en/i.test(v.lang)) || null;
+  browserVoice.te = vs.find((v) => /^te/i.test(v.lang)) || null;
+  browserVoice.hi = vs.find((v) => /^hi/i.test(v.lang)) || null;
+  voice = browserVoice.en;
 }
 if ("speechSynthesis" in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
-function speak(text) {
-  tour.spoken = true;
-  if (!state.voice || !voice || !("speechSynthesis" in window)) return;
-  try {
-    speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text); u.voice = voice; u.lang = voice.lang; u.rate = 0.95;
-    tour.spoken = false; u.onend = () => { tour.spoken = true; }; u.onerror = () => { tour.spoken = true; };
-    speechSynthesis.speak(u);
-  } catch (e) { tour.spoken = true; }
+const say = { list: [], i: 0, audio: null, token: 0 };
+function neuralOn() { const v = VOICES[state.lang]; return !!(v && v.neural); }
+function stopSpeech() {
+  say.token++;
+  if (say.audio) { try { say.audio.pause(); } catch (e) { /* gone */ } say.audio = null; }
+  if ("speechSynthesis" in window) speechSynthesis.cancel();
 }
+function pauseSpeech(p) {
+  if (say.audio) { if (p) say.audio.pause(); else say.audio.play().catch(() => {}); }
+  if ("speechSynthesis" in window) { if (p) speechSynthesis.pause(); else speechSynthesis.resume(); }
+}
+function browserSay(text, tok, done) {
+  const bv = browserVoice[state.lang];
+  if (!bv || !("speechSynthesis" in window)) {          // nobody here speaks this language: the time to read it
+    setTimeout(done, Math.max(1200, text.split(/\s+/).length * 420));
+    return;
+  }
+  try {
+    const u = new SpeechSynthesisUtterance(text); u.voice = bv; u.lang = bv.lang; u.rate = 0.95;
+    u.onend = done; u.onerror = done;
+    speechSynthesis.speak(u);
+  } catch (e) { done(); }
+}
+function playNext(tok) {
+  if (tok !== say.token) return;
+  if (say.i >= say.list.length) { tour.spoken = true; return; }
+  const line = say.list[say.i++];
+  let finished = false;
+  const done = () => { if (finished) return; finished = true; say.audio = null; if (tok === say.token) setTimeout(() => playNext(tok), 140); };
+  const v = VOICES[state.lang];
+  if (v && v.neural && line.k) {
+    const a = new Audio(`${v.url}/${line.k}.wav`);
+    say.audio = a;
+    a.onended = done;
+    a.onerror = () => { if (tok === say.token && !finished) { say.audio = null; browserSay(line.t, tok, done); } };
+    a.play().catch(() => { if (tok === say.token && !finished && say.audio === a) { say.audio = null; browserSay(line.t, tok, done); } });
+    return;
+  }
+  browserSay(line.t, tok, done);
+}
+function speakLines(lines, text) {
+  stopSpeech();
+  tour.spoken = true;
+  if (!state.voice) return;
+  say.list = lines && lines.length ? lines : (text ? [{ k: "", t: text }] : []);
+  say.i = 0;
+  if (!say.list.length) return;
+  tour.spoken = false;
+  playNext(say.token);
+}
+// one line in the browser's voice, outside the guide's words (the lift calling out its floor)
+function speak(text, lang = "en") {
+  const bv = browserVoice[lang] || browserVoice.en;
+  if (!bv || !("speechSynthesis" in window)) return;
+  try { const u = new SpeechSynthesisUtterance(text); u.voice = bv; u.lang = bv.lang; u.rate = 0.95; speechSynthesis.speak(u); }
+  catch (e) { /* no voice */ }
+}
+// a room's words when the owner asks (🔊 Tell me): the guide's stop for it, else the same room of the toured flat
+function roomWords(name) {
+  const rooms = (S && S.tour || []).filter((s) => s.kind === "room" && s.talk);
+  const tail = (n) => String(n || "").split(" · ").pop();
+  const st = rooms.find((s) => s.room === name) || rooms.find((s) => tail(s.room) === tail(name));
+  return st ? words(st) : null;
+}
+// the stop's words in the chosen language (a stop after the floor choice has one version per floor / lift-or-stairs)
+function words(st) {
+  const tk = st.talk && (st.talk[state.lang] || st.talk.en);
+  if (!tk) return { title: st.title, say: st.say, speech: null };
+  let w = tk;
+  if (tk.by) {
+    const c = tour.choice || {};
+    w = tk.by[`${c.L}|${c.via}`] || tk.by[`${c.L}`] || Object.values(tk.by)[0] || tk;
+  }
+  return { title: w.title || tk.title || st.title, say: w.say || st.say, speech: w.speech || null };
+}
+function setLang(l, fromApp = false) {
+  if (!LANGS.includes(l)) return;
+  const changed = state.lang !== l;
+  state.lang = l;
+  drawLangs();
+  if (!fromApp && changed) ST.value({ id: `lang-${Date.now()}`, action: "lang", lang: l });   // the app prepares that voice
+  if (changed && tour.on && tour.cur && ["wait", "pan", "end", "choice"].includes(tour.phase)) {
+    caption(tour.cur);                                   // say this stop again, in the new language
+    if (tour.phase === "choice") showChoice(tour.cur);
+  }
+}
+function drawLangs() {
+  for (const id of ["startLang", "capLang"]) {
+    const box = $(id); if (!box) continue;
+    box.innerHTML = "";
+    for (const l of LANGS) {
+      const b = document.createElement("button");
+      b.className = "b" + (state.lang === l ? " on" : ""); b.textContent = LANG_NAME[l];
+      b.onclick = () => setLang(l);
+      box.appendChild(b);
+    }
+  }
+  voiceLine();
+}
+function voiceLine() {
+  const el = $("startVoice"); if (!el) return;
+  const v = VOICES[state.lang];
+  if (!v || !v.neural) {                                // the browser speaks, or nobody does: say which
+    el.textContent = browserVoice[state.lang] ? `🗣️ ${UI.browser[state.lang]}` : `📝 ${UI.silent[state.lang]}`;
+    return;
+  }
+  const n = v.have || 0, tot = v.total || 0;
+  el.textContent = n >= tot && tot ? `🎙️ ${v.label} · ${UI.ready[state.lang]}` : `🎙️ ${v.label} · ${UI.making[state.lang]} ${n} / ${tot}`;
+}
+async function pollVoice() {                             // while the app speaks the sentences, count them here
+  const v = VOICES[state.lang];
+  if (!v || !v.neural || !v.running) return;
+  try {
+    const r = await fetch(`${v.url}/_status.json?t=${Date.now()}`, { cache: "no-store" });
+    if (r.ok) {
+      const j = await r.json();
+      if (typeof j.done === "number") { v.have = Math.max(v.have || 0, j.done); v.total = j.total || v.total; }
+      if (j.state === "done" || j.state === "error") v.running = false;
+    }
+  } catch (e) { /* not yet */ }
+  voiceLine();
+}
+setInterval(() => { if (!state.started || tour.on) pollVoice(); }, 5000);
 function tourStart() {
   if (!S || !S.tour || !S.tour.length) { toast("No guided walk for this plan."); return; }
   hideStart(); tour.on = true; tour.paused = false; tour.i = -1;
+  const ch = S.tour.find((s) => s.kind === "choice");
+  tour.choice = ch ? { L: ch.default.L, via: ch.default.via } : null;
+  showChoice(null);
   $("cap").style.display = "block"; $("tPause").textContent = "⏸ Pause";
   const st0 = S.tour[0];
   walker.level = S.tour_level || 0;
@@ -1591,40 +1731,101 @@ function tourStart() {
   setTimeout(tourNext, 1150);
 }
 function yawTo(from, to) { return to ? Math.atan2(to[1] - from[1], to[0] - from[0]) : walker.yaw; }
+// a building of floors: stops after the choice say 'chosen' for the floor; titles and words name it
+function resolveStop(raw) {
+  const st = Object.assign({}, raw), c = tour.choice;
+  if (c) {
+    if (st.level === "chosen") st.level = c.L;
+    const opt = (S.tour.find((s) => s.kind === "choice") || { options: [] }).options.find((o) => o.L === c.L);
+    const fill = (t) => String(t || "").replace(/\{floor\}/g, opt ? opt.label : levelLabel(c.L)).replace(/\{home\}/g, opt ? opt.home : "the home");
+    if (st.kind === "ride" && st.say_by) st.say = st.say_by[c.via] || st.say;
+    st.title = fill(st.title); st.say = fill(st.say);
+  }
+  return st;
+}
+function showChoice(st) {
+  const box = $("capC"); box.innerHTML = ""; box.style.display = st ? "flex" : "none";
+  if (!st) return;
+  const vias = st.via || ["stairs"];
+  const tk = (st.talk && (st.talk[state.lang] || st.talk.en)) || {};
+  const row1 = document.createElement("div"); row1.className = "crow";
+  for (const v of vias) {
+    const b = document.createElement("button"); b.className = "b" + (tour.choice.via === v ? " on" : "");
+    b.textContent = (tk.via && tk.via[v]) || (v === "lift" ? "🛗 By the lift" : "🪜 By the stairs");
+    b.onclick = () => { tour.choice.via = v; showChoice(st); };
+    row1.appendChild(b);
+  }
+  const row2 = document.createElement("div"); row2.className = "crow";
+  for (const o of st.options) {
+    const b = document.createElement("button"); b.className = "b go" + (tour.choice.L === o.L ? " on" : "");
+    const lo = (tk.options || []).find((x) => x.L === o.L);
+    b.textContent = lo ? lo.label : `${o.label} · ${o.home.replace(/^the /, "")}`;
+    b.onclick = () => { tour.choice.L = o.L; showChoice(null); tourNext(); };
+    row2.appendChild(b);
+  }
+  box.appendChild(row1); box.appendChild(row2);
+}
 function tourNext() {
   if (!tour.on) return;
+  if (tour.phase === "choice") showChoice(null);
   tour.i++;
   if (tour.i >= S.tour.length) return tourEnd(true);
-  const st = S.tour[tour.i];
+  const st = resolveStop(S.tour[tour.i]);
+  tour.cur = st;
   $("capN").textContent = `${tour.i + 1} / ${S.tour.length}`;
   if (st.kind === "end") { caption(st); tour.phase = "end"; tour.t = 0; return; }
+  if (st.kind === "choice") { caption(st); showChoice(st); tour.phase = "choice"; tour.t = 0; return; }
+  if (st.kind === "ride" && st.level !== walker.level && tour.choice && tour.choice.via === "lift" && lift.ok &&
+      stopOf(st.level) >= 0 && stopOf(walker.level) >= 0 && liftTrip(st.level, true)) {
+    tour.phase = "ride"; tour.t = 0;
+    $("capT").textContent = words(st).title; $("capS").textContent = UI.lift[state.lang];
+    return;
+  }
   if (st.level !== undefined && st.target) {           // upstairs: the walker plans the climb flight by flight
     walkTo(st.target[0], st.target[1], st.level);
     tour.phase = walker.path.length ? "walk" : "turn"; tour.t = 0; tour.from = walker.yaw; tour.to = walker.yaw;
-    $("capT").textContent = `Walking to: ${st.title}`; $("capS").textContent = "";
+    $("capT").textContent = UI.walking[state.lang] + words(st).title; $("capS").textContent = "";
     return;
   }
   if (st.kind === "start" || !st.path.length) { caption(st); tour.phase = "wait"; tour.t = 0; return; }
   walker.path = st.path.slice(1); tour.phase = "walk"; tour.t = 0;
-  $("capT").textContent = `Walking to: ${st.title}`; $("capS").textContent = "";
+  $("capT").textContent = UI.walking[state.lang] + words(st).title; $("capS").textContent = "";
 }
-function caption(st) { $("capT").textContent = st.title; $("capS").textContent = st.say; speak(st.say); tour.capAt = performance.now(); }
+function caption(st) {
+  const w = words(st);
+  $("capT").textContent = w.title; $("capS").textContent = w.say;
+  tour.capWords = w.say || ""; tour.capAt = performance.now();
+  const n = (w.say || "").split(/\s+/).length / 3.0;
+  tour.capMax = state.voice && neuralOn() ? Math.max(30, n * 2.6 + 20) : Math.max(3.5, n) + 4;
+  speakLines(w.speech, w.say);
+}
 function tourInterrupt() { if (tour.on) tourEnd(false); }
 function tourEnd(finished) {
-  tour.on = false; tour.phase = ""; walker.path = [];
-  if ("speechSynthesis" in window) speechSynthesis.cancel();
+  tour.on = false; tour.phase = ""; walker.path = []; showChoice(null);
+  if (lift.auto && lift.auto.tour) lift.auto = null;
+  stopSpeech();
   $("cap").style.display = "none";
   if (finished) setMode("dollhouse");
 }
 function tourUpdate(dt) {
   if (!tour.on || tour.paused) return;
-  const st = S.tour[tour.i]; if (!st) return;
+  const st = tour.cur; if (!st) return;
   tour.t += dt;
-  const minRead = Math.max(3.5, (st.say || "").split(" ").length / 3.2);
-  // speech 'end' events are unreliable in some browsers: never wait longer than the reading time + 4 s
+  if (tour.phase === "ride") {                       // out of the lift on the chosen floor: walk into the lobby
+    if (!lift.auto && !lift.rider && !lift.anim && walker.level === st.level) {
+      walkTo(st.target[0], st.target[1], st.level);
+      tour.phase = walker.path.length ? "walk" : "turn"; tour.t = 0; tour.from = walker.yaw; tour.to = walker.yaw;
+    } else if (!lift.auto && !lift.rider && !lift.anim && tour.t > 4) {   // the lift could not take us: the stairs
+      walkTo(st.target[0], st.target[1], st.level); tour.phase = "walk"; tour.t = 0;
+    }
+    return;
+  }
+  if (tour.phase === "choice") return;               // waiting for the owner (⏭ Next takes the suggestion)
+  const minRead = Math.max(3.5, (tour.capWords || "").split(" ").length / 3.2);
+  // browser speech 'end' events are unreliable in some browsers: never wait longer than tour.capMax
   const readDone = () => {
     const el = (performance.now() - tour.capAt) / 1000;
-    return el > minRead + 4 || (el > (state.voice && voice ? 2.0 : minRead) && tour.spoken);
+    return el > tour.capMax || (el > (state.voice ? 2.0 : minRead) && tour.spoken);
   };
   if (tour.phase === "walk" && !walker.path.length) {
     tour.phase = "turn"; tour.t = 0; tour.from = walker.yaw;
@@ -1647,13 +1848,18 @@ function tourUpdate(dt) {
 $("btnTour").addEventListener("click", tourStart);
 $("tPause").addEventListener("click", () => {
   tour.paused = !tour.paused; $("tPause").textContent = tour.paused ? "▶ Resume" : "⏸ Pause";
-  if ("speechSynthesis" in window) { if (tour.paused) speechSynthesis.pause(); else speechSynthesis.resume(); }
+  if (tour.paused) tour.pausedAt = performance.now(); else if (tour.pausedAt) tour.capAt += performance.now() - tour.pausedAt;
+  pauseSpeech(tour.paused);
 });
-$("tNext").addEventListener("click", () => { if (!tour.on) return; if ("speechSynthesis" in window) speechSynthesis.cancel(); tour.spoken = true; walker.path = []; tourNext(); });
+$("tNext").addEventListener("click", () => {
+  if (!tour.on) return; stopSpeech(); tour.spoken = true;
+  if (tour.phase === "ride") return;                 // let the lift finish the ride
+  walker.path = []; tourNext();
+});
 $("tStop").addEventListener("click", () => tourEnd(false));
 $("tVoice").addEventListener("click", () => {
   state.voice = !state.voice; $("tVoice").textContent = state.voice ? "🔊 Voice on" : "🔇 Voice off";
-  if (!state.voice && "speechSynthesis" in window) { speechSynthesis.cancel(); tour.spoken = true; }
+  if (!state.voice) { stopSpeech(); tour.spoken = true; }
 });
 
 // ───────────────────────────── sun & sky
@@ -1816,8 +2022,13 @@ function updateHud() {
   }
   $("hud").innerHTML = html + liftHtml;
   const w = $("hudWish"); if (w) w.onclick = () => openWish(r);
-  const say = $("hudSay");
-  if (say) say.onclick = () => { const old = state.voice; state.voice = true; speak(r.say); state.voice = old; toast(r.say, 7000); };
+  const sayB = $("hudSay");
+  if (sayB) sayB.onclick = () => {
+    const w = roomWords(r.name);
+    const old = state.voice; state.voice = true;
+    speakLines(w ? w.speech : null, w ? w.say : r.say);
+    state.voice = old; toast(w ? w.say : r.say, 9000);
+  };
   for (const b of $("hud").querySelectorAll("[data-lift]")) b.onclick = () => { if (!liftTrip(+b.dataset.lift)) toast("Can't reach the lift from here."); };
   const lc = $("hud").querySelector("[data-lcall]"); if (lc) lc.onclick = () => { liftCall(stopOf(walker.level), "hall"); hudRoom = undefined; };
   const li = $("hud").querySelector("[data-lin]"); if (li) li.onclick = () => boardLift();
@@ -2316,7 +2527,7 @@ function boardLift() {
   const k = lift.k, D = S.lift.door;
   lift.anim = { kind: "in", t: 0, from: [walker.x, walker.y], to: liftPt(k.cu, k.vCar + k.cd * 0.55), yaw0: walker.yaw,
     yaw1: Math.atan2(-D.n[1], -D.n[0]) };
-  lift.hold = 30; walker.path = []; tourInterrupt(); hudRoom = undefined;
+  lift.hold = 30; walker.path = []; if (!(lift.auto && lift.auto.tour)) tourInterrupt(); hudRoom = undefined;
 }
 function stepOut() {
   if (!lift.rider || lift.anim) return;
@@ -2342,11 +2553,11 @@ function riderUpdate(dt) {
   camera.position.set(walker.x, walker.h, -walker.y);
   camera.lookAt(camera.position.clone().add(lookDir()));
 }
-function liftTrip(L) {                    // the floor bar / HUD in walk mode: walk to the lift, call, ride, step out
+function liftTrip(L, forTour = false) {   // the floor bar / HUD / tour: walk to the lift, call, ride, step out
   const to = stopOf(L), from = stopOf(walker.level);
   if (to < 0 || from < 0) return false;
-  tourInterrupt();
-  lift.auto = { to, stage: "walk" };
+  if (!forTour) tourInterrupt();
+  lift.auto = { to, stage: "walk", tour: forTour };
   const f = liftFront(), c = nearestFree(f[0], f[1], 1.2);
   if (c && Math.hypot(walker.x - f[0], walker.y - f[1]) > 0.6) {
     const p = centreOf(c), path = astar(walker.x, walker.y, p[0], p[1], walker.level);
@@ -2644,6 +2855,8 @@ window.addEventListener("message", (e) => {
   const a = d.args || {};
   canWish = !!a.can_wish;
   if (a.height) ST.height(a.height);
+  if (a.voices) { VOICES = a.voices; voiceLine(); }
+  if (a.lang && a.lang !== argLang) { argLang = a.lang; setLang(a.lang, true); }
   if (a.sid && a.sid !== SID && a.scene) {
     try { load(typeof a.scene === "string" ? JSON.parse(a.scene) : a.scene, a.sid); }
     catch (err) { $("msg").style.display = "flex"; $("msg").textContent = "Could not build the 3D house: " + err.message; console.error(err); }
@@ -2658,7 +2871,7 @@ resize();
 requestAnimationFrame(frame);
 // debugging handle (read-only use from the browser console)
 window.__walk = { scene, camera, renderer, registry, state, walker, get S() { return S; }, walkTo, stairAt, groundAt,
-  lift, liftCall, boardLift, stepOut, setXray, liftTrip, goLevel, orbit, drive, startDrive,
+  lift, liftCall, boardLift, stepOut, setXray, liftTrip, goLevel, orbit, drive, startDrive, setLang, words, say, tour,
   tick(n = 1, dt = 1 / 30) { for (let k = 0; k < n; k++) update(dt); renderer.render(scene, camera); updateLabels(canvas.clientWidth, canvas.clientHeight); drawMinimap(); },
   pick(x, y) {
     const r = canvas.getBoundingClientRect(); ray.setFromCamera(new THREE.Vector2((x / r.width) * 2 - 1, -(y / r.height) * 2 + 1), camera);

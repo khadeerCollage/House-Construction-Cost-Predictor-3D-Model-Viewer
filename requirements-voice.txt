@@ -1,0 +1,4 @@
+# Voices for the 3D guided walk — a SEPARATE small environment OUTSIDE the project (~/.vit_voice/venv,
+# ≈ 190 MB), made by setup_voice.bat. Piper (rhasspy, MIT) + the IIT Madras IndicTTS voices.
+piper-tts>=1.3
+huggingface_hub>=0.26

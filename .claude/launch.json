@@ -4,32 +4,79 @@
     {
       "name": "flask-backend",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["model_folder/app.py"],
+      "runtimeArgs": [
+        "model_folder/app.py"
+      ],
       "port": 5000
     },
     {
       "name": "streamlit-frontend",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "streamlit", "run", "model_folder/frontend.py", "--server.port", "8501", "--server.headless", "true"],
+      "runtimeArgs": [
+        "-m",
+        "streamlit",
+        "run",
+        "model_folder/frontend.py",
+        "--server.port",
+        "8501",
+        "--server.headless",
+        "true"
+      ],
       "port": 8501
     },
     {
       "name": "drawing-preview",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "http.server", "8765", "--directory", "C:/Users/USER/AppData/Local/Temp/claude/C--Users-USER-Documents-vit-project/d74a84e3-e481-4cc7-86c9-0c2e29eed1a0/scratchpad"],
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8765",
+        "--directory",
+        "C:/Users/USER/AppData/Local/Temp/claude/C--Users-USER-Documents-vit-project/d74a84e3-e481-4cc7-86c9-0c2e29eed1a0/scratchpad"
+      ],
       "port": 8765
     },
     {
       "name": "walk3d-preview",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "http.server", "8766", "--directory", "C:/Users/USER/Documents/vit_project"],
+      "runtimeArgs": [
+        "-m",
+        "http.server",
+        "8766",
+        "--directory",
+        "C:/Users/USER/Documents/vit_project"
+      ],
       "port": 8766
     },
     {
       "name": "streamlit-verify",
       "runtimeExecutable": "python",
-      "runtimeArgs": ["-m", "streamlit", "run", "model_folder/frontend.py", "--server.port", "8502", "--server.headless", "true"],
+      "runtimeArgs": [
+        "-m",
+        "streamlit",
+        "run",
+        "model_folder/frontend.py",
+        "--server.port",
+        "8502",
+        "--server.headless",
+        "true"
+      ],
       "port": 8502
+    },
+    {
+      "name": "voice-verify",
+      "runtimeExecutable": "python",
+      "runtimeArgs": [
+        "-m",
+        "streamlit",
+        "run",
+        "model_folder/temp/voice_app.py",
+        "--server.port",
+        "8503",
+        "--server.headless",
+        "true"
+      ],
+      "port": 8503
     }
   ]
 }

@@ -187,12 +187,12 @@ def estimate_construction_cost(area, bedrooms, bathrooms, kitchen, living, locat
 # ==================== STREAMLIT UI ====================
 
 st.set_page_config(
-    page_title="🏡 House Construction Cost Predictor & 3D Viewer",
+    page_title="House Construction Cost Predictor & 3D Viewer",
     page_icon="🏠",
     layout="wide"
 )
 
-st.title("🏡 House Construction Cost Predictor & 3D Model Viewer")
+st.title("House Construction Cost Predictor & 3D Model Viewer")
 
 # Sidebar
 st.sidebar.markdown("### 🏡 About This Project")

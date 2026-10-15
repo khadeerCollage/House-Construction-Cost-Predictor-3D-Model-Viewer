@@ -99,6 +99,12 @@ floorplan_generator/          LIVE+WIP  generative engine (pure Python, metres, 
                    kept), every floor's main door opens off it, an outside lift tower lands on it (side door into the
                    lobby only); plan_floor(boost) retries a bigger plate; a home that still cannot solve → the old
                    internal-stair house. engineering['apartment']['kind'] = 'house' | 'apartment'.
+                   (2026-10-15 later) 1 flat / floor: the dog-leg also runs ALONG the front (stair room = sl × sw,
+                   1.25 m flights), so the end where a flight starts and the one below arrives faces the lobby —
+                   the lobby is every floor's floor landing (the old upright stair arrived against the flat's wall:
+                   no floor above the stilt / ground could be reached on foot). A plate too narrow for that keeps
+                   the stair upright with a FLOOR_LANDING (1.25 m) inside its room, open sideways to the lobby.
+                   engineering['apartment']['stair_open'] = the stair room's side open to the hall.
   duplex.py        (2026-10-15) one home on two floors: split_program() — ground: living, dining, kitchen, pooja,
                    store/servant, a toilet, the elders' (else guest, else 3BHK+ spare) bedroom; first: the other
                    bedrooms, study (a study is added when one bedroom is alone), 'Family Lounge' (living) + 'Upper
@@ -122,7 +128,9 @@ floorplan_generator/          LIVE+WIP  generative engine (pure Python, metres, 
                    merges: 'vehicle_wicket' (wicket inside the leaf or beside it). Vastu pada of each gate (plot
                    mandala), slack used for the best pada. stilt_bays(): 2.5 × 5.0 bays nose-in from the front edge,
                    never on stair / lift / duct / lobby / a column (structure grid of the floors above), tandem
-                   last; stilt_plan() + note when fewer fit. drive_path() = car centre poses road → gate → bay.
+                   last; stilt_plan() + note when fewer fit (when none: the measured front_gap vs needs).
+                   No-park = the common hall only (HALLS / role COMMON), never a flat's foyer upstairs.
+                   drive_path() = car centre poses road → gate → bay.
 floorplan_renderer/           LIVE  plan -> files. SVG(drawsvg) DXF(ezdxf) PDF(reportlab) PNG(matplotlib)
   drafting.py      build_drafting(plan): wall poche, column grid, Vastu-aware furniture, tiles, levels, door/window tags + schedule (SVG only so far)
                    + Drafting.items (2026-10-14): every furniture symbol recorded as an object {kind, room, o/u/v wall frame | x/y, W, D, …}
@@ -130,6 +138,18 @@ floorplan_renderer/           LIVE  plan -> files. SVG(drawsvg) DXF(ezdxf) PDF(r
   walkthrough.py   build_scene(plan, latitude=None, state=None) → 3D scene JSON (2026-10-14): scene['lift'] = the working lift; walls split round windows, lintels,
                    door leaves (hinge/swing), stairs, slab/parapet/mumty/upper-floor shell, stilt, site (cars, bikes, trees, gates,
                    road), 0.1 m walking grid (bitset), guided tour (road → gate → main door → every room, nearest next)
+  narration.py     (2026-10-15) the guide's words like a good broker, in en (simple Indian English) / te (Guntur
+                   colloquial: వస్తది, ఉంటది, అండీ + brokers' English words) / hi (natural spoken Hindi). Written here
+                   (templates), not generated; every claim measured from the plan (room facts: size, Vastu zone/score
+                   + best zones, window sides, furniture fits, NBC low, attached bath; context: plot cents/gaj, facing,
+                   road, family, lift, stair, gates, parking, columns, Vastu score); a weak point said softly with the
+                   fix ('Honestly…' / 'నిజం చెప్పాలంటే…'). T(lang, speech): the same template writes the caption
+                   (digits) and the speech (numbers in words: en_words / te_words(attr) / hi_words, halves
+                   నాలుగున్నర / साढ़े तीन, flat numbers digit by digit) as sentences {k = sha1(lang|text)[:16], t}.
+                   Telugu / Hindi speech has no Latin letters or digits (the Indic voices read their own script).
+                   add_talk(tour, ctx) → stop['talk'][lang] = {title, say, speech[, by{"L" | "L|via"}, options, via]};
+                   walkthrough._with_talk builds stop['facts'] + ctx (errors → scene['talk_error'], walk still works);
+                   speech_lines(tour, lang) = what a voice must record, in walking order.
 model_folder/
   frontend.py     Streamlit UI (nav radio: Design vs Analyze)                      (1082)
   design_ui.py    `render_design_tab()` — the whole Design tab, direct imports     (675, WIP)
@@ -141,8 +161,30 @@ model_folder/
                   design & price history, commit/undo (2026-10-11/12)
   walkthrough_ui.py '🚶 Walk through your house' — the LAST section of the Design tab (2026-10-14): declared component
                   'house_walkthrough' (path=walkthrough3d); a wish made in 3D → intent_studio._add → Smart Re-Plan
+                  (2026-10-15) '🗣️ The guide's voice' expander (key walk_voice_expander): language radio (walk_lang,
+                  synced both ways with the viewer's chips via setComponentValue {action:'lang'}), who speaks
+                  (walk_voice_<lang>), progress fragment (run_every while the worker runs), '🎙️ Your own voice' recorder
+                  (te / hi: st.audio_input + the sentence read); component args lang + voices{lang: url, neural, have…}
+  voice_engine.py (2026-10-15) app side of the neural voices, no ML imports: voices(lang) = Piper (owner's pick:
+                  te Venkatesh, hi Rohan, en = Rohan reading English → Indian accent; rhasspy/piper-voices, IIT Madras
+                  IndicTTS data) + 'browser'; the owner's own voice (IndicF5, recorder box) only with VOICE_OWN=1 (GPU
+                  machines). Measured on this i7-8665U for the same 7 s sentence: Piper 1.2-1.8 s (a whole walk ≈ 1 min
+                  per language), Indic Parler-TTS ≈ 230 s (dropped, model deleted), IndicF5 > 20 min CPU (unusable).
+                  setup_state() from disk (venv, HF cache); ensure(voice, lines) starts ONE worker
+                  (subprocess, below-normal priority) for the missing sentences; progress(); failed sentences
+                  (status 'failed') are left to the browser voice, never retried in a loop
+  voice_worker.py (2026-10-15) runs in ~/.vit_voice/venv (OUTSIDE the repo, ≈190 MB: piper-tts + onnxruntime + numpy +
+                  huggingface_hub; requirements-voice.txt; `.\setup_voice.bat` in PowerShell): `run JOB` →
+                  walkthrough3d/voice/<voice>/<k>.wav (16-bit, atomic) + _status.json; `check`; `download` (public,
+                  ≈130 MB). Piper STYLE length_scale 1.12 / noise 0.55 / noise_w 0.7 (clearer, steadier), fades + 0.22 s
+                  breath. IndicF5 / Parler removed (too slow on CPU); OWN_VOICE off. VOICE_HOME overrides the location.
+                  HF_HUB_OFFLINE=1 while speaking.
   walkthrough3d/  index.html + walk.js: the 3D house (Three.js r184 vendored in vendor/, MIT licence) — no network, no CDN;
                   Streamlit component protocol v1 hand-written (componentReady / render / setFrameHeight / setComponentValue)
+                  (2026-10-15) guide's voice: words(st) picks st.talk[state.lang] (+ the floor/via variant),
+                  speakLines plays voice/<voice>/<k>.wav per sentence (Streamlit serves any file under the component
+                  dir), else the browser's local voice for that language, else waits the reading time; language chips
+                  on the start card and the caption; '🔊 Tell me' speaks the room's tour words (roomWords)
   app.py          Flask API (11 routes)                                            (943)
   cost_engine.py  CostEngine — canonical INR cost + BOQ                            (200)
   train_cost_model.py, house_cost_model.pkl(3-feat), house_cost_model_v2.pkl(8-feat, 24 MB, untracked), *.csv
@@ -306,6 +348,16 @@ Intent editing loop (2026-10-11, UI reworked 2026-10-12) — the Design tab's "�
   path), it parks in its bay (that parked car is not drawn: c.drive). The tour starts at the walking gate.
   Drawing: drafting._gate_symbols → Drafting.gates (leaves open + swing arcs, sliding leaf + dashed run-back +
   arrow, bi-fold), tags G1… and schedule rows ('SCHEDULE OF DOORS, WINDOWS & GATES'); road label '30 FT (9 M)'.
+  Stairs on foot + the journey tour (2026-10-15 later): walkthrough._stair(open_side=…) — when the hall is on a long
+  side of a room deeper than its flights, you step on / off sideways from the floor landing (the well's rail starts
+  after it, the ground keeps it open, the exit — and the terrace mumty door — is on the hall's side). Buildings of
+  floors (apartment / home on every floor / stilt; not a duplex) get walkthrough._journey: start on the road (tour_level
+  0) → 'gate' → 'parking' (stilt bays or the yard bay) → 'door' (stair + lift at the ground) → 'choice' (options =
+  every level with homes, via ['lift','stairs'] or ['stairs'], default first upper floor) → 'ride' (level 'chosen',
+  say_by[via]) → front door of that home ({home} / {floor} filled by walk.js resolveStop) → its rooms ('chosen') →
+  'terrace' (level TOP, up the stairs) → 'end'. walk.js: showChoice (#capC buttons), resolveStop, phase 'ride' =
+  liftTrip(L, forTour=true) (boardLift no longer ends a tour ride) then walk into the lobby; stairs = walkTo(target,
+  L) flight by flight; homeName(L) = ordinal of L (a stilt is level 0).
 ```
 Flask `/generate-plan` now passes the same profile/multi-storey/amenity args and returns `setbacks`, `engineering`,
 `vastu_breakdown`, `design_notes`. Typical solve time 0.3–1.5 s (4BHK + everything ≈ 4 s).
@@ -526,6 +578,17 @@ the original list below describes the pre-upgrade engine.
 18. **[V] Test side-effects:** see §11. Detector has zero tests.
 
 ## 11. Tests
+**2026-10-15 (the guide's voice): 110/110 pass** + `tests/test_voice.py` (7: numbers in words (en/te/hi, halves, flat digits);
+every stop of 5 building types talks in 3 languages, speech has no digits / symbols and Telugu/Hindi no Latin letters;
+words measured from the plan (feet, 'Honestly' only for weak Vastu, cents/gajalu/gaj, Vastu score); floor choice,
+ride and front-door variants per language; speech_lines unique and in walking order; voice_engine voices / own
+recording / ensure without models / delete; viewer hooks + offline + gitignore). Piper checked for real: a whole
+apartment walk spoken in te / hi / en (76-78 sentences each) in 57-93 s, played in the Streamlit page.
+**2026-10-15 (stairs on foot + journey tour): 103/103 pass** + `tests/test_journey.py` (5: + the stilt parking stop says why no car fits; 11 building types walked
+like walk.js from the road to every floor's lobby and the terrace; first step on the floor, last riser on the next
+floor, you step off into the lobby; the journey tour (road, gate, parking before the choice, options = levels with
+homes, lift/stairs, ride + front door + rooms on the chosen floor, terrace on TOP, targets standable); viewer hooks).
+test_walkthrough test_10: a stilt house's walk now starts on the road (tour_level 0).
 **2026-10-15 (gates): 98/98 pass** + `tests/test_gates.py` (7: walk < bike < car gate widths on N/E/S/W and the
 compound wall cut at them; narrower road ⇒ never a narrower gate (simulation + engine), road_width rebuilt from
 generation_params; fire-engine 4.5 m with no car / two lanes for 6 cars; leaves inward, arcs clear of the parked car
@@ -642,5 +705,6 @@ respect Windows paths (`os.path.join`), CRLF repo.
 - **Detection change:** edit `floor_plan_analyzer.py` (live), not `pipeline.py`/`smart_detection.py`; add tests (none exist).
 - **Before finishing a change:** `python -c "import ast,sys;ast.parse(open('<file>').read())"` or run the relevant test file; run the app
   path you touched (`streamlit run model_folder/frontend.py` → Design tab → Generate) because most logic has no automated UI test.
-- **Don't:** add a third cost formula; call `subprocess` for new work (import directly); add `isinstance` checks across the reload boundary;
+- **Don't:** add a third cost formula; call `subprocess` for new work (import directly — the one exception is
+  voice_worker.py: its libraries cannot share the app's environment and it runs for minutes); add `isinstance` checks across the reload boundary;
   commit generated artifacts (`static/`, `temp/`, `test_output/`, `.pyc`, `*.pkl`, `*.ply`); touch `GEMINI_MEMORY.md` (kept for the other platform).

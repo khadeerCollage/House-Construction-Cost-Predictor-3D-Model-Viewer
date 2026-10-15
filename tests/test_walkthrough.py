@@ -299,7 +299,11 @@ class TestWalkthrough(unittest.TestCase):
 
         plan, ss = _plan("N", 9.55, 12.71, "2BHK", {'car_parking': {'enabled': True, 'slots': 1, 'mode': 'stilt'}}, 2)
         self.assertEqual([l["kind"] for l in ss["levels_list"]], ["stilt", "rooms", "rooms", "terrace"])
-        self.assertEqual(ss["tour_level"], 1)
+        self.assertEqual(ss["tour_level"], 0)                     # the walk starts on the road, at the gate
+        kinds = [s["kind"] for s in ss["tour"]]
+        self.assertEqual(kinds[:2], ["start", "gate"])
+        self.assertIn("parking", kinds)
+        self.assertLess(kinds.index("parking"), kinds.index("choice"))
         self.assertAlmostEqual(ss["levels_list"][1]["z"], ss["levels"]["ffl"], places=2)
 
     def test_08_viewer_is_offline(self):

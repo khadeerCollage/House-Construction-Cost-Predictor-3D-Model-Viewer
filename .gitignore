@@ -50,3 +50,8 @@ tmp/
 # Static generated files
 model_folder/static/*
 !model_folder/static/.gitkeep
+
+# Neural voices for the 3D guided walk (setup_voice.bat): environment, spoken clips, owner recordings
+.venv-voice/
+model_folder/walkthrough3d/voice/
+model_folder/voice_data/

@@ -94,6 +94,14 @@
   #cap .t span { color: var(--dim); font-size: 12.5px; font-weight: 600; }
   #cap .s { font-size: 15px; line-height: 1.45; margin-top: 4px; color: #DDEBFF; }
   #cap .row { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  #capC { display: none; flex-direction: column; gap: 6px; margin-top: 8px; }
+  #capC .crow { display: flex; gap: 6px; flex-wrap: wrap; }
+  .langs { display: flex; gap: 5px; justify-content: center; flex-wrap: wrap; }
+  .langs .b { padding: 5px 11px; font-size: 13.5px; border-radius: 999px; }
+  #cap .langs { justify-content: flex-start; margin-left: auto; }
+  #cap .langs .b { padding: 4px 9px; font-size: 12.5px; }
+  #start .langs { margin: 0 0 12px; }
+  #startVoice { color: var(--dim); font-size: 12px; margin: -6px 0 12px; min-height: 14px; }
 
   #wish { left: 50%; top: 150px; transform: translateX(-50%); padding: 12px; display: none; width: min(380px, 92%); z-index: 8; }
   #wish h4 { margin: 0 0 4px; font-size: 15px; }
@@ -201,11 +209,13 @@
   <div id="cap" class="panel">
     <div class="t"><div id="capT"></div><span id="capN"></span></div>
     <div class="s" id="capS"></div>
+    <div id="capC"></div>
     <div class="row">
       <button class="b" id="tPause">⏸ Pause</button>
       <button class="b" id="tNext">⏭ Next</button>
       <button class="b" id="tVoice">🔊 Voice on</button>
       <button class="b" id="tStop">⏹ Stop</button>
+      <div class="langs" id="capLang" title="The guide's language"></div>
     </div>
   </div>
 
@@ -249,6 +259,8 @@
     <div class="card">
       <h2>🏡 Walk through your house</h2>
       <div class="meta" id="startMeta">Loading your design…</div>
+      <div class="langs" id="startLang" title="The guide's language"></div>
+      <div id="startVoice"></div>
       <div class="big">
         <button class="b go" id="sTour">▶ Guided walk — with voice</button>
         <button class="b" id="sWalk">🚶 Walk in by myself</button>

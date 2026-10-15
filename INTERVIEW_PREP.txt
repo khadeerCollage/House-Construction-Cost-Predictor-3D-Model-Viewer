@@ -1,0 +1,556 @@
+=====================================================================================================
+  INTERVIEW PREPARATION — "House Construction Cost Predictor & 3D Model Viewer"  (vit_project)
+  Everything you need to explain this project in an interview: what it does, how it works, why it
+  was built this way, the algorithms, the numbers, the problems solved, and likely questions + answers.
+  Written 2026-10-15 from the current code.
+=====================================================================================================
+
+HOW TO USE THIS FILE
+--------------------
+  Part 1  The 30-second and 2-minute pitch            (learn these by heart)
+  Part 2  Big picture: the two products, tech stack, architecture
+  Part 3  Product A — Analyze an existing floor-plan image (computer vision)
+  Part 4  Product B — "Design Your Home" generative studio (the main work)
+            4.1 Inputs  4.2 Space program  4.3 Site planner  4.4 Layout solver  4.5 Doors/walls/windows
+            4.6 Vastu engine  4.7 Multi-floor: apartments / homes on every floor / duplex  4.8 Lift
+            4.9 Gates + swept-path simulation  4.10 Site feasibility (what fits)  4.11 Smart Re-Plan
+            4.12 Cost engine, BOQ, land value  4.13 Renderers (SVG/DXF/PDF/PNG)  4.14 3D walk-through
+  Part 5  Engineering practices: testing, performance, offline design, reload issues
+  Part 6  Hard problems I solved (STAR-style stories)
+  Part 7  Honest limitations and what I would do next
+  Part 8  Likely interview questions with model answers
+  Part 9  Numbers & facts cheat-sheet
+  Part 10 Glossary (Vastu, NBC, cents, BHK, etc.)
+
+
+=====================================================================================================
+PART 1 — THE PITCH
+=====================================================================================================
+
+30-SECOND PITCH
+  "It's a Streamlit web app for Indian home builders. You give it your plot — in feet, metres or
+   Indian land units like cents — your family, and whether you want Vastu. It designs a complete,
+   building-code-checked house plan: rooms, doors, windows, walls, stairs, lifts, parking and gates.
+   It exports CAD files (DXF, SVG, PDF, PNG), estimates the construction cost and materials, values
+   the land from official government rates, and lets you walk through the house in 3D before a single
+   brick is laid. There is also an older module that reads an existing floor-plan image with computer
+   vision and estimates its cost."
+
+2-MINUTE VERSION (add these points)
+  * Problem: in India most small houses are built without an architect. Owners see the house only
+    after ~6 months of construction, then break and rebuild. Our app lets them see, change and price
+    the house first.
+  * The design engine is not a template: it builds a "space program" from the family, plans the site
+    with bylaw setbacks, then searches thousands of room arrangements with an optimiser that scores
+    Vastu, building-code (NBC 2016) minimums, daylight, plumbing and access.
+  * Owners can edit in plain words ("move the kitchen to the south-east", even Hindi/Telugu-style
+    Indian English) and the engine re-plans while keeping everything else stable.
+  * It handles independent houses, apartments (1/2/4 flats per floor around a shared stair-lift core),
+    houses of several floors (a home on every floor) and duplexes (one home over two floors), with a
+    working lift you can ride in 3D.
+  * Gates are engineered: the car gate width comes from a physics-style simulation of the family car
+    turning in from the road.
+  * Fully offline: no external AI or APIs in the design flow; Three.js is vendored locally.
+  * ~98 automated tests.
+
+
+=====================================================================================================
+PART 2 — BIG PICTURE
+=====================================================================================================
+
+2.1 TWO PRODUCTS IN ONE APP
+  A) Analyze an existing floor plan image (original product)
+     upload JPG/PNG -> detect walls, doors, rooms (OpenCV + OWL-ViT) -> classify rooms -> scale
+     calibration -> cost estimate -> extrude a 3D .ply model.
+  B) "Design Your Home" generative studio (the active, larger part)
+     plot + family + Vastu -> full 2D plan -> CAD exports, Vastu audit, cost + BOQ, land value,
+     Smart Re-Plan editing, 3D walk-through.
+
+2.2 TECH STACK
+  Language        Python (runs on 3.10 in Docker; developed on 3.14)
+  UI              Streamlit (multi-section single page); one custom Streamlit component written by hand
+                  (component protocol v1: componentReady / render / setFrameHeight / setComponentValue)
+  API             Flask (11 routes) — used by the image-analysis flow and a /generate-plan endpoint
+  Computer vision OpenCV (thresholding, Canny, Hough lines, contours), OWL-ViT (zero-shot object
+                  detection from Hugging Face transformers, CPU torch)
+  Geometry        shapely (wall poché union), numpy (vectorised simulation, walking grid bitsets)
+  CAD / docs      drawsvg (SVG), ezdxf (DXF with proper layers), reportlab (PDF), matplotlib (PNG)
+  3D              Open3D (PLY extrusion, image flow); Three.js r184 vendored offline (walk-through)
+  ML              scikit-learn RandomForestRegressor (cost model, trained on synthetic data)
+  Deploy          Docker image (python:3.10-slim + CPU torch), docker-compose, Hugging Face Spaces shim
+  Tests           unittest classes run by pytest (~98 tests)
+
+2.3 ARCHITECTURE (dependency direction)
+  room_specs -> vastu_engine -> space_program -> site_planner -> layout_solver -> layout_engine
+             -> {renderers, vastu_analyzer, house_report, cost engine, 3D walkthrough, Streamlit UI}
+  * The generator and renderers never import the detector, and vice versa (clean separation).
+  * Everything in the generator works in METRES; units are converted only at the edges (UI, labels).
+  * Plan coordinate frame: origin bottom-left of the plot, +x right, +y up, the ROAD is always the
+    top edge. "orientation" = which compass direction the road faces. A helper maps plan sides to
+    compass directions, so the same algorithm works for N/E/S/W facing plots.
+
+2.4 KEY DATA MODEL (dataclasses in layout_engine.py)
+  RoomRect(name, category, x, y, w, h, area, role, key)    room rectangles = wall centre-lines
+  WallSegment(x1,y1,x2,y2, thickness, wall_type)           230 mm external, 115 internal, 150 compound
+  DoorPlacement, WindowPlacement, StaircaseRect, DimLine
+  GeneratedFloorPlan: everything above + vastu_score, carpet/built-up area, engineering report,
+    design_notes, generation_params (exact inputs to rebuild the plan), layout_state (the solver's
+    state, used for editing), upper_plan (duplex first floor).
+
+
+=====================================================================================================
+PART 3 — PRODUCT A: ANALYZE AN EXISTING FLOOR-PLAN IMAGE
+=====================================================================================================
+
+PIPELINE (floorplan_detector/floor_plan_analyzer.py, model_folder/utils.py, model_folder/app.py)
+  1. Resize to <= 1200 px.
+  2. OWL-ViT zero-shot detection with text queries ("bed", "toilet", "kitchen stove", "sofa",
+     "dining table", "door") — gives semantic hints without training a custom model.
+  3. Walls: adaptive threshold -> Canny (50/150) -> HoughLinesP -> keep only near-orthogonal lines
+     (< 20 deg or 70–110 deg) -> merge lines in the same 25 px band.
+  4. Doors: gaps in walls (10–60 px) + OWL-ViT "door"; arc detection only as a fallback.
+  5. Rooms: contour hierarchy (RETR_TREE); fallback to connected components if < 3 rooms.
+  6. Classification: largest -> living/dining, detected symbols (bed/toilet/stove), small -> bathroom...
+  7. Scale calibration: from plot dimensions if given, otherwise a pixels-per-metre guess.
+  8. Cost via the cost engine; 3D: a separate script extrudes walls to an ASCII .ply (Open3D) which
+     the browser shows with Three.js.
+
+WHY OWL-ViT: zero-shot — no labelled floor-plan dataset needed; you describe objects in text.
+WEAKNESSES (be honest): noisy plans get over-segmented; the 3D script uses a fixed scale and no
+  door/window cut-outs; analysis runs twice in the 3D route. This side of the project is "frozen";
+  the generative studio replaced it as the main product.
+
+
+=====================================================================================================
+PART 4 — PRODUCT B: THE GENERATIVE "DESIGN YOUR HOME" STUDIO
+=====================================================================================================
+
+4.1 INPUTS (model_folder/design_ui.py)
+  * Plot: Indian cents (1 cent = 435.6 sq ft = 40.47 m²), feet or metres; square / rectangle ratios
+    (1:1.33, 1:1.5, golden 1:1.62, 1:2) or a fixed road frontage. land_units.py also converts gaj,
+    guntha, ground, ankanam.
+  * Facing (road side), road width (15–60 ft), plot location (state/district/town/street) for land value.
+  * Family: adults, children, elderly, guests, pooja room, study, servant, store.
+  * Engineering: Vastu on/off, BHK, quality (Economy/Standard/Premium/Luxury), building type
+    (independent house / apartment / duplex), floors, lift (capacity and position), stair type,
+    flats per floor, site amenities (car, bikes, garden, pool, sump, generator, security cabin).
+  * Principle: earlier inputs LOCK later choices that cannot fit (with a reason and an unlock hint),
+    e.g. 3 cents + 2BHK -> car parking locked "needs about N cents", bikes allowed.
+
+4.2 SPACE PROGRAM (space_program.py)
+  Turns BHK + family + quality into a list of room groups with target areas and roles:
+  master bedroom, children's room, elders' room (ground-friendly), guest room, attached/common baths,
+  kitchen + utility, living, dining, pooja, study, store, servant room, staircase design (risers ×
+  treads from floor height), lift design (shaft from IS 14665-style car sizes: 4 person 0.85×0.95 m
+  car, 6 person 1.0×1.25 m wheelchair, 8 person 1.1×1.4 m). Quality scales room sizes.
+  family_analyzer.py recommends a BHK: bedrooms = master + extra adults/2 + children rooms + elderly
+  + guests, capped at 4, then downgraded if the plot is too small.
+
+4.3 SITE PLANNER (site_planner.py)
+  * Setbacks from indicative Indian bylaws by plot area and floors (front/rear/side), relaxed step by
+    step on tiny plots (row-house style) with a note.
+  * Vastu site rule: more open space on North and East than South and West — applied only if the house
+    still keeps its target area (a cramped house would lose more Vastu than the open sky gains).
+  * Ground-coverage cap (75% small plots ... 50% large) — a big plot does not get a giant house.
+  * Reservations: car bay (front perpendicular / front parallel / side lane / stilt), outside terrace
+    stair, lift tower yard, pool and garden strips.
+  * Footprint anchored towards the South-West (Vastu: heavy mass in SW).
+  * After the layout: amenities placed Vastu-ranked and collision-free (sump in NE, generator in SE,
+    pool in N/E, garden in N/E strips), keeping a clear entrance path, then gates (4.9).
+
+4.4 LAYOUT SOLVER (layout_solver.py) — the core algorithm
+  "Band-spine" zoning: the footprint is cut into horizontal bands (front / private / spine / rear),
+  rooms are packed into cells of the bands. Modes: std, deep, corridor.
+  Search = randomised feasible construction + ITERATED LOCAL SEARCH (moves, swaps, flips, kicks).
+  Objective (maximise):
+     Vastu score on the building mandala (role-aware: master in SW, kitchen SE, pooja NE...)
+   + functional quality
+   - penalties: room not reachable (access), below NBC minimum size/width, no daylight wall,
+     kitchen far from dining, wet rooms not sharing walls (plumbing), taboo placements
+     (e.g. toilet in North-East), Brahmasthan (centre) blocked, main door blocked by the car bay.
+  Deterministic seed (from plot size + facing) so the same inputs give the same plan.
+  If no access-complete layout exists, a relaxation chain trims the program; last resort is a simple
+  "legacy" functional subdivision (no editing available there).
+  Typical solve: 0.3–1.5 s; big 4BHK with everything ~4 s.
+
+4.5 DOORS, WALLS, WINDOWS, DIMENSIONS (layout_engine.py)
+  * Doors: attached bath -> its bedroom; others to the best circulation room; arches between living
+    and dining; MAIN DOOR on the best of the 32 Vastu "padas" (gate positions) on the road facade.
+  * Walls: 230 mm envelope, merged 115 mm partitions, 150 mm compound wall; openings cut for doors,
+    arches and gates.
+  * Windows: NBC rule — glazing at least 1/10 of floor area, North/East preferred; kitchen sill 1.05 m.
+  * Areas: RERA carpet area (clear inside), built-up/plinth area.
+  * Engineering report: RCC column grid (structure.py: grid lines on wall centre-lines, bays 2.4–4.5 m),
+    slab/beam notes, plumbing stacks, design notes in plain words.
+
+4.6 VASTU ENGINE (vastu_engine.py, vastu_analyzer.py)
+  * 3×3 Vastu Purusha mandala (NE, E, SE, S, SW, W, NW, N, Centre) over the BUILDING for rooms and
+    over the PLOT for site amenities.
+  * Score matrix room-category × zone (−50 … +10), strict taboos (kitchen/toilet in NE, toilet/
+    bedroom in the centre...), 32 entrance padas with deity, rating and traditional remedy.
+  * Fixed a real bug: the old score saturated at 100 for almost any plan; now it is a weighted
+    average that truly varies, and the report tab shows an exact "ledger" that adds up to the score.
+  * Audit: elemental balance, defects + remedies, certificate text, mandala SVG.
+
+4.7 MULTI-FLOOR BUILDINGS (apartment.py, duplex.py)
+  APARTMENT: a typical floor of 1, 2 or 4 flats around a common stair + lift core. Each flat is
+    planned by a sub-engine inside its own rectangle; front flats (4 per floor) are planned for their
+    own facing and rotated 180°. 230 mm party walls, windows only to open air, the building entrance
+    is the only main entrance, flats numbered G01/101/... The form only offers 1/2/4 if they fit.
+  HOUSE OF SEVERAL FLOORS = a home on every floor: a front band [stair | stair lobby | lift] with the
+    home behind; every floor's main door opens off the lobby (nobody walks through another family's
+    home). Very small plots fall back to an internal stair, with a note.
+  DUPLEX = one home on two floors: ground = living, dining, kitchen, pooja, a toilet, elders' room;
+    first floor = other bedrooms, family lounge, study. Both floors are planned behind the same foyer
+    band so the stair and lift align by construction. Separate first-floor drawing and room schedule.
+    Retries with a bigger plate so the upper floor never falls back to a template (which would have put
+    a second kitchen upstairs — a bug I found and fixed).
+
+4.8 LIFT (position + working 3D lift)
+  * Independent houses choose: inside (next to the stair), entrance tower (beside the main door) or
+    side tower (own landing + side door into dining/foyer — never a bedroom or toilet).
+    Apartments always use the core; duplex inside.
+  * Fallbacks: a tower that can't fit -> inside; an inside lift that can't fit -> entrance tower.
+  * In 3D: landing doors, call buttons, car with panel, counterweight, ropes, motor; a collective
+    controller (serves calls in the direction of travel), acceleration 0.8 m/s², doors 1.4/1.6 s,
+    dwell 4 s, chime via Web Audio (no sound files); you can walk in, press a floor and ride;
+    "x-ray" view shows how a lift works. "Move the lift" from 3D re-designs the house.
+
+4.9 GATES + SWEPT-PATH SIMULATION (gates.py) — a unique part, good to talk about
+  Idea: a gate's width should follow what passes through it.
+    people only        1.05 m (3½ ft)  (wheelchair needs 0.9 m clear); 1.2 m for a block of flats
+    two-wheelers       1.5 m (5 ft); 2.45 m (8 ft) for 6+ bikes
+    car                width from a SIMULATION of the design car turning in from the road
+    6+ cars            >= 5.2 m (two lanes: one car out passes one in)
+    building >= 15 m   >= 4.5 m for the fire engine (NBC 2016 Part 4), even with no parking
+    widths rounded UP to whole feet (gates are made and sold by the foot in India)
+  Design car by quality/type: hatchback (Swift class), compact SUV (Creta class), 7-seat MUV
+    (Innova class) — real brochure length, width, wheelbase, overhang, turning radius.
+  Simulation (rear-axle "bicycle model"):
+    - brochure turning radius = path of the outer front wheel; from it the rear-axle radius
+      Rr = sqrt(R² − wheelbase²) − track/2.
+    - the car drives along the road, turns on a circle of radius >= Rr, then goes straight into its
+      bay. Try every start lane on the road (0.25 m steps) × every radius (0.4 m steps), check the turn
+      every 2°; compute where the car's body crosses the wall line; constraints: stay on the usable road
+      (minus drains), stay in its lane deeper than 1.5 m inside the gate, stay inside the plot corners,
+      be straight by the time it is parked.
+    - objective: the smallest opening centred on the car's axis -> mathematically guarantees a narrower
+      road never gives a narrower gate (monotonic).
+    - both approach directions are tried; near a plot corner it may say "turn in from the North end".
+    - vectorised with numpy (all ~400 candidates at once) — 15× faster, so the form stays < 1 s.
+  Results match Indian practice: 30 ft road + SUV -> 10 ft gate; 20 ft road -> 12 ft; 15 ft lane +
+    Innova -> 18 ft.
+  Leaves: inward only (a gate must not swing over the street); <= 1.25 m one leaf, <= 4.25 m two
+    leaves IF the swing arcs miss the parked car / porch / house; else a sliding gate if the wall has
+    run-back room; else telescopic (half the run-back); else bi-fold. Too close to the walking gate ->
+    merged into one car gate with a wicket door. Every gate gets its Vastu pada (and remedy if weak).
+  Stilt parking: bays 2.5 × 5.0 m nose-in from the front, never on the stair, lift, duct, lobby or a
+    column of the floors above (structural grid). This fixed a real bug where the 3D parked cars inside
+    the stair lobby. If fewer cars fit than requested, the plan says so honestly.
+  Output everywhere: drawing (leaves, swing arcs, run-back, G1/G2 tags, schedule rows), 3D (real
+    swinging/sliding/folding gates) and a "Drive in" button where the car drives from the road through
+    the opening gate into its bay while orange lines trace its four corners (its swept path).
+
+4.10 SITE FEASIBILITY — "what fits" BEFORE you press Generate (site_feasibility.py)
+  Runs the real site planner in a light simulation for each option and applies a comfort rule:
+  an amenity that costs the house > 4% is refused if the house left drops below 80% of a comfortable
+  footprint (or below NBC minimum); 0.80–0.92 = offered with a warning ("tight").
+  Drives the form: BHK dropdown shows only fitting sizes; locked toggles show the reason and how to
+  unlock ("possible with ~5.25 cents"); counts are capped; stilt parking is chosen for multi-floor
+  houses when an open bay would squeeze rooms. Cached with st.cache_data keyed by the module's mtime.
+  Rule of thumb it produces: car + 2BHK from ~3.25–3.5 cents; car + 3BHK ~5 cents; pool ~5.5–6 cents.
+
+4.11 SMART RE-PLAN — editing in plain words (intent_engine.py, wish_parser.py, intent_studio.py)
+  * Users never drag rooms (hard for many owners). They tap a room on a 3×3 house map, then an action
+    (move to a zone, swap, next to, other side, bigger, smaller, don't move) — or type in their own words.
+  * wish_parser = offline natural-language understanding: tagged phrase vocabulary (rooms, actions,
+    directions, modifiers), longest-match first, typo repair against the vocabulary, Indian English
+    and some Hindi/Malayalam/Tamil words. Unclear sentences become "did you mean" buttons. No LLM.
+  * Each wish becomes a JSON intent (zone, flip, swap, adjacent, lock, size, mirror).
+  * IntentSolver (subclass of the layout solver): objective = base score − wish penalties − λ ×
+    disruption of rooms the user didn't mention − new taboos + a refund for rooms the user moved.
+    Seeds from the current layout + direct edits + fresh constructions; ~6000 evaluations (1.5–6 s).
+  * Returns 3 options: "Balanced (recommended)", "Best Vastu", "Least change", each explaining which
+    wishes were met, which were blocked and by what, rooms moved, warnings, and the COST change.
+  * Version history with undo and a price-over-versions chart; "make this my design again".
+  * Determinism: plain generate() stays byte-identical; wishes act only through the solver.
+
+4.12 COST, BOQ, LAND VALUE
+  CostEngine (cost_engine.py) — ONE canonical cost formula, multi-market (India, US, UK, UAE, Canada,
+    Australia):  effective rate = base rate(quality) × location index × size factor × storey factor;
+    construction = area × rate + wet-area extras + site works + lift; total adds fees, approvals,
+    contingency and tax. India Standard ≈ ₹2,000/sq ft (tier-2 city).
+  Edit pricing: quantities of the original design are stored; a re-plan is priced by the change in
+    partitions, doors, glazing and plumbing — so the owner sees "this change costs ₹X more and why".
+  BOQ / take-off (takeoff.py): quantity-surveyor method measured from the drawing — footings per
+    column, beams under walls, slabs, net brickwork, plaster, tiles, paint, doors/windows, electrical
+    points, pipes -> cement bags, steel kg, bricks, sand, aggregate (standard mix ratios like M20
+    1:1.5:3); a stage-wise cash plan that reconciles exactly to the cost engine's total.
+  Land value (land_value.py): official government guideline values for all districts of Andhra Pradesh
+    and Telangana (61 districts / 250 towns) × a street factor (main road 1.30, inner 0.85, outskirts
+    0.43, village 0.25) calibrated on real Chilakaluripet market rates (inner ₹6–8 lakh/cent, main road
+    ₹10–11 lakh); stamp duty + registration rules per state; the owner's own rate always wins.
+    "Money card": land + registration + house = total spend; property worth = land + building.
+  ML model: a RandomForestRegressor exists, but it is trained on SYNTHETIC data from the same formula,
+    so it only mimics the cost engine — be honest about this if asked.
+
+4.13 RENDERERS (floorplan_renderer/)
+  * SVG (drawsvg): the richest — blueprint (navy/cyan) and clean modes; drafting layer: hatched wall
+    poché (shapely union, cut at windows), structural grid A/B/C… 1/2/3 with bubbles, furniture placed
+    with clearance checks and Vastu preference (bed head south/east...), wet-area tiles, level marks,
+    door/window/gate tags and a schedule, title block, north arrow, road label.
+  * DXF (ezdxf) with standard AIA-style layers (A-WALL-FULL, A-DOOR-FULL, A-GLAZ-FULL, A-ANNO-DIMS...)
+    so it opens properly in AutoCAD.
+  * PDF (reportlab, A3) and PNG (matplotlib, 300 dpi).
+
+4.14 3D WALK-THROUGH (floorplan_renderer/walkthrough.py + model_folder/walkthrough3d/walk.js)
+  Principle: the 3D scene is MEASURED FROM THE PLAN — never invented in JavaScript.
+  Python builds a scene JSON: walls split around windows with lintels, door leaves with real hinge and
+  swing, stairs (climbable), slabs, parapets, stilt columns, furniture (the same objects the drawing
+  draws — recorded by the drafting layer), site (cars, bikes, trees, gates, road), a 0.1 m walking grid
+  (bitset, base64) and a guided tour (road -> gate -> main door -> every room, nearest next).
+  walk.js (Three.js r184, vendored; no CDN, no network):
+  * One merged mesh per surface material (fast); themes "Blueprint" and "Real colours".
+  * Modes: Outside, All rooms (roof off; multi-floor buildings shown pulled apart), Top, Walk inside
+    (eye height adult/child/wheelchair); tap the floor -> A* path on the grid; doors/gates open as you
+    approach; stairs climbable floor by floor (A* never jumps between flight halves).
+  * Guided tour with captions and voice (speechSynthesis with LOCAL voices only, Indian English
+    preferred). Sun position by time/season/latitude and which rooms get sun now; Vastu overlay;
+    minimap; screenshot; lift ride; Drive in.
+  * "Change this room" in 3D sends a wish back to Python (setComponentValue) -> Smart Re-Plan.
+  * The iframe is kept across Streamlit reruns and rebuilt only when the scene's SHA-1 changes, keeping
+    the walker's position.
+
+
+=====================================================================================================
+PART 5 — ENGINEERING PRACTICES
+=====================================================================================================
+
+TESTING
+  * ~98 tests (unittest classes, run with pytest), ~3–4 minutes. Test files: generative pipeline,
+    engineering upgrades (BHK fidelity, facing geometry N/E/S/W, Vastu non-saturation, tiling, setbacks),
+    land units, house report, site feasibility, intent editing (parser, every intent type, determinism),
+    land value (calibration), walkthrough (every room walkable and toured, doors open, heights), apartment,
+    lift, floors/duplex, gates.
+  * Property-style checks rather than snapshot comparisons: "every room reachable", "rooms tile the
+    footprint", "a narrower road never gives a narrower gate", "the car path crosses the wall inside its
+    gate", "no stilt car in the stair lobby", "the viewer has no external URLs" (offline guarantee).
+  * Regression baselines: SVG hashes for representative plans, so unrelated changes keep drawings
+    byte-identical (and intentional changes are known).
+  * Every change also verified in the running app and in the 3D viewer in a browser.
+
+PERFORMANCE
+  * Solver tuned to ~0.3–1.5 s per plan; Streamlit caching for the form's feasibility checks.
+  * Gate simulation vectorised with numpy and memoised (lru_cache with rounded keys).
+  * Stilt-bay search jumps straight past obstacles instead of stepping 10 cm at a time.
+  * 3D: merged geometry per material, floor template cloned per level (shared geometry), render only
+    when something changes (dirty flag).
+
+OFFLINE / PRIVACY BY DESIGN
+  * No external AI or API in the design flow (owner's requirement). NLU is rule-based; voices are the
+    device's own; Three.js and textures are local.
+
+STREAMLIT GOTCHAS SOLVED
+  * Long-running Streamlit keeps old module copies -> modules are reloaded (dependencies first) on each
+    Generate; therefore NO isinstance checks across the reload boundary (duck typing only).
+  * A widget's value can't be set after it is created in the same run -> a "pending" session key is
+    applied before the widget is drawn next run.
+  * A custom component returns its last value on every rerun -> events carry ids and are de-duplicated.
+  * Markdown treats "$...$" as LaTeX -> money strings are escaped.
+
+DESIGN RULES I FOLLOWED
+  * One source of truth: one cost formula; the 3D uses the drawing's furniture; the BOQ total equals the
+    cost engine's total.
+  * Reproducibility: generation_params rebuild the exact plan; deterministic seeds.
+  * New engine arguments are optional with defaults, so old callers and saved plans keep working.
+  * Explain every decision in plain words (design notes, "why" lines, locked-toggle reasons).
+
+
+=====================================================================================================
+PART 6 — HARD PROBLEMS I SOLVED (STAR STORIES)
+=====================================================================================================
+
+1) Vastu-mode plans ignored the BHK (all 1–4BHK gave the same 2 bedrooms) and the Vastu score was
+   always ~100.
+   Situation: the original placement was a fixed template; the score formula saturated.
+   Action: rewrote the engine as program -> site -> optimiser; made the score a real weighted average
+   with taboo and Brahmasthan penalties; added tests for BHK fidelity and score variation.
+   Result: correct room counts, meaningful scores, an exact score ledger in the report.
+
+2) Cost estimates silently ignored quality and city.
+   The UI sent labels like "Premium" / "Tier-1 Metro" that the cost engine didn't recognise, so every
+   estimate used the default rate (a ₹17 L vs ₹37 L error in one case). Fixed by normalising labels,
+   one canonical engine, and a test band per market.
+
+3) Owners couldn't use drag-and-drop editing.
+   Replaced the canvas editor with "tap a room + tap an action" and a plain-words wish box, plus an
+   optimiser that respects the wish and disturbs as little as possible, with 3 explained options.
+
+4) Users chose amenities that couldn't fit and got broken plans.
+   Built the feasibility checker that reuses the real planner, so the form locks impossible choices
+   with a reason and the size needed to unlock them.
+
+5) Multi-floor buildings: in 3D the upper floors were transparent; in houses the stair passed through
+   the ground-floor home; the "duplex" was just a copy with two kitchens.
+   Introduced a stair lobby so every floor's home has its own front door, a real duplex program split,
+   and an exploded "every floor" 3D view.
+
+6) Gates were a fixed 1.3 m gap; stilt cars appeared inside the stair lobby.
+   Built the swept-path gate designer and the stilt-bay planner; proved monotonic behaviour with tests;
+   vectorised it when profiling showed the form became 3× slower.
+
+7) A real bug found while testing: a duplex's upper floor sometimes fell back to a template layout with a
+   kitchen. Root cause: the plate size underestimated a full-width band. Fixed the sizing and added boost
+   retries so an unsolved upper floor is never accepted.
+
+
+=====================================================================================================
+PART 7 — HONEST LIMITATIONS & NEXT STEPS
+=====================================================================================================
+  * Setback/coverage tables are indicative bylaws, not every municipality's exact rules.
+  * Apartments with the core across the whole front fit few stilt cars (e.g. 1 of 3 on 5 cents);
+    next step: a side core for stilt buildings.
+  * Some mid-size plots fall back to the simple legacy layout, which can't be edited by Smart Re-Plan.
+  * DXF/PDF/PNG don't yet draw the full drafting layer (furniture, gates) — only the SVG does.
+  * Duplex editing changes the ground floor; the first floor is re-planned automatically.
+  * The image-analysis side over-segments noisy plans and has no tests; its ML cost model is trained on
+    synthetic data.
+  * Flask hygiene items (debug mode, upload filename sanitising) remain; the Streamlit app is the main path.
+  * Next: real per-city bylaw data, structural design checks, BIM/IFC export, cloud save and sharing.
+
+
+=====================================================================================================
+PART 8 — LIKELY INTERVIEW QUESTIONS (WITH ANSWERS)
+=====================================================================================================
+
+Q: Is this AI? Did you use an LLM?
+A: The image module uses a vision transformer (OWL-ViT) for zero-shot object detection. The design studio
+   is algorithmic: constraint-based search and optimisation, rule-based language understanding and
+   physics-style simulation. That was a deliberate choice — it must run offline, be deterministic and
+   explain every decision, which matters for a building plan.
+
+Q: How does the layout algorithm work?
+A: Program -> site -> search. I build a list of rooms with target sizes from the family, plan the site
+   with setbacks, then a band-spine solver places rooms in bands and improves the arrangement with
+   iterated local search. The objective combines Vastu zone scores, building-code minimums, daylight,
+   access, kitchen-dining adjacency and plumbing, with penalties for taboos. It's seeded
+   deterministically, so the same input gives the same plan.
+
+Q: Why iterated local search instead of an exact solver (ILP/CP)?
+A: The objective has many soft, non-linear terms (Vastu weights, adjacency, daylight) and we need an
+   answer in about a second. Local search with random restarts and kicks gives good layouts fast and is
+   easy to extend with new penalties — the editing solver is just a subclass with extra terms.
+
+Q: How do you guarantee every room is reachable?
+A: Access is a hard-ish penalty in the objective; layouts with unreachable rooms are rejected, and a
+   relaxation chain trims the program if needed. In 3D, a walking grid + BFS checks every room is
+   reachable from the road, and a test enforces it.
+
+Q: How does the plain-language editing work without an LLM?
+A: A tagged vocabulary of phrases (rooms, actions, directions, modifiers), longest-match tokenisation,
+   typo repair against the vocabulary, and frame rules that turn a clause into a JSON intent. Unsure
+   parses become suggestions. The intent then becomes a penalty term in the solver.
+
+Q: How do you keep an edit from changing the whole house?
+A: The edit solver adds a disruption penalty for rooms the user didn't mention and starts from the
+   current layout, so it prefers small changes; it also returns a "least change" option.
+
+Q: Explain the car-gate simulation.
+A: Rear-axle bicycle model. From the brochure turning radius and wheelbase I get the rear-axle radius.
+   I try every start lane and every turning radius, sweep the car body through the turn, and measure
+   where it crosses the wall line, subject to staying on the road, in its lane and inside the plot,
+   and being straight when parked. The narrowest centred opening plus 0.3 m clearance each side, rounded
+   up to whole feet, is the gate. Because a wider road only adds options, the width is monotonic.
+
+Q: How did you make it fast?
+A: Vectorised all candidate turns with numpy (one array operation instead of nested Python loops),
+   memoised with rounded cache keys — 15× faster; the form check went from ~4 s back under 1 s.
+
+Q: How is the cost calculated? Is it accurate?
+A: Area × an effective rate (quality base rate × location index × size and storey factors) plus
+   wet-area, site-work and lift extras, plus soft costs. Rates are 2026 reference values; the BOQ is a
+   quantity take-off from the drawing and is reconciled to the same total. It's an estimate — good for
+   planning and comparing options, not a contractor's quote.
+
+Q: How does the 3D stay consistent with the 2D drawing?
+A: The 3D scene is generated in Python from the same plan objects; furniture comes from the same
+   drafting layer that draws the SVG; heights come from the engineering report. JavaScript only renders.
+
+Q: How did you test something visual like 3D?
+A: Property tests on the scene JSON (every room walkable, doors have lintels, heights correct, cars not in
+   the core, the drive path inside the gate), plus manual verification in a browser with a debug handle
+   (window.__walk) that lets me step the animation frame by frame.
+
+Q: What was the hardest bug?
+A: (Pick one of Part 6.) e.g. the duplex upper floor falling back to a template with a kitchen —
+   reproduced, traced to plate sizing, fixed sizing + retry, added a test that a duplex has exactly one kitchen.
+
+Q: How do Streamlit reruns affect your design?
+A: Every interaction reruns the script, so expensive work is cached (feasibility, scene build by plan id,
+   3D iframe kept alive by a scene hash), widget state is set via pending keys, and component events are
+   de-duplicated by id.
+
+Q: How would you scale this to many users?
+A: Move generation into a worker queue (it's CPU-bound, ~1 s), store plans and versions in a database
+   instead of session state, give each session its own output folder (today some file paths are shared),
+   and serve the static 3D viewer from a CDN-like static host while keeping it offline-capable.
+
+Q: What would you do differently?
+A: Start with the data model and tests first (I later added them), keep one coordinate convention from
+   day one (early SVG output was upside-down), and avoid tying renderers to private engine functions.
+
+Q: What is Vastu and why include it?
+A: Traditional Indian architecture rules about directions (e.g. kitchen in the South-East, master bedroom
+   in the South-West, entrance in auspicious padas). Most Indian home buyers care about it, so the engine
+   scores it — but it's optional and never overrides building-code safety.
+
+Q: What is NBC 2016?
+A: The National Building Code of India. I use its minimum room sizes/widths, ventilation (window area
+   >= 1/10 floor), accessibility (0.9 m clear doors) and fire access (4.5 m gate for buildings >= 15 m).
+
+
+=====================================================================================================
+PART 9 — NUMBERS & FACTS CHEAT-SHEET
+=====================================================================================================
+  1 cent = 435.6 sq ft = 40.4686 m²;   1 m² = 10.764 sq ft;   1 ft = 0.3048 m
+  Walls: external 230 mm, internal 115 mm, compound 150 mm, compound height 1.5 m, parapet 1.0 m
+  Heights: plinth/FFL +0.45 m, storey ~3.0 m, door head 2.1 m, window sill 0.9 m (kitchen 1.05 m)
+  NBC minimums (m², width): living 9.5/2.4, master 9.5/3.0, bedroom 7.5/2.4, kitchen 5.0/1.8,
+    bath+WC 2.8/1.2, passage width 1.0
+  Doors: main 1.0 × 2.1 m, bedroom 0.9, bath 0.75, kitchen 0.8
+  Car bay 2.6 × 5.0 m (stilt 2.5 × 5.0); gates: walk 3½ ft, bike 5 ft, car >= 10 ft, fire 4.5 m
+  Structural grid bays 2.4–4.5 m; columns 230 × 300 mm
+  Lift cars: 4 person 0.85×0.95, 6 person 1.0×1.25 (wheelchair), 8 person 1.1×1.4; speed 0.7–1.0 m/s
+  Feasibility comfort rule: LOSS 4%, COMFORT 0.80, TIGHT 0.92
+  Solve time ~0.3–1.5 s; edit re-plan 1.5–6 s; tests ~98
+  India Standard construction ≈ ₹2,000 / sq ft (tier-2 city); Mumbai ×1.55, Delhi ×1.30, rural ×0.80
+  Land: AP + Telangana, 61 districts, 250 towns; street factors 1.30 / 0.85 / 0.43 / 0.25
+  3D: Three.js r184 offline; walking grid 0.1 m; walker radius 0.2 m; eye 1.6 m
+
+
+=====================================================================================================
+PART 10 — GLOSSARY
+=====================================================================================================
+  BHK          Bedroom-Hall-Kitchen (2BHK = two bedrooms + living + kitchen)
+  Cent         Indian land unit (South India), 435.6 sq ft; also gaj (sq yard), guntha, ground, ankanam
+  Vastu Shastra Traditional Indian architecture rules by direction
+  Mandala      3×3 grid of Vastu zones over the house / plot
+  Pada         one of 32 positions along the boundary used to judge an entrance (each with a deity/effect)
+  Brahmasthan  the centre zone, kept open in Vastu
+  NBC 2016     National Building Code of India
+  RERA carpet  usable floor area inside the walls (Real Estate Regulation Act definition)
+  Setback      required open distance between the building and the plot boundary
+  Ground coverage  share of the plot covered by the building
+  Stilt        open parking floor under the building, on columns
+  Duplex       one home over two floors
+  Swept path   the area a turning vehicle's body covers; used to size gates/driveways
+  BOQ          Bill of Quantities (materials and quantities for construction)
+  Poché        the hatched/filled solid of walls in an architectural drawing
+  DXF          AutoCAD's exchange file format
+  ILS          Iterated Local Search (optimisation method)
+  Zero-shot detection  finding objects described by text, without training on them (OWL-ViT)
+
+=====================================================================================================
+  Tip: open the app, generate a 5-cent 3BHK, walk through it in 3D and press "Drive in" — showing a live
+  demo while explaining Parts 4.4, 4.9 and 4.11 is the strongest way to present this project.
+=====================================================================================================
