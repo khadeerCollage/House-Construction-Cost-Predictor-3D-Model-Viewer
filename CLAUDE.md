@@ -71,6 +71,22 @@ floorplan_generator/          LIVE+WIP  generative engine (pure Python, metres, 
   intent_engine.py IntentSolver (wish-aware re-plan), intent validation/description, zone/grid helpers (2026-10-11)
   wish_parser.py   offline NLU: owners' own words → intents (Indian English, typos, Hindi/Malayalam/Tamil) (2026-10-12)
   quantities.py    arrangement-dependent quantities (partitions, doors, glazing, plumbing MST) for edit pricing
+  terrace_stair.py (2026-10-16) the side of a single-storey house's OUTSIDE terrace stair, chosen by the owner:
+                   stair_sides(plan) judges front / left / right / back with LayoutEngine.site_preview (stages 1-2 +
+                   amenities, no room solve, ~10 ms a side): status now|ok|tight|no (+ measured refusal), Vastu in
+                   simple words (zone on the plot mandala: S/W/SW best, SE/NW good, N/E not good, NE avoid; climb
+                   clockwise = rising towards S / W), house size change, yard (car / garden lost, walkway left beside
+                   it), daily use (walk from the main door, kitchen/utility next to it, bedroom window behind it),
+                   care (front: security + looks); worth → one ⭐ recommended with a 'why'. Words: front/back/left/right
+                   as ON THE DRAWING (road at the top) + the compass ('right side (East)').
+                   (2026-10-17) A WISH NEVER TAKES AWAY ANOTHER: SitePlanner.plan_footprint plans the plot with and
+                   without the asked side (_plan_footprint is the old body); if the side would push out the car
+                   parking or the pool, the stair keeps its automatic side and site.ext_stair_refused says why;
+                   stair_sides marks a side that loses any amenity 'no' (never 'tight'). form_sides(**engine kwargs)
+                   = the same check BEFORE Generate: design_ui '🪜 Stair to the terrace — which side?' (one-storey
+                   Independent House; _stair_sides_form cached; only sides that keep every amenity are listed, the
+                   rest shown 🔒 with the reason; '✨ Best for this plot' = auto) → LayoutEngine(terrace_stair=…).
+                   The stair is clamped inside the compound wall (a boundary house face / a tight side yard).
   site_feasibility.py what fits BEFORE Generate: BHK options + every site amenity judged with the planner itself
                   + a comfort rule; drives the locked 🔒 toggles in the Design form (2026-10-12)
   takeoff.py       QS material take-off measured from the plan (footings per grid column, beams under walls,
@@ -84,6 +100,9 @@ floorplan_generator/          LIVE+WIP  generative engine (pure Python, metres, 
                   district-town rate × town size × street (indicative) — the owner's own rate always wins;
                   STATES: stamp/transfer/registration % (on max(market, guideline)), construction index, units, portal
   structure.py     RCC column grid (bays 2.4-4.5 m on wall centrelines); used by engineering report + drafting
+                   (2026-10-16) structural_grid(x_lines=…): forced column lines (a stilt's car bays) — a column at
+                   every crossing except inside the stair / lift well, thin side towards the cars;
+                   engineering['grid_x'] carries them to drafting, gates.stilt_context and the 3D
   apartment.py     (2026-10-14) building_type 'Apartment' = a TYPICAL FLOOR of 1 / 2 / 4 flats around a common
                    stair + lift core (LayoutEngine.generate/generate_alternatives branch here). Each flat is planned
                    by a sub-LayoutEngine inside its rectangle (`_fixed_site` = SitePlanFixed, no setbacks, no core,
@@ -105,6 +124,14 @@ floorplan_generator/          LIVE+WIP  generative engine (pure Python, metres, 
                    no floor above the stilt / ground could be reached on foot). A plate too narrow for that keeps
                    the stair upright with a FLOOR_LANDING (1.25 m) inside its room, open sideways to the lobby.
                    engineering['apartment']['stair_open'] = the stair room's side open to the hall.
+                   (2026-10-16) STILT + 1 flat: plan_floor also tries floor_layout(core_at='rear') — the band at the
+                   back, the flat in front as a turned Slot (planned for the opposite facing, door on the lobby; it IS
+                   the flat type: intents / base_layout / keys go to it), a 1.0 m walkway along one side + a passage
+                   across the core's front (FloorLayout.walkways → no-park in stilt_bays), grid_x = column lines between
+                   the car bays (far-wall bay ≥ 2.7 m); chosen when _stilt_estimate parks more of the cars asked for.
+                   compose: no building door on the typical floor (you come in on the stilt), door_x = the walkway,
+                   site.grid_x / site.walkways before _gate_brief; engineering['apartment']['core_at' | 'walkways'].
+                   5-cent 2BHK/3BHK: 3 of 3 cars (was 0-1); 4 cents: 2.
   duplex.py        (2026-10-15) one home on two floors: split_program() — ground: living, dining, kitchen, pooja,
                    store/servant, a toilet, the elders' (else guest, else 3BHK+ spare) bedroom; first: the other
                    bedrooms, study (a study is added when one bedroom is alone), 'Family Lounge' (living) + 'Upper
@@ -138,6 +165,12 @@ floorplan_renderer/           LIVE  plan -> files. SVG(drawsvg) DXF(ezdxf) PDF(r
   walkthrough.py   build_scene(plan, latitude=None, state=None) → 3D scene JSON (2026-10-14): scene['lift'] = the working lift; walls split round windows, lintels,
                    door leaves (hinge/swing), stairs, slab/parapet/mumty/upper-floor shell, stilt, site (cars, bikes, trees, gates,
                    road), 0.1 m walking grid (bitset), guided tour (road → gate → main door → every room, nearest next)
+  elevation.py     (2026-10-16) front_elevation_svg(plan, scene=None, mode='clean'|'blueprint'): the road-side
+                   elevation from the 3D scene (one face per floor, front windows with sills / mullions, front doors
+                   and their 'upper' fate — balcony + railing / wall + window / parapet, open sit-outs showing the
+                   set-back wall with its own windows and doors, slab bands, parapet + coping, mumty, lift overrun /
+                   tower, stilt columns or stone plinth, steps, compound wall + pillars + gates, level marks, dims,
+                   5 m scale bar). Seen from the road: u = plot width − x. A duplex's first floor uses scene['upper'].
   narration.py     (2026-10-15) the guide's words like a good broker, in en (simple Indian English) / te (Guntur
                    colloquial: వస్తది, ఉంటది, అండీ + brokers' English words) / hi (natural spoken Hindi). Written here
                    (templates), not generated; every claim measured from the plan (room facts: size, Vastu zone/score
@@ -150,6 +183,31 @@ floorplan_renderer/           LIVE  plan -> files. SVG(drawsvg) DXF(ezdxf) PDF(r
                    add_talk(tour, ctx) → stop['talk'][lang] = {title, say, speech[, by{"L" | "L|via"}, options, via]};
                    walkthrough._with_talk builds stop['facts'] + ctx (errors → scene['talk_error'], walk still works);
                    speech_lines(tour, lang) = what a voice must record, in walking order.
+                   (2026-10-16) CUES — the camera follows the words: C(cue, text) tags a sentence (a str subclass
+                   _Said); _render keeps it as line['c'] + the caption sentence list 'lines'; add_talk → _aim puts
+                   the stop's measured point on it: line['at'] = [x, y, z, g] (g 1 = z above the ground, 0 = above
+                   the floor the guide stands on). Cue names: room · win:<N|E|S|W|any> · bed sofa dining counter
+                   desk washer wc · bath (its door) · door · steps · gate gate_walk gate_car · car bikes · house road
+                   · garden sump pool genset security compound · lobby lift stair · flight top (a stair) · parapet
+                   tank (roof SW corner) solar (roof S edge) east (sunrise). New stop words: _yard, _stair_outside,
+                   _terrace (tank / solar / view), _more (+ _more_options buttons: next floor by lift / stairs,
+                   terrace, finish), _room_again (talk[lang]['again']: the same room a floor up, in a line or two).
+                   Changing a sentence's TEXT changes its voice clip key; adding a cue does not.
+                   (2026-10-16 later) ONLY THE GOOD: the guide never says a weak point (no 'Honestly…', no 'small
+                   for the code', no weak pada / Vastu / tight family / west-sun warning — the Vastu tab keeps the
+                   full audit). room_highlights(f, used) = the HIGHLIGHT LEDGER: candidates measured from the room's
+                   facts (largest / roomy · v_special / v_best / v_good / v_bath · cross / east / north / south /
+                   west / inner / bath_window / vent / fan · bed / desk / sofa / dining / counter / washer / fixtures ·
+                   serve / utility / dining_kitchen / privacy / pooja_hall / quiet / near_parents / elder_ground /
+                   elder_lift / night / elder_safe / guests / pipes / dress), each weighted; a highlight said earlier
+                   in the walk weighs 2.5 less (_REPEATS); top 4 (3 for baths and small rooms), ≤ 1 per group (2 fit,
+                   2 life), spoken in _FLOW order; add_talk walks the rooms in order, stores f['_hl'] (+ '_n' = times
+                   said before → _pick rotates the wording, never twice in a row) and ctx['home_hl'] → the end's
+                   'What makes this home special: …' (lucky door, Agni kitchen, SW master, Ishan pooja, cross
+                   ventilation, attached baths, morning sun). A bedroom whose bath is the next stop ends 'its own
+                   bathroom — come, let me show you' (cue 'bath' = its bath door, else the dressing-room door); the
+                   bath opens 'here is the master bedroom's own bathroom' (f['parent']). Kind DRESS for dressing rooms;
+                   passages: 'every room opens off this passage' only with ≥ 3 links, else 'this way'.
 model_folder/
   frontend.py     Streamlit UI (nav radio: Design vs Analyze)                      (1082)
   design_ui.py    `render_design_tab()` — the whole Design tab, direct imports     (675, WIP)
@@ -187,6 +245,14 @@ model_folder/
                   on the start card and the caption; '🔊 Tell me' speaks the room's tour words (roomWords)
   app.py          Flask API (11 routes)                                            (943)
   cost_engine.py  CostEngine — canonical INR cost + BOQ                            (200)
+  builder_pack.py (2026-10-16) build_pack(plan, cost_data, quality) -> PDF bytes (A4 landscape, ReportLab platypus):
+                  cover (facts + elevation), floor plan(s) (SVGRenderer clean → svglib vectors), front elevation,
+                  room schedule with NBC checks + door / window / gate schedule, cost (estimate_for_plan + boq_for_plan
+                  materials + stage payments), Vastu (ledger top 10, checks, mandala SVG), structure & services notes.
+                  Arial / DejaVu TTF for ₹ ≥ (else Helvetica + spelled-out symbols); SVG fonts forced to Helvetica
+                  before svg2rlg (svglib's font search costs seconds per label). ~3-9 s. Design tab: '📦 Make the
+                  builder & bank pack' (design_ui._pack_section, cached by plan + cost) and '🏠 Front elevation'
+                  under the drawing (design_ui._elevation_section, cached by plan + style). requirements: svglib.
   train_cost_model.py, house_cost_model.pkl(3-feat), house_cost_model_v2.pkl(8-feat, 24 MB, untracked), *.csv
   utils.py        detect_rooms_and_walls() bridge detector -> Flask/Streamlit      (308)
   vit_detector.py OWL-ViT singleton wrapper                                        (131)
@@ -235,6 +301,25 @@ design_ui.render_design_tab()              (direct imports; NOT via Flask)
                                      functional − penalties (access, NBC min, daylight, kitchen↔dining, wet walls,
                                      anchors master→SW kitchen→SE pooja→NE, taboos) + plumbing bonus
        relaxation chain if no access-complete layout; legacy functional subdivision as last resort
+       (2026-10-16) LayoutEngine(terrace_stair='auto'|'front'|'back'|'left'|'right') — kept in generation_params
+       only when not auto; a {"type": "terrace_stair", "side"} wish in design_intents sets it (LayoutEngine strips it
+       from the room solver's intents → self.site_intents; _site_intent_report adds its line to edit_report).
+       plan_footprint(ext_stair_want=plan side): that side first (front needs EXT_STAIR_FRONT 2.25 m yard + the
+       facade = stair + 2.6 m for the door; front car reservations + 1.15), else the reason (site.ext_stair_refused,
+       a design note) and the automatic S/W side. A front stair: _front_stair_exclusion keeps the main door off its
+       end (door_exclusion, same end as a front car bay). place_amenities: front / back stairs try the whole strip and
+       the house face, keeping the better Vastu (ext_stair_vastu = zone score + CLIMB_BONUS 3 for a clockwise climb).
+       StaircaseRect.direction of the outside stair = the end it arrives at (SitePlanner.ext_stair_climb: top 0.9 m
+       alongside the house, S / W preferred) — the SVG straight stair (treads across the run, arrow + 'UP' at the
+       top), walkthrough._stair (prefers it when that end reaches) and elevation.py (front / side stair drawn, back
+       hidden) all follow it. engineering['terrace_stair'] = {side, word, compass, zone, score, vastu_word, climb,
+       climb_ok, rect, want, refused}; layout_state['terrace_stair'] = its short form (wish box + validation).
+       Default plans: rooms / doors / windows / gates unchanged; only the stair may slide along its face (Vastu ≥).
+       (2026-10-16) steps 0-3 always; then the lift retries (outside → inside, inside → entrance tower);
+       then, only when still NO layout, compact-home steps 4-9 (MAX_RELAX 10): an attached bath shared one at a
+       time (guest → bedroom → children's; never master / elders), a pooja shelf in the hall, kitchen 1.8 /
+       hall 2.4 m NBC widths, one bathroom for the home — each solved again, first layout kept. Sweep of
+       2-10 cents × offered BHKs × N/E/S/W × car: legacy fallbacks 20/282 → 0/282 (0/280 with elders).
     4 doors (attached→parent/dress, others→best circulation), arches (living↔dining, stairs, foyers),
       main door at best 32-pada on the living facade
     5 SitePlanner.place_amenities()  Vastu-ranked, collision-free, clear entrance path, gates; two-wheelers fall back to parallel
@@ -273,8 +358,16 @@ Intent editing loop (2026-10-11, UI reworked 2026-10-12) — the Design tab's "�
     button → `_version_dialog` (st.dialog, large): that version's blueprint, Before → after vs the previous
     version, room-by-room `version_changes`, and "Make this my design again" (`_restore` = commit + st.rerun,
     because a button inside a dialog reruns only the dialog); single-series cost line ≥ 3 versions).
+  Re-plan options never lose an amenity the design has (intent_studio.KEEP): an option that would is dropped when
+  another keeps everything, else it carries edit_report['lost'] + a warning.
   Option cards: label + why, wishes met/blocked_by, 💰 cost vs now with work-item reasons (CostEngine.layout_delta),
   rooms moved, Vastu/NBC warnings.
+  🪜 Terrace stair (2026-10-16, single storey): a line under the map (side now + Vastu) and '🪜 Choose the terrace
+  stair's side' → a full-width panel laid out like the map (road card on top, left / house / right, back below), each
+  card from terrace_stair.stair_sides (cached per plan in 'stair_sides_cache'; 'stair_panel_open'); '👉 Put the stair
+  here' adds the wish (refused sides never join: _stair_refusal); typed: wish_parser._terrace_stair_clause ('terrace
+  stairs to the back', 'steps east side', 'mettlu mundu', 'no stairs in front' → other sides, 'other side'); an
+  idea button when the recommended side differs; version_changes names the move.
 
 3D walk-through (2026-10-14) — last section of the Design tab (model_folder/walkthrough_ui.py):
   floorplan_renderer.walkthrough.build_scene(plan, state=land.state)  (cached in session 'walk3d_scene' by id(plan))
@@ -298,6 +391,32 @@ Intent editing loop (2026-10-11, UI reworked 2026-10-12) — the Design tab's "�
   levels_list[i]['plan'] 0|1, planOf(L) / PL(p) pick rooms, labels, door leaves (G.dyn2), fans, minimap; nav_typ is
   the upper plan's grid; the tour climbs (stops with 'level' + 'target', walkTo in JS). The old one-walking-level
   key 'upper' is now 'upper_level'. Homes on every floor are labelled '🏠 1st-floor home'.
+  The guide's camera + the visit (2026-10-16): walkthrough._stop_cues(stop, geo) measures every cue's point
+  (_room_cues: windows by compass side, furniture from Drafting.items, the bath door). walk.js director: each
+  spoken line starts → onLine(i, line) lights the caption sentence (#capS span.ln.now) and aims (aimFor: yaw,
+  pitch, a gentle zoom FOV 46-62 for far things, and on the roof a 0.5 m 'lean' over the parapet for things on
+  the ground); steer(dt) eases to it unless the owner dragged the view in the last 2.5 s; a stop with cues has
+  no pan sweep; voice off → silentNext steps the sentences by reading time on the animation clock.
+  Doors and gates like a person uses them (2026-10-17): on a route (tour or tap-to-walk) walk.js routeCrosses()
+  opens a door ~2.4 m (a gate ~5.5 m) before the walker passes through, inOpening() keeps it open until he is
+  clear of the leaf's swing, then it closes — the guide shows every room with its door shut (nothing hidden behind
+  a leaf); free walking with the keys keeps the 1.7 m proximity rule. _viewpoints never stands inside a door's
+  swing (hinge radius w + 0.35 on the room side); a room shown from its doorway carries stop['peek'] = that door,
+  kept open while he talks.
+  Room order (all walks): _attached_map (layout_state parent keys within a flat, else the bath's only door) +
+  _pick_next — a bedroom's dressing room and bath right after it, never before it. Room facts for the highlights
+  (_home_relations, per floor): parent, links (door / arch neighbours' kinds), mates (shared walls), wet_share,
+  depth (0 road … 1 back), largest bedroom, seq. walk.js room badge shows only 🟢 good / best Vastu.
+  Houses (_tour): road → gate → parking (car / bikes) → 'yard' (garden, sump, pool, genset, security, compound
+  wall — stood where most are in sight, _yard_items keeps the biggest of each) → main door (landing_foot clamped
+  inside the plot) → every room from a photographer's spot (_viewpoints: near a corner on the door side, ≥ 0.3 m
+  clear, looking across the diagonal) → [duplex: stair, upstairs rooms] → one storey: out to the outside stair's
+  foot ('stair', external, its side / Vastu / clockwise climb) → 'terrace' (target on nav1 by the parapet facing
+  the biggest garden, else the road — _terrace_spot) → end. Duplex: + terrace after the upstairs rooms.
+  Apartments / homes on every floor (_journey): the choice defaults to the LOWEST home; after its rooms a 'more'
+  stop: talk.by[L].options = next floor (by lift / stairs) · straight to the terrace · finish; walk.js moreGo →
+  next: tour.loop++, back to the 'ride' stop for floor L+1 (rooms then use talk 'again'); terrace by lift =
+  liftTrip to the highest lift stop ≤ the roof, then the last flight on foot. ⏭ Next on 'more' = the terrace.
   Every floor (2026-10-14 latest): levels_list = [stilt,] the designed floor × num_floors, terrace
   (z = base + L × storey, base 0.15 on a stilt else FFL). walk.js builds the floor once as a template
   (body / stairs / furn / ceil) and clones it per level (shared geometry); ground-only extras (entrance frames,
@@ -578,6 +697,34 @@ the original list below describes the pre-upgrade engine.
 18. **[V] Test side-effects:** see §11. Detector has zero tests.
 
 ## 11. Tests
+**2026-10-17 (doors close behind the guide): 139/139 pass** — test_guide_camera test_07 (no viewpoint inside a door
+swing; peek stops name their door) + viewer hooks (routeCrosses, inOpening, tour.cur.peek).
+**2026-10-17 (a wish never takes away another): 138/138 pass** — test_terrace_stair test_08 (the owner's 3-cent N 3BHK
+Luxury with a front car: left / right / front locked 'the car parking would no longer fit', asked anyway the car and
+its gate stay; form_sides offers only the back, without the car the sides open; a form choice is built and kept) and
+test_09 (the stair never crosses the plot edge).
+**2026-10-16 (only the good + bath after its bedroom): 136/136 pass** + `tests/test_guide_pros.py` (5: every attached
+bath / dressing room right after its bedroom in a villa, an apartment and a duplex; the bedroom leads in and the camera
+turns to the bath door; the bath's own words in en / te / hi; highlights only when measured true; never the same
+Telugu line in consecutive rooms; the home-in-one-line ending). test_voice test_03b: no weak-point words in any language.
+**2026-10-16 (the guide's camera + the visit): 130/130 pass** + `tests/test_guide_camera.py` (6: cued lines with
+points — bed inside its room, win:E on an East window, gate / car / garden / sump / steps / flight / tank / solar /
+east; caption sentences beside the speech; a house: gate → parking → yard → door → rooms → outside stair → terrace
+by the parapet, every path walkable, no main-door stop out on the road; apartments / floors: lowest home first,
+'more' with next-floor / terrace / finish per floor, 'again' words; duplex ends on the terrace; te / hi words in
+their own script; viewer hooks). test_voice's _all_speech also checks the 'again' words.
+**2026-10-16 (terrace-stair side): 124/124 pass** + `tests/test_terrace_stair.py` (7: default plans climb clockwise and
+2D / 3D agree; every side on request for N/E/W facings, rebuilt bit for bit, the first step reachable on foot from the
+walking gate and the bridge onto the roof; the front stair beside the door, car kept, elevation shows it; a refused
+side says why; the advisor's 4 cards / one recommended / simple Vastu; typed wishes + re-plan reports + refusal in a
+re-plan; the history names the move).
+**2026-10-16 (compact homes, stilt rear core, elevation, builder pack): 117/117 pass** + `tests/test_compact_stilt_pack.py`
+(7: tight plots get a band layout keeping every bedroom + rebuild bit for bit + re-plan replays the relaxations;
+roomy plots unchanged; 5-cent stilt apartments park 3 of 3 with the core at the back, cars clear of columns,
+shafts and the walkway, no typical-floor building door, flat door on the lobby, Smart Re-Plan kept; 4 cents
+honest note, no stilt → front core; the 3D journey reaches the core past 3 parked cars; the elevation (labels,
+mirrored gate, a window per front window per floor, blueprint, stilt); the PDF pack (≥ 7 pages)).
+test_gates test_05 now checks the cars against the grid the engine uses (grid_x + walkways).
 **2026-10-15 (the guide's voice): 110/110 pass** + `tests/test_voice.py` (7: numbers in words (en/te/hi, halves, flat digits);
 every stop of 5 building types talks in 3 languages, speech has no digits / symbols and Telugu/Hindi no Latin letters;
 words measured from the plan (feet, 'Honestly' only for weak Vastu, cents/gajalu/gaj, Vastu score); floor choice,
@@ -692,6 +839,10 @@ respect Windows paths (`os.path.join`), CRLF repo.
   D:/S:/P: direction, M: modifier, U: unsupported); multi-word phrases match longest-first, unknown words are
   typo-repaired against the vocabulary (keep real building words in `_STOP` so they are never "corrected").
   Add the sentence to `test_10_everyday_language`.
+- **Site wishes (2026-10-16):** a wish that changes the site rather than the rooms (today: `terrace_stair`) is
+  pulled out of `design_intents` in `LayoutEngine.__init__` into `self.site_intents`, becomes an engine setting
+  (stored in generation_params), and gets its report line in `_site_intent_report`; check it with the planner
+  (`site_preview`) before it joins the wish list.
 - **New wish (intent) type:** add it to `INTENT_TYPES`, `normalise_intent`, `describe_intent`, `validate_intent`,
   a penalty + `satisfied` branch in `IntentSolver._intent_eval` (keep unmet ≥ 0.5·W so search is pulled in), a seed
   in `_intent_seeds` if a direct state edit exists, a frame rule in `wish_parser.understand_clause`, a UI action in

@@ -979,7 +979,7 @@ def _build_drafting(plan, label_size: Optional[Callable], out: Drafting) -> Draf
         except Exception:
             out.walls, out.compound = [], []
 
-    out.grid = structural_grid(rooms, footprint)
+    out.grid = structural_grid(rooms, footprint, x_lines=(getattr(plan, "engineering", None) or {}).get("grid_x"))
 
     sides = plan_sides_for_facing(getattr(plan, "orientation", "N"))
     cmap = {s: sides[SIDE_TO_PLAN[s]] for s in "NSEW"}

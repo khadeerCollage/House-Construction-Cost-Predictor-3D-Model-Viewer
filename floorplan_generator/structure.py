@@ -85,7 +85,12 @@ def _pick_lines(cands, lo, hi, weight):
     return chosen
 
 
-def structural_grid(rooms, footprint=None, tol: float = 0.03) -> StructuralGrid:
+def structural_grid(rooms, footprint=None, tol: float = 0.03, x_lines=None) -> StructuralGrid:
+    """
+    x_lines: column lines across the frontage set out for parking under a stilt building (apartment.py,
+    core at the rear) — between the car bays, never in a car's lane. They replace the wall-picked lines;
+    every grid crossing then gets a column (a frame over open parking), except inside the stair / lift well.
+    """
     if footprint and len(footprint) == 4 and footprint[2] > 0 and footprint[3] > 0:
         fx, fy, fw, fd = footprint
     else:
@@ -103,8 +108,11 @@ def structural_grid(rooms, footprint=None, tol: float = 0.03) -> StructuralGrid:
     def h_len(y):
         return sum(r.w for r in b if abs(r.y - y) < tol or abs(r.top - y) < tol) / 2
 
-    xs = _pick_lines(_cluster([r.x for r in b] + [r.right for r in b]), x_lo, x_hi, v_len)
+    forced = bool(x_lines)
+    xs = sorted(round(v, 3) for v in x_lines) if forced else \
+        _pick_lines(_cluster([r.x for r in b] + [r.right for r in b]), x_lo, x_hi, v_len)
     ys = _pick_lines(_cluster([r.y for r in b] + [r.top for r in b]), y_lo, y_hi, h_len)
+    wells = [r for r in b if getattr(r, "category", "") in ("STAIRS", "LIFT")]
 
     def on_vertical_wall(x, y):
         return any((abs(r.x - x) < tol or abs(r.right - x) < tol) and r.y - tol <= y <= r.top + tol for r in b)
@@ -112,14 +120,21 @@ def structural_grid(rooms, footprint=None, tol: float = 0.03) -> StructuralGrid:
     def on_horizontal_wall(x, y):
         return any((abs(r.y - y) < tol or abs(r.top - y) < tol) and r.x - tol <= x <= r.right + tol for r in b)
 
+    def in_well(x, y):
+        return any(r.x + 0.2 < x < r.right - 0.2 and r.y + 0.2 < y < r.top - 0.2 for r in wells)
+
     cols = []
     for x in xs:
         for y in ys:
             v, h = on_vertical_wall(x, y), on_horizontal_wall(x, y)
-            if not (v or h):
+            if forced:
+                if in_well(x, y):
+                    continue
+            elif not (v or h):
                 continue
-            # long side along the wall that carries more length through the node
-            along_y = v and (not h or v_len(x) >= h_len(y))
+            # long side along the wall that carries more length through the node; over parking (forced lines)
+            # the thin side faces the cars unless only a cross wall runs through
+            along_y = (v or not h) if forced else (v and (not h or v_len(x) >= h_len(y)))
             hw, hh = (COL_SHORT / 2, COL_LONG / 2) if along_y else (COL_LONG / 2, COL_SHORT / 2)
             cols.append((round(x - hw, 3), round(y - hh, 3), round(x + hw, 3), round(y + hh, 3)))
     return StructuralGrid(xs=xs, ys=ys, columns=cols, footprint=(fx, fy, fw, fd))

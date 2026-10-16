@@ -351,8 +351,8 @@ def front_gap(footprint, shafts, columns) -> float:
     return round(max(best, fx + fw + 0.115 - pos), 2)
 
 
-def stilt_context(rooms, footprint, is_site) -> Tuple[List, List, List]:
-    """(shafts, no-park lobbies, columns) of the floors above, for stilt_bays."""
+def stilt_context(rooms, footprint, is_site, grid_x=None, walkways=None) -> Tuple[List, List, List]:
+    """(shafts, no-park lobbies + walkways, columns) of the floors above, for stilt_bays."""
     from floorplan_generator.structure import structural_grid
     building = [r for r in rooms if not is_site(r) and r.w > 0 and r.h > 0]
     shafts, lobby = [], []
@@ -362,16 +362,19 @@ def stilt_context(rooms, footprint, is_site) -> Tuple[List, List, List]:
             shafts.append(rect)
         elif getattr(r, "role", "") == "COMMON" or r.name in HALLS:     # the entrance lobby / hall (not a flat's foyer)
             lobby.append(rect)
-    cols = [tuple(c) for c in structural_grid(building, footprint).columns]
+    for w in walkways or []:                 # the path from the gate to the lift and stair (a core at the rear)
+        lobby.append((w[0], w[1], w[0] + w[2], w[1] + w[3]))
+    cols = [tuple(c) for c in structural_grid(building, footprint, x_lines=grid_x).columns]
     return shafts, lobby, cols
 
 
-def stilt_plan(rooms, footprint, components: Dict, quality: str, building_type: str, is_site) -> Dict:
+def stilt_plan(rooms, footprint, components: Dict, quality: str, building_type: str, is_site,
+               grid_x=None, walkways=None) -> Dict:
     """Stilt bays for the cars asked for, under the floors above (see stilt_bays) + a note if fewer fit."""
     cfg = (components or {}).get("car_parking") or {}
     n = max(1, int(cfg.get("slots", 1) or 1))
     car = design_car(quality, building_type)
-    shafts, lobby, cols = stilt_context(rooms, footprint, is_site)
+    shafts, lobby, cols = stilt_context(rooms, footprint, is_site, grid_x, walkways)
     info = stilt_bays(footprint, shafts, lobby, cols, n, car)
     info["car"] = car
     tandem = sum(1 for b in info["bays"] if b[4])
@@ -384,7 +387,7 @@ def stilt_plan(rooms, footprint, components: Dict, quality: str, building_type: 
                         "Two-wheelers can still park on the stilt floor.")
     elif info["fitted"] < n:
         info["note"] = (f"Only {info['fitted']} of the {n} cars fit under the building: a car must drive straight in "
-                        "clear of the stair, the lift, the entrance lobby and the columns.")
+                        "clear of the stair, the lift, the entrance lobby, the walkway and the columns.")
     elif tandem:
         info["note"] = (f"{tandem} of the {n} stilt bays {'is' if tandem == 1 else 'are'} tandem (behind another car) — "
                         "good for one family's two cars.")

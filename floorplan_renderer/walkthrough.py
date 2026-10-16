@@ -457,14 +457,19 @@ def _stair(sc, base: float, storey: float, external: bool, top: Optional[float] 
         s0 = max(0.0, L - mid_land - treads * tt)
         P, side = frame(False, False), None
         if external and outer is not None:       # rise towards the end that lies alongside the house
-            best = None
+            best, ovs = None, {}
             for fs in (False, True):
                 a = rect_of(frame(fs, False), L - 0.9, L, 0, Wd)
                 lo, hi = (a[1], a[3]) if along_y else (a[0], a[2])
                 olo, ohi = (outer[1], outer[3]) if along_y else (outer[0], outer[2])
                 ov = min(hi, ohi - 0.2) - max(lo, olo + 0.2)
+                ovs[fs] = ov
                 if best is None or ov > best[0] + 1e-6:
                     best = (ov, fs)
+            # the engine's climb (the end it arrives at: Vastu rises towards S / W) when that end reaches
+            want = {"N": False, "E": False, "S": True, "W": True}.get(getattr(sc, "direction", None))
+            if want is not None and ovs[want] >= 0.6 - 1e-6:
+                best = (ovs[want], want)
             P = frame(best[1], False)
             gaps = ({"+": outer[0] - x1, "-": x0 - outer[2]} if along_y else {"+": outer[1] - y1, "-": y0 - outer[3]})
             near = sorted((g, k) for k, g in gaps.items() if g > -0.05)
@@ -1074,8 +1079,206 @@ def _room_facts(r, row, vrow, lights, items) -> Dict:
     }
 
 
+# where each piece of furniture is looked at (its height above the floor, m)
+_FURN_Z = {"bed": 0.55, "sofa": 0.5, "dining": 0.75, "counter": 0.95, "desk": 0.75, "wardrobe": 1.3, "tv_unit": 0.9,
+           "wc": 0.45, "basin": 0.85, "shower": 1.4, "washer": 0.7, "fridge": 1.3, "pooja": 1.1, "sink": 0.95,
+           "hob": 0.95}
+_SITE_CUE = {"GARDEN": ("garden", 0.3), "WATER_TANK": ("sump", 0.15), "POOL": ("pool", 0.0),
+             "GENERATOR": ("genset", 0.8), "SECURITY": ("security", 1.2)}
+_PLAN_VEC = {"N": (0.0, 1.0), "S": (0.0, -1.0), "E": (1.0, 0.0), "W": (-1.0, 0.0)}
+
+
+def _cue(x: float, y: float, z: float, g: int = 0) -> List:
+    """A point the camera looks at: z above the floor the guide stands on (g=0) or above the ground (g=1)."""
+    return [_r(x, 2), _r(y, 2), _r(z, 2), g]
+
+
+def _item_xy(it: Dict) -> Tuple[float, float]:
+    if "x" in it:
+        return it["x"], it["y"]
+    rc = _furniture_rect(it)
+    if rc:
+        return (rc[0] + rc[2]) / 2, (rc[1] + rc[3]) / 2
+    o, u, v = it["o"], it["u"], it["v"]
+    a, b = it.get("W", 0.5) / 2, it.get("D", 0.5) / 2
+    return o[0] + u[0] * a + v[0] * b, o[1] + u[1] * a + v[1] * b
+
+
+def _room_cues(name: str, look, wins: List[Dict], items: List[Dict], doors: List[Dict], compass: Dict,
+               cat_of: Dict) -> Dict:
+    """The room's things the guide talks about: its windows by compass side, its furniture, the bath door."""
+    out = {"room": _cue(look[0], look[1], 1.1)} if look else {}
+    best: Dict[str, Tuple[float, List]] = {}
+    for w in wins:
+        if w.get("room") != name:
+            continue
+        comp = compass.get(w["side"], w["side"])
+        ln = math.hypot(w["b"][0] - w["a"][0], w["b"][1] - w["a"][1])
+        pt_ = _cue((w["a"][0] + w["b"][0]) / 2, (w["a"][1] + w["b"][1]) / 2, 1.9 if w.get("vent") else 1.45)
+        for k in ("win:" + comp, "win:any"):
+            if k not in best or ln > best[k][0]:
+                best[k] = (ln, pt_)
+    out.update({k: v[1] for k, v in best.items()})
+    for it in items:
+        if it.get("room") != name or it.get("kind") in out:
+            continue
+        try:
+            x, y = _item_xy(it)
+        except (KeyError, TypeError, IndexError):
+            continue
+        out[it["kind"]] = _cue(x, y, _FURN_Z.get(it["kind"], 0.8))
+    for k, alts in (("counter", ("sink", "hob")), ("wc", ("basin", "shower"))):
+        if k not in out:
+            for a in alts:
+                if a in out:
+                    out[k] = out[a]
+                    break
+    for d in doors:
+        a, b = d.get("room"), d.get("other")
+        if name not in (a, b):
+            continue
+        other = b if a == name else a
+        if cat_of.get(other) == "BATHROOM" and "bath" not in out:
+            out["bath"] = _cue(d["mid"][0], d["mid"][1], 1.1)
+        elif other and any(w in str(other).lower() for w in ("dress", "wardrobe")):
+            out.setdefault("_dress", _cue(d["mid"][0], d["mid"][1], 1.1))
+        out.setdefault("door", _cue(d["mid"][0], d["mid"][1], 1.1))
+    if "bath" not in out and "_dress" in out:              # the bath behind the dressing room: its way in
+        out["bath"] = out["_dress"]
+    out.pop("_dress", None)
+    return out
+
+
+def _stop_cues(s: Dict, geo: Dict) -> Dict:
+    """Every cue a stop's words may use, measured from the scene (narration.C names → points)."""
+    W, H = geo["W"], geo["H"]
+    fx, fy, fw, fd = geo["footprint"]
+    lv, outer, roof_z = geo["lv"], geo["outer"], geo["roof_z"]
+    k = s["kind"]
+    cues: Dict[str, List] = {}
+    here = s.get("target") or ((s.get("path") or [None])[-1])
+    if k == "room":
+        upstairs = geo.get("upstairs_room", {}).get(id(s), False)
+        src = geo["up"] if upstairs and geo.get("up") else geo
+        return _room_cues(s.get("room", ""), s.get("look"), src["wins"], src["items"], src["doors"], geo["compass"],
+                          geo["cat_of"])
+    # outside and in the common spaces
+    cues["house"] = _cue(fx + fw / 2, fy + fd, 2.4, 1)
+    gw = next((g for g in geo["gates"] if g["kind"] in ("walk", "two_wheeler")), None)
+    gc = next((g for g in geo["gates"] if g["kind"].startswith("vehicle") or g["kind"] == "fire"), None)
+    for name, g in (("gate_walk", gw or gc), ("gate_car", gc or gw), ("gate", gw or gc)):
+        if g:
+            cues[name] = _cue((g["x0"] + g["x1"]) / 2, H, 1.1, 1)
+    road_y = H + VERGE + geo["road_w"] / 2
+    if k == "start" and here:
+        cues["road"] = _cue(here[0] + (8.0 if here[0] < W / 2 else -8.0), road_y, 1.0, 1)
+    else:
+        cues["road"] = _cue(W / 2, road_y, 0.5, 1)
+    cars = [c for c in geo["cars"] if bool(c.get("stilt")) == bool(lv["stilt"])]
+    if cars:
+        c = min(cars, key=lambda q: math.hypot(q["c"][0] - (here or [W / 2, H])[0], q["c"][1] - (here or [W / 2, H])[1]))
+        cues["car"] = _cue(c["c"][0], c["c"][1], (0.15 if lv["stilt"] else 0.0) + 0.75, 1)
+    if geo["bikes"]:
+        b = geo["bikes"][0]
+        cues["bikes"] = _cue(b["c"][0], b["c"][1], 0.6, 1)
+    for it in sorted(geo["site"], key=lambda q: -(q["r"][2] - q["r"][0]) * (q["r"][3] - q["r"][1])):
+        if it["cat"] in _SITE_CUE and _SITE_CUE[it["cat"]][0] not in cues:      # the biggest garden
+            x0, y0, x1, y1 = it["r"]
+            name, z = _SITE_CUE[it["cat"]]
+            cues[name] = _cue((x0 + x1) / 2, (y0 + y1) / 2, z, 1)
+    if here:                                               # the nearest side or back compound wall
+        cands = [(here[0], 0.0), (0.0, here[1]), (W, here[1])]
+        cx, cy = min(cands, key=lambda p: math.hypot(p[0] - here[0], p[1] - here[1]))
+        cues["compound"] = _cue(cx, cy, 1.0, 1)
+    main = geo.get("main_door")
+    if main:
+        cues["door"] = _cue(main["mid"][0], main["mid"][1], 1.1)
+    if geo["steps"]:
+        st_ = geo["steps"][min(1, len(geo["steps"]) - 1)]
+        cues["steps"] = _cue((st_[0] + st_[2]) / 2, (st_[1] + st_[3]) / 2, 0.2, 1)
+    if k == "door" and s.get("look") and "Front door" in s.get("title", ""):
+        cues["door"] = _cue(s["look"][0], s["look"][1], 1.1)
+    lobby = geo.get("lobby")
+    if lobby is not None:
+        cues["lobby"] = _cue(lobby.cx, lobby.cy, 1.2)
+    lf = geo.get("lift")
+    if lf and lf.get("door"):
+        cues["lift"] = _cue(lf["door"]["mid"][0], lf["door"]["mid"][1], 1.2)
+    inner = next((q for q in geo["stairs"] if not q["external"]), None)
+    if inner is not None:
+        r = inner["r"]
+        cues["stair"] = _cue((r[0] + r[2]) / 2, (r[1] + r[3]) / 2, 1.4)
+        if k == "stair":
+            cues["flight"] = cues["stair"]
+    ext = next((q for q in geo["stairs"] if q["external"]), None)
+    if ext is not None and (k in ("stair", "terrace") or inner is None):
+        boxes = sorted(ext["boxes"], key=lambda b: b[5])
+        mid, top = boxes[len(boxes) // 2], boxes[-1]
+        cues["flight"] = _cue((mid[0] + mid[2]) / 2, (mid[1] + mid[3]) / 2, mid[5] + 0.3, 1)
+        cues["top"] = _cue((top[0] + top[2]) / 2, (top[1] + top[3]) / 2, top[5] + 0.9, 1)
+    # the roof: the South-West corner for the tank, the South edge for the solar panels, the East for sunrise
+    inv = {comp: p for p, comp in geo["compass"].items()}
+    cx0, cy0 = (outer[0] + outer[2]) / 2, (outer[1] + outer[3]) / 2
+
+    def edge(comp, inset=0.8):
+        vx, vy = _PLAN_VEC[inv[comp]]
+        return (cx0 + vx * ((outer[2] - outer[0]) / 2 - inset), cy0 + vy * ((outer[3] - outer[1]) / 2 - inset))
+    sx, sy = edge("S")
+    wx, wy = edge("W")
+    cues["tank"] = _cue(sx + wx - cx0, sy + wy - cy0, roof_z + 0.8, 1)
+    cues["solar"] = _cue(sx, sy, roof_z + 0.4, 1)
+    ex, ey = _PLAN_VEC[inv["E"]]
+    cues["east"] = _cue(cx0 + ex * 40.0, cy0 + ey * 40.0, roof_z + 7.0, 1)
+    if k == "terrace" and s.get("look"):
+        lx, ly = s["look"]
+        dx, dy = lx - cx0, ly - cy0
+        n = math.hypot(dx, dy) or 1.0
+        hx, hy = (outer[2] - outer[0]) / 2, (outer[3] - outer[1]) / 2
+        te = min(hx / abs(dx / n) if abs(dx) > 1e-6 else 1e9, hy / abs(dy / n) if abs(dy) > 1e-6 else 1e9)
+        cues["parapet"] = _cue(cx0 + dx / n * te, cy0 + dy / n * te, roof_z + 0.8, 1)
+    return cues
+
+
+def _home_relations(plan_like, rects, doors: List[Dict], arches: List[Dict]) -> Dict:
+    """
+    How the rooms of one floor sit together — what the guide's highlights are measured from: which bedroom each
+    attached bath / dress room belongs to, which rooms open into which (doors and arches), which share a wall.
+    """
+    parent_of = _attached_map(plan_like, rects, doors)
+    links: Dict[str, set] = {r.name: set() for r in rects}
+    for d in doors:
+        a, b = d.get("room"), d.get("other")
+        if a in links and b in links and a != b:
+            links[a].add(b)
+            links[b].add(a)
+
+    def at(x, y):
+        for r in rects:
+            if r.x - 1e-6 <= x <= r.right + 1e-6 and r.y - 1e-6 <= y <= r.top + 1e-6:
+                return r.name
+        return None
+    for a in arches or []:
+        (x1, y1), (x2, y2) = a["a"], a["b"]
+        mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+        p1, p2 = ((mx, my - 0.3), (mx, my + 0.3)) if abs(y1 - y2) < 0.02 else ((mx - 0.3, my), (mx + 0.3, my))
+        n1, n2 = at(*p1), at(*p2)
+        if n1 and n2 and n1 != n2:
+            links[n1].add(n2)
+            links[n2].add(n1)
+    mates: Dict[str, set] = {r.name: set() for r in rects}
+    for i, a in enumerate(rects):
+        for b in rects[i + 1:]:
+            vert = (abs(a.right - b.x) < 0.02 or abs(b.right - a.x) < 0.02) and min(a.top, b.top) - max(a.y, b.y) > 0.6
+            horz = (abs(a.top - b.y) < 0.02 or abs(b.top - a.y) < 0.02) and min(a.right, b.right) - max(a.x, b.x) > 0.6
+            if vert or horz:
+                mates[a.name].add(b.name)
+                mates[b.name].add(a.name)
+    return {"parent_of": parent_of, "links": links, "mates": mates, "rects": {r.name: r for r in rects}}
+
+
 def _with_talk(plan, tour: List[Dict], rooms, up, doors: List[Dict], gates: List[Dict], cars, bikes, stairs,
-               lv, apt: Optional[Dict], lift_sc: Optional[Dict], outer, stilt_on: bool, building) -> List[Dict]:
+               lv, apt: Optional[Dict], lift_sc: Optional[Dict], outer, stilt_on: bool, building,
+               geo: Optional[Dict] = None) -> List[Dict]:
     """Each stop's facts, then its words in English, Telugu and Hindi (narration.add_talk)."""
     eng = getattr(plan, "engineering", None) or {}
     specs = eng.get("gates") or []
@@ -1145,6 +1348,20 @@ def _with_talk(plan, tour: List[Dict], rooms, up, doors: List[Dict], gates: List
     bd = getattr(plan, "vastu_breakdown", None) or {}
     has_gate_stop = any(s["kind"] == "gate" for s in tour)
     first_up = True
+    # how the rooms sit together, floor by floor (the highlights are measured from it)
+    rel0 = _home_relations(plan, list(building), doors, (geo or {}).get("arches") or [])
+    rel1 = (_home_relations((geo or {}).get("up_plan"), list((geo or {}).get("ub") or []), up.get("doors") or [],
+                            up.get("arches") or []) if up is not None else None)
+    fx_, fy_, fw_, fd_ = (geo or {}).get("footprint") or (0.0, 0.0, 1.0, 1.0)
+
+    def rel_kind(rel, name):
+        r = rel["rects"].get(name)
+        if r is None:
+            return "ROOM"
+        rm = (up_info if rel is rel1 else info).get(name, {})
+        return narration.room_kind(name, r.category, rm.get("role", "") or getattr(r, "role", "") or "",
+                                   name in rel["parent_of"] and r.category == "BATHROOM")
+    seq = 0
     for s in tour:
         k, title = s["kind"], s.get("title", "")
         if k == "start":
@@ -1169,24 +1386,74 @@ def _with_talk(plan, tour: List[Dict], rooms, up, doors: List[Dict], gates: List
             upstairs = up is not None and isinstance(lvl, int) and lvl > (1 if stilt_on else 0)
             rm = (up_info if upstairs else info).get(s.get("room", ""), {})
             f = dict(rm.get("facts") or {})
-            f["kind"] = narration.room_kind(s.get("room", ""), rm.get("cat", ""), rm.get("role", ""),
-                                            s.get("room", "") in attached)
-            f["attached"] = s.get("room", "") in attached
+            name = s.get("room", "")
+            rel = rel1 if (upstairs and rel1 is not None) else rel0
+            r_ = rel["rects"].get(name)
+            kids = [c for c, par in rel["parent_of"].items() if par == name]
+            is_child = name in rel["parent_of"]
+            f["kind"] = narration.room_kind(name, rm.get("cat", ""), rm.get("role", ""),
+                                            (name in attached) or (is_child and rm.get("cat") == "BATHROOM"))
+            f["attached"] = name in attached or any(rel["rects"][c].category == "BATHROOM" for c in kids
+                                                    if c in rel["rects"])
             f["level"] = lvl if isinstance(lvl, int) else None
             f["ground"] = (not upstairs) and kind in ("house", "duplex") and not stilt_on
             if upstairs and first_up:
                 f["first_up"] = True
                 first_up = False
+            # the highlights' raw material, measured
+            f["seq"] = seq
+            seq += 1
+            if is_child:
+                f["parent"] = rel_kind(rel, rel["parent_of"][name])
+            f["has_dress"] = any("dress" in c.lower() or "wardrobe" in c.lower() for c in kids)
+            f["links"] = sorted({rel_kind(rel, n) for n in rel["links"].get(name, ())})
+            f["mates"] = sorted({rel_kind(rel, n) for n in rel["mates"].get(name, ())})
+            f["wet_share"] = rm.get("cat") == "BATHROOM" and any(
+                rel["rects"][n].category in ("BATHROOM", "KITCHEN", "UTILITY") for n in rel["mates"].get(name, ())
+                if n in rel["rects"])
+            if r_ is not None and fd_ > 0:
+                f["depth"] = round(min(1.0, max(0.0, (fy_ + fd_ - r_.cy) / fd_)), 2)
+            if rm.get("cat") == "BEDROOM":
+                beds_ = [q for q in rel["rects"].values() if q.category == "BEDROOM"
+                         and (" · " not in q.name or q.name.split(" · ")[0] == name.split(" · ")[0])]
+                f["largest"] = len(beds_) > 1 and r_ is not None and r_.area >= max(q.area for q in beds_) - 1e-6
             s["facts"] = f
         elif k == "stair":
-            st = inner or (stairs[0] if stairs else None)
+            ext = next((q for q in stairs if q["external"]), None)
+            st = (ext if s.get("external") else None) or inner or (stairs[0] if stairs else None)
             if st:
                 s["facts"] = {"steps": st["steps"], "riser_mm": st["riser_mm"], "tread_mm": st["tread_mm"],
                               "up": "floor" if max(1, int(getattr(plan, "num_floors", 1) or 1)) > 1 else "terrace"}
+                if s.get("external"):
+                    ts_ = eng.get("terrace_stair") or {}
+                    s["facts"].update(external=True, compass=ts_.get("compass", ""), zone=ts_.get("zone", ""),
+                                      score=ts_.get("score"), climb=ts_.get("climb"), climb_ok=ts_.get("climb_ok"))
         elif k == "terrace":
-            s["facts"] = {"area": (outer[2] - outer[0]) * (outer[3] - outer[1])}
+            views = [n for n, cat in (("garden", "GARDEN"), ("sump", "WATER_TANK"))
+                     if any(r.category == cat for r in plan.rooms)]
+            if any(g for g in gates):
+                views.append("gate")
+            s["facts"] = {"area": (outer[2] - outer[0]) * (outer[3] - outer[1]), "views": views}
+        elif k == "yard":
+            pe = VastuEngine.for_facing(float(plan.plot_width), float(plan.plot_height), getattr(plan, "orientation", "N"))
+            its = []
+            for cat in s.get("yard") or []:
+                r = next((x for x in plan.rooms if x.category == cat), None)
+                if r is not None:
+                    its.append({"kind": cat, "zone": pe.get_zone_for_position(r.cx, r.cy).value})
+            s["facts"] = {"items": its, "compound_ft": round(lv.get("compound", 1.5) / 0.3048)}
         else:
             s["facts"] = {}
+    if geo is not None:                     # what the camera looks at, sentence by sentence
+        geo = dict(geo, cat_of={r.name: r.category for r in building}, upstairs_room={})
+        if up is not None:
+            geo["upstairs_room"] = {id(s): True for s in tour if s["kind"] == "room" and isinstance(s.get("level"), int)
+                                    and s["level"] > (1 if stilt_on else 0)}
+        for s in tour:
+            try:
+                s["cues"] = _stop_cues(s, geo)
+            except (KeyError, TypeError, ValueError, IndexError):
+                s["cues"] = {}
     return narration.add_talk(tour, ctx)
 
 
@@ -1358,6 +1625,8 @@ def build_scene(plan, latitude: Optional[float] = None, state: Optional[str] = N
         far = plat + 3 * 0.3 + 0.6
         mid = (a + b) / 2
         landing_foot = (mid, line + oy * far) if horiz else (line + ox * far, mid)
+        # a shallow front yard: stand inside the compound wall, not out on the road
+        landing_foot = (min(max(landing_foot[0], 0.45), W - 0.45), min(max(landing_foot[1], 0.45), H - 0.45))
     if lift_land and lift_eng.get("entry") == "side door" and not lv["stilt"]:
         lx0, ly0, lx1, ly1 = lift_land                             # side landing: a porch at floor level
         rises = [lv["ffl"]] + [lv["ffl"] * (1 - k / 4) for k in (1, 2, 3)]
@@ -1537,13 +1806,26 @@ def build_scene(plan, latitude: Optional[float] = None, state: Optional[str] = N
         tour_level = r0
         wg = _walk_gate(gates)
         tour = _tour(plan, grid, lv, rooms, building, doors, [wg] if wg else [], landing_foot, stairs, footprint,
-                     compass, main, apt)
+                     compass, main, apt, walk1=walk1, outer=outer, cars=cars, bikes=bikes, site=site,
+                     top_level=top_level)
         if up is not None:
-            tour = _tour_upstairs(tour, gt, stairs, up, ub, r0 + 1)
+            garden = max((s_ for s_ in site if s_["cat"] == "GARDEN"), default=None,
+                         key=lambda q: (q["r"][2] - q["r"][0]) * (q["r"][3] - q["r"][1]))   # the biggest strip
+            toward = (((garden["r"][0] + garden["r"][2]) / 2, (garden["r"][1] + garden["r"][3]) / 2) if garden
+                      else (fx + fw / 2, H + VERGE + 2.0))
+            tour = _tour_upstairs(tour, gt, stairs, up, ub, r0 + 1, walk1=walk1, outer=outer, top_level=top_level,
+                                  toward=toward, up_plan=up_plan)
     talk_error = None
     try:                                  # the guide's words are an extra: the walk works without them
+        lobby_r = next((r for r in building if r.name == (apt or {}).get("lobby")), None)
+        geo = {"W": W, "H": H, "footprint": footprint, "lv": lv, "outer": outer, "roof_z": roof_z,
+               "compass": compass, "wins": wins, "items": df.items, "doors": doors, "gates": gates, "cars": cars,
+               "bikes": bikes, "site": site, "steps": steps, "stairs": stairs, "lift": lift_sc, "lobby": lobby_r,
+               "road_w": road_w, "main_door": next((d for d in doors if d["kind"] == "main"), None),
+               "up": ({"wins": up["windows"], "items": udf.items, "doors": up["doors"]} if up is not None else None),
+               "arches": arches, "ub": ub if up is not None else None, "up_plan": up_plan}
         tour = _with_talk(plan, tour, rooms, up, doors, gates, cars, bikes, stairs, lv, apt, lift_sc, outer,
-                          stilt_on, building)
+                          stilt_on, building, geo)
     except Exception as e:  # noqa: BLE001 — reported in the scene, the tests look for it
         talk_error = f"{type(e).__name__}: {e}"
 
@@ -1609,8 +1891,85 @@ def _jsonable(it: Dict) -> Dict:
 # Guided tour
 # =============================================================================
 
+def _attached_map(plan, rooms, doors: List[Dict]) -> Dict[str, str]:
+    """
+    A room that belongs to a bedroom (its attached bath, its dress / wardrobe) → that bedroom's name: from the space
+    program (layout_state parent keys, within the same flat), else from the doors — a bathroom whose only door
+    opens into one bedroom (or into that bedroom's dress room).
+    """
+    ls_rooms = ((getattr(plan, "layout_state", None) or {}).get("rooms") or {}) if plan is not None else {}
+    cat = {r.name: r.category for r in rooms}
+
+    def flat(name):
+        return name.split(" · ")[0] if " · " in name else ""
+    by_key = {(flat(r.name), getattr(r, "key", "") or ""): r.name for r in rooms if getattr(r, "key", "")}
+    out: Dict[str, str] = {}
+    for r in rooms:
+        k = getattr(r, "key", "") or ""
+        par = (ls_rooms.get(k) or {}).get("parent")
+        seen = 0
+        while par and seen < 4:                        # a bath's parent may be the dress room: follow it up
+            name = by_key.get((flat(r.name), par))
+            if name is None:
+                break
+            if cat.get(name) == "BEDROOM":
+                out[r.name] = name
+                break
+            par = (ls_rooms.get(par) or {}).get("parent")
+            seen += 1
+    for _ in range(2):                                 # twice: a bath behind a dress room behind the bedroom
+        for r in rooms:
+            if r.name in out or r.category == "BEDROOM":
+                continue
+            if r.category != "BATHROOM" and not any(w in r.name.lower() for w in ("dress", "wardrobe")):
+                continue
+            others = {d["other"] if d["room"] == r.name else d["room"] for d in doors if r.name in (d["room"], d["other"])}
+            others.discard(None)
+            others.discard("")
+            if len(others) == 1:
+                o = next(iter(others))
+                if cat.get(o) == "BEDROOM":
+                    out[r.name] = o
+                elif o in out:
+                    out[r.name] = out[o]
+    return out
+
+
+def _pick_next(grid: "_Grid", cur, left: Dict, name_of, parent_of: Dict[str, str], queue: List):
+    """
+    The next room to show: a bedroom's own rooms right after it (dress first, then the bathroom), never before it
+    while the bedroom is still to come; otherwise the nearest on foot. Returns (cell, bfs parents) or (None, …).
+    """
+    while queue:
+        c = queue.pop(0)
+        if c in left:
+            par = grid.bfs(cur, {c})
+            if c in par:
+                return c, par
+    par = grid.bfs(cur, set(left))
+    got = [c for c in left if c in par]
+    if not got:
+        return None, par
+    waiting = {name_of(left[c]) for c in got}
+    free = [c for c in got if parent_of.get(name_of(left[c])) not in waiting] or got
+    nxt = min(free, key=lambda c: len(grid.path(par, c)))
+    me = name_of(left[nxt])
+    kids = [c for c in got if c != nxt and parent_of.get(name_of(left[c])) == me]
+    kids.sort(key=lambda c: (0 if any(w in name_of(left[c]).lower() for w in ("dress", "wardrobe")) else 1,
+                             len(grid.path(par, c))))
+    queue[:0] = kids
+    return nxt, par
+
+
 def _tour(plan, grid: _Grid, lv, rooms, building, doors, gates, landing_foot, stairs, footprint, compass, main,
-          apt: Optional[Dict] = None) -> List[Dict]:
+          apt: Optional[Dict] = None, walk1: Optional["_Grid"] = None, outer=None, cars=(), bikes=(), site=(),
+          top_level: int = 1) -> List[Dict]:
+    """
+    The walk through a home on one level (a house, a duplex's ground floor, a flat without a journey): from
+    the road, through the gate, past the car and round the yard (garden, sump, …) to the main door, every
+    room from where a photographer would stand, then — a house of one storey — out to its stair and up
+    onto the terrace for the view. Stops carry the path walked to them (or a target + level upstairs).
+    """
     W, H = plan.plot_width, plan.plot_height
     fx, fy, fw, fd = footprint
     clear = grid.clearance()
@@ -1638,47 +1997,12 @@ def _tour(plan, grid: _Grid, lv, rooms, building, doors, gates, landing_foot, st
         return []
     reach = grid.bfs(start)
 
-    # a viewpoint in every room: roomy free spot near the centre, else peek in from its door
-    stops = []
+    # a viewpoint in every room (one flat of an apartment floor: the others have the same plan)
     first_flat = ((apt or {}).get("labels") or [""])[0]
-    for r in building:
-        if r.category in NOT_STOPS or "Duct" in r.name or r.w * r.h < 1.2:
-            continue
-        if apt and first_flat and " · " in r.name and not r.name.startswith(first_flat + " · "):
-            continue                     # one flat is shown; the others on the floor have the same plan
-        best = None
-        i0, j0 = grid.cell(r.x + 0.15, r.y + 0.15)
-        i1, j1 = grid.cell(r.right - 0.15, r.top - 0.15)
-        for j in range(max(0, j0), min(grid.ny, j1 + 1)):
-            for i in range(max(0, i0), min(grid.nx, i1 + 1)):
-                if (i, j) not in reach:
-                    continue
-                x, y = grid.centre(i, j)
-                s = min(int(clear[j, i]), 6) * 0.1 - 0.35 * math.hypot(x - r.cx, y - r.cy)
-                if best is None or s > best[0]:
-                    best = (s, (i, j))
-        inside = best is not None
-        if not inside:
-            for d in doors:
-                if r.name not in (d["room"], d["other"]):
-                    continue
-                sgn = 1 if d["room"] == r.name else -1
-                nx, ny = d["n"]
-                px, py = d["mid"][0] - sgn * nx * (d["t"] / 2 + 0.45), d["mid"][1] - sgn * ny * (d["t"] / 2 + 0.45)
-                c = grid.nearest_free(px, py, 0.6)
-                if c and c in reach:
-                    best = (0, c)
-                    break
-        if best is None:
-            continue
-        x, y = grid.centre(*best[1])
-        if inside and math.hypot(x - r.cx, y - r.cy) < 1.0:
-            corners = [(r.x + 0.2, r.y + 0.2), (r.right - 0.2, r.y + 0.2), (r.x + 0.2, r.top - 0.2), (r.right - 0.2, r.top - 0.2)]
-            look = max(corners, key=lambda p: math.hypot(p[0] - x, p[1] - y))
-        else:
-            look = (r.cx, r.cy)
-        stops.append({"room": r.name, "cell": best[1], "look": [_r(look[0], 2), _r(look[1], 2)],
-                      "pan": 300 if r.w * r.h >= 9 and inside else 100})
+    rooms_in = [r for r in building if r.category not in NOT_STOPS and "Duct" not in r.name and r.w * r.h >= 1.2
+                and not (apt and first_flat and " · " in r.name and not r.name.startswith(first_flat + " · "))]
+    stops = [{"room": v["room"].name, "cell": v["cell"], "look": v["look"], "pan": v["pan"], "peek": v["peek"]}
+             for v in _viewpoints(grid, reach, rooms_in, doors, clear)]
 
     tour: List[Dict] = []
     cents = W * H / M2_PER_CENT
@@ -1703,7 +2027,6 @@ def _tour(plan, grid: _Grid, lv, rooms, building, doors, gates, landing_foot, st
                      "the floors above are the same.")
         if lv["stilt"]:
             intro += " Cars park on the stilt floor; we start on the first floor."
-    target_main = None
     m = next((d for d in doors if d["kind"] == "main"), None)
     if m is not None:
         mx, my = m["mid"]
@@ -1711,43 +2034,114 @@ def _tour(plan, grid: _Grid, lv, rooms, building, doors, gates, landing_foot, st
     else:
         look_main = [_r(fx + fw / 2, 2), _r(fy + fd / 2, 2)]
     tour.append({"kind": "start", "title": "Your plot", "say": intro, "path": [pt(start)], "look": look_main, "pan": 0})
-
     cur = start
+
+    def go(kind, title, say, cell, look, pan=0, **extra) -> bool:
+        """Walk on to `cell` (the path is kept with the stop); False when it cannot be reached."""
+        nonlocal cur
+        if cell is None:
+            return False
+        par = grid.bfs(cur, {cell})
+        if cell not in par:
+            return False
+        stop = {"kind": kind, "title": title, "say": say, "path": [pt(c) for c in grid.smooth(grid.path(par, cell))],
+                "look": [_r(look[0], 2), _r(look[1], 2)] if look else None, "pan": pan}
+        stop.update(extra)
+        tour.append(stop)
+        cur = cell
+        return True
+
+    house_kind = not apt and not lv["stilt"]
+    # through the gate
+    if house_kind and gates:
+        g0, g1 = max(gates, key=lambda g: g[1] - g[0])
+        c_in = grid.nearest_free((g0 + g1) / 2, H - 1.3, 1.2)
+        if c_in in reach:
+            go("gate", "The gate", "Through the gate.", c_in, (fx + fw / 2, fy + fd / 2))
+    # the car (or the two-wheelers)
+    if house_kind:
+        ground_cars = [c for c in cars if not c.get("stilt")]
+        thing = None
+        if ground_cars:
+            thing = min(ground_cars, key=lambda c: math.hypot(c["c"][0] - fx - fw / 2, c["c"][1] - H))
+            hl, hw = (thing["L"] / 2, thing["W"] / 2) if thing["along"] == "x" else (thing["W"] / 2, thing["L"] / 2)
+        elif bikes:
+            thing = bikes[0]
+            hl, hw = (thing["L"] / 2, 0.35) if thing["along"] == "x" else (0.35, thing["L"] / 2)
+        if thing is not None:
+            cx, cy = thing["c"]
+            best = None
+            for px, py in ((cx + hl + 0.8, cy), (cx - hl - 0.8, cy), (cx, cy + hw + 0.8), (cx, cy - hw - 0.8)):
+                c = grid.nearest_free(px, py, 0.5)
+                if c and c in reach:
+                    d = math.hypot(px - (fx + fw / 2), py - H)
+                    if best is None or d < best[0]:
+                        best = (d, c)
+            if best:
+                go("parking", "Parking", "Your car parks here, inside the gate." if ground_cars else
+                   "Two-wheelers park here, inside the gate.", best[1], (cx, cy))
+    # round the yard: stand where most of the garden, sump, pool … can be seen
+    items = _yard_items(list(site)) if house_kind else []
+    if items:
+        aims = []
+        for it in items:
+            x0, y0, x1, y1 = it["r"]
+            aims.append(grid.nearest_free((x0 + x1) / 2, (y0 + y1) / 2, 2.0))
+        best = None
+        cells = [c for c in reach if c[0] % 4 == 0 and c[1] % 4 == 0]
+        lf = landing_foot or (fx + fw / 2, fy + fd + 1.5)
+        for c in cells:
+            x, y = grid.centre(*c)
+            if (fx - 0.2 < x < fx + fw + 0.2 and fy - 0.2 < y < fy + fd + 0.2) or y > H - 0.3:
+                continue                                       # outside the house, inside the plot
+            seen = sum(1 for a in aims if a is not None and grid.los(c, a))
+            if not seen:
+                continue
+            s = seen * 3.0 - 0.15 * math.hypot(x - lf[0], y - lf[1]) + 0.05 * min(int(clear[c[1], c[0]]), 6)
+            if best is None or s > best[0]:
+                best = (s, c)
+        if best:
+            vis = [a for a in aims if a is not None and grid.los(best[1], a)]
+            ax = sum(grid.centre(*a)[0] for a in vis) / len(vis)
+            ay = sum(grid.centre(*a)[1] for a in vis) / len(vis)
+            go("yard", "Around the house", "The open space round the house: " +
+               ", ".join(it["name"].lower() for it in items) + ".", best[1], (ax, ay),
+               yard=[it["cat"] for it in items])
+
+    # to the main door
+    target_main = None
     if landing_foot and not lv["stilt"]:
         target_main = grid.nearest_free(*landing_foot, 1.2)
     if target_main and target_main in reach and target_main != cur:
-        par = grid.bfs(cur, {target_main})
-        if target_main in par:
-            bd = (getattr(plan, "vastu_breakdown", None) or {})
-            _, vtxt = _verdict(bd.get("entrance_score"))
-            say = f"This is the main door, on the {facing_word} side of the house"
-            if bd.get("entrance_pada"):
-                say += f", in pada {bd['entrance_pada']} — {vtxt}" if vtxt else f", in pada {bd['entrance_pada']}"
-            say += f". Three steps take you up {int(lv['plinth'] * 100)} centimetres to the floor level."
-            title = "Main door"
-            if apt:
-                lobby = apt.get("lobby", "lobby").lower()
-                lift_txt = "the lift, " if any(r.category == "LIFT" for r in building) else ""
-                who = "every floor's home" if apt.get("kind") == "house" else "every flat"
-                say = (f"This is the building's entrance. The stair, {lift_txt}and the front door of {who} open "
-                       f"onto the {lobby}. Three steps take you up {int(lv['plinth'] * 100)} centimetres.")
-                title = "Building entrance"
-            tour.append({"kind": "door", "title": title, "say": say,
-                         "path": [pt(c) for c in grid.smooth(grid.path(par, target_main))], "look": look_main, "pan": 0})
-            cur = target_main
+        bd = (getattr(plan, "vastu_breakdown", None) or {})
+        _, vtxt = _verdict(bd.get("entrance_score"))
+        say = f"This is the main door, on the {facing_word} side of the house"
+        if bd.get("entrance_pada"):
+            say += f", in pada {bd['entrance_pada']} — {vtxt}" if vtxt else f", in pada {bd['entrance_pada']}"
+        say += f". Three steps take you up {int(lv['plinth'] * 100)} centimetres to the floor level."
+        title = "Main door"
+        if apt:
+            lobby = apt.get("lobby", "lobby").lower()
+            lift_txt = "the lift, " if any(r.category == "LIFT" for r in building) else ""
+            who = "every floor's home" if apt.get("kind") == "house" else "every flat"
+            say = (f"This is the building's entrance. The stair, {lift_txt}and the front door of {who} open "
+                   f"onto the {lobby}. Three steps take you up {int(lv['plinth'] * 100)} centimetres.")
+            title = "Building entrance"
+        go("door", title, say, target_main, look_main)
 
+    # every room, nearest next
     left = {s["cell"]: s for s in stops}
+    parent_of = _attached_map(plan, building, doors)
+    queue: List = []
     while left:
-        par = grid.bfs(cur, set(left))
-        got = [c for c in left if c in par]
-        if not got:
+        nxt, par = _pick_next(grid, cur, left, lambda q: q["room"], parent_of, queue)
+        if nxt is None:
             break
-        # nearest next (by walking distance ≈ path length in cells)
-        nxt = min(got, key=lambda c: len(grid.path(par, c)))
         s = left.pop(nxt)
         rm = info[s["room"]]
         tour.append({"kind": "room", "title": rm["name"], "room": rm["name"], "say": rm["say"],
-                     "path": [pt(c) for c in grid.smooth(grid.path(par, nxt))], "look": s["look"], "pan": s["pan"]})
+                     "path": [pt(c) for c in grid.smooth(grid.path(par, nxt))], "look": s["look"], "pan": s["pan"],
+                     **({"peek": s["peek"]} if s.get("peek") else {})})
         cur = nxt
 
     inner = [s for s in stairs if not s["external"]]
@@ -1776,14 +2170,43 @@ def _tour(plan, grid: _Grid, lv, rooms, building, doors, gates, landing_foot, st
             tour.append({"kind": "stair", "title": "Staircase", "say": say,
                          "path": [pt(c) for c in grid.smooth(grid.path(par, best[1]))],
                          "look": [_r((x0 + x1) / 2, 2), _r((y0 + y1) / 2, 2)], "pan": 0})
+            cur = best[1]
+
+    # a house of one storey: out of the house to the stair beside it, and up onto the terrace
+    ext = next((s for s in stairs if s["external"]), None)
+    if ext is not None and walk1 is not None and outer is not None and not inner:
+        low = min(ext["boxes"], key=lambda b: b[5])
+        high = max(ext["boxes"], key=lambda b: b[5])
+        lc = ((low[0] + low[2]) / 2, (low[1] + low[3]) / 2)
+        hc = ((high[0] + high[2]) / 2, (high[1] + high[3]) / 2)
+        ux, uy = hc[0] - lc[0], hc[1] - lc[1]
+        n = math.hypot(ux, uy) or 1.0
+        foot = grid.nearest_free(lc[0] - ux / n * 0.8, lc[1] - uy / n * 0.8, 1.2)
+        mid = ((lc[0] + hc[0]) / 2, (lc[1] + hc[1]) / 2)
+        if go("stair", "Terrace stair", f"The stair to the terrace, outside the house: {ext['steps']} steps of "
+              f"{ext['riser_mm']} millimetres.", foot, mid, external=True):
+            garden = max((s_ for s_ in site if s_["cat"] == "GARDEN"), default=None,
+                         key=lambda q: (q["r"][2] - q["r"][0]) * (q["r"][3] - q["r"][1]))   # the biggest strip
+            toward = (((garden["r"][0] + garden["r"][2]) / 2, (garden["r"][1] + garden["r"][3]) / 2) if garden
+                      else (fx + fw / 2, H + VERGE + 2.0))
+            br = ext.get("bridge")
+            spot = _terrace_spot(walk1, outer, toward, ((br[0] + br[2]) / 2, (br[1] + br[3]) / 2) if br else None)
+            if spot is not None:
+                area = (outer[2] - outer[0]) * (outer[3] - outer[1])
+                x, y = walk1.centre(*spot)
+                tour.append({"kind": "terrace", "title": "Terrace",
+                             "say": f"Up on the terrace: about {area:.0f} square metres inside a one-metre parapet.",
+                             "path": [], "target": [_r(x, 2), _r(y, 2)], "level": top_level,
+                             "look": [_r(toward[0], 2), _r(toward[1], 2)], "pan": 0})
     tour.append({"kind": "end", "title": "That's your house",
                  "say": "That was the whole house. Now see it from above — every room at once.",
                  "path": [], "look": None, "pan": 0})
     return tour
 
 
-def _tour_upstairs(tour: List[Dict], gt: "_Grid", stairs, up: Dict, ub, level: int) -> List[Dict]:
-    """A duplex: after the ground floor, climb the stair and visit every room of the first floor."""
+def _tour_upstairs(tour: List[Dict], gt: "_Grid", stairs, up: Dict, ub, level: int, walk1: Optional["_Grid"] = None,
+                   outer=None, top_level: Optional[int] = None, toward=None, up_plan=None) -> List[Dict]:
+    """A duplex: after the ground floor, climb the stair and visit every room of the first floor, then the terrace."""
     inner = next((s for s in stairs if not s["external"]), None)
     if inner is None:
         return tour
@@ -1800,37 +2223,23 @@ def _tour_upstairs(tour: List[Dict], gt: "_Grid", stairs, up: Dict, ub, level: i
     if arr is None:
         return tour
     reach = tg.bfs(arr)
-    clear = tg.clearance()
     info = {rm["name"]: rm for rm in up["rooms"]}
-    stops = []
-    for r in ub:
-        if r.category in NOT_STOPS or r.w * r.h < 1.2:
-            continue
-        best = None
-        i0, j0 = tg.cell(r.x + 0.15, r.y + 0.15)
-        i1, j1 = tg.cell(r.right - 0.15, r.top - 0.15)
-        for j in range(max(0, j0), min(tg.ny, j1 + 1)):
-            for i in range(max(0, i0), min(tg.nx, i1 + 1)):
-                if (i, j) not in reach:
-                    continue
-                x, y = tg.centre(i, j)
-                sc = min(int(clear[j, i]), 6) * 0.1 - 0.35 * math.hypot(x - r.cx, y - r.cy)
-                if best is None or sc > best[0]:
-                    best = (sc, (i, j))
-        if best:
-            stops.append((r, best[1]))
+    rooms_in = [r for r in ub if r.category not in NOT_STOPS and r.w * r.h >= 1.2]
+    vps_up = _viewpoints(tg, reach, rooms_in, up.get("doors") or [])
+    peeks = {v["cell"]: v["peek"] for v in vps_up}
+    stops = [(v["room"], v["cell"], v["look"], v["pan"]) for v in vps_up]
     out = [t for t in tour if t["kind"] != "end"]
     end = [t for t in tour if t["kind"] == "end"]
     cur = arr
-    left = {c: r for r, c in stops}
+    left = {c: (r, look, pan) for r, c, look, pan in stops}
     first = True
+    parent_of = _attached_map(up_plan, list(ub), up.get("doors") or [])
+    queue: List = []
     while left:
-        par = tg.bfs(cur, set(left))
-        got = [c for c in left if c in par]
-        if not got:
+        nxt, par = _pick_next(tg, cur, left, lambda q: q[0].name, parent_of, queue)
+        if nxt is None:
             break
-        nxt = min(got, key=lambda c: len(tg.path(par, c)))
-        r = left.pop(nxt)
+        r, look, pan = left.pop(nxt)
         x, y = tg.centre(*nxt)
         rm = info.get(r.name, {})
         say = rm.get("say", "")
@@ -1838,31 +2247,67 @@ def _tour_upstairs(tour: List[Dict], gt: "_Grid", stairs, up: Dict, ub, level: i
             say = "Upstairs. " + say
             first = False
         out.append({"kind": "room", "title": r.name, "room": r.name, "say": say, "path": [],
-                    "target": [_r(x, 2), _r(y, 2)], "level": level, "look": [_r(r.cx, 2), _r(r.cy, 2)],
-                    "pan": 300 if r.w * r.h >= 9 else 100})
+                    "target": [_r(x, 2), _r(y, 2)], "level": level, "look": look, "pan": pan,
+                    **({"peek": peeks[nxt]} if peeks.get(nxt) else {})})
         cur = nxt
+    if walk1 is not None and outer is not None and top_level is not None:     # and on up to the terrace
+        e = inner.get("exit")
+        avoid = ((e[0] + e[2]) / 2, (e[1] + e[3]) / 2) if e else None
+        spot = _terrace_spot(walk1, outer, toward or ((outer[0] + outer[2]) / 2, outer[3] + 3.0), avoid)
+        if spot is not None:
+            area = (outer[2] - outer[0]) * (outer[3] - outer[1])
+            x, y = walk1.centre(*spot)
+            tw = toward or ((outer[0] + outer[2]) / 2, outer[3] + 3.0)
+            out.append({"kind": "terrace", "title": "Terrace",
+                        "say": f"Up on the terrace: about {area:.0f} square metres inside a one-metre parapet.",
+                        "path": [], "target": [_r(x, 2), _r(y, 2)], "level": top_level,
+                        "look": [_r(tw[0], 2), _r(tw[1], 2)], "pan": 0})
     for t in end:
         t["say"] = "That was the whole home, both floors. Now see it from above — every room at once."
     return out + end
 
 
-def _viewpoints(grid: "_Grid", reach, rooms_in, doors: List[Dict]) -> List[Dict]:
-    """A viewpoint in every room: a roomy free spot near the centre, else a peek in from its door."""
-    clear = grid.clearance()
+def _viewpoints(grid: "_Grid", reach, rooms_in, doors: List[Dict], clear=None) -> List[Dict]:
+    """
+    Where the guide stands in every room — the way a photographer shows a room: near a corner on the side
+    you come in from, clear of the furniture, looking across the diagonal at the far corner, so the walls,
+    the window and the furniture are all in the frame. A room with no free spot is peeked into from its door.
+    """
+    clear = grid.clearance() if clear is None else clear
     out = []
     for r in rooms_in:
+        dmids = [d["mid"] for d in doors if r.name in (d["room"], d["other"])]
+        # never inside a door's swing: the door closes behind the guide, it must not sweep through him
+        arcs = [(d["hinge"], d["w"] + 0.35, d["mid"], d["n"]) for d in doors
+                if d.get("room") == r.name and d.get("hinge") and d.get("n")]
+
+        def in_swing(x, y):
+            for (hx, hy), rad, (mx, my), (nx, ny) in arcs:
+                if math.hypot(x - hx, y - hy) < rad and (x - mx) * nx + (y - my) * ny > -0.05:
+                    return True
+            return False
+        corners = [(r.x + 0.35, r.y + 0.35), (r.right - 0.35, r.y + 0.35), (r.x + 0.35, r.top - 0.35),
+                   (r.right - 0.35, r.top - 0.35)]
         best = None
         i0, j0 = grid.cell(r.x + 0.15, r.y + 0.15)
         i1, j1 = grid.cell(r.right - 0.15, r.top - 0.15)
-        for j in range(max(0, j0), min(grid.ny, j1 + 1)):
-            for i in range(max(0, i0), min(grid.nx, i1 + 1)):
-                if (i, j) not in reach:
-                    continue
-                x, y = grid.centre(i, j)
-                s = min(int(clear[j, i]), 6) * 0.1 - 0.35 * math.hypot(x - r.cx, y - r.cy)
-                if best is None or s > best[0]:
-                    best = (s, (i, j))
+        for need in (3, 1):                      # a spot ≥ 0.3 m clear of everything, else any free spot
+            for j in range(max(0, j0), min(grid.ny, j1 + 1)):
+                for i in range(max(0, i0), min(grid.nx, i1 + 1)):
+                    if (i, j) not in reach or clear[j, i] < need:
+                        continue
+                    x, y = grid.centre(i, j)
+                    if in_swing(x, y):
+                        continue
+                    far = max(math.hypot(cx - x, cy - y) for cx, cy in corners)
+                    near_door = min((math.hypot(mx - x, my - y) for mx, my in dmids), default=0.0)
+                    s = 0.08 * min(int(clear[j, i]), 6) + 0.45 * far - 0.22 * near_door
+                    if best is None or s > best[0]:
+                        best = (s, (i, j))
+            if best is not None:
+                break
         inside = best is not None
+        peek = None
         if not inside:
             for d in doors:
                 if r.name not in (d["room"], d["other"]):
@@ -1873,18 +2318,66 @@ def _viewpoints(grid: "_Grid", reach, rooms_in, doors: List[Dict]) -> List[Dict]
                                       d["mid"][1] - sgn * ny * (d["t"] / 2 + 0.45), 0.6)
                 if c and c in reach:
                     best = (0, c)
+                    peek = [_r(d["mid"][0], 2), _r(d["mid"][1], 2)]       # this door stays open while he shows it
                     break
         if best is None:
             continue
         x, y = grid.centre(*best[1])
-        if inside and math.hypot(x - r.cx, y - r.cy) < 1.0:
-            corners = [(r.x + 0.2, r.y + 0.2), (r.right - 0.2, r.y + 0.2), (r.x + 0.2, r.top - 0.2), (r.right - 0.2, r.top - 0.2)]
+        if inside:
             look = max(corners, key=lambda p: math.hypot(p[0] - x, p[1] - y))
         else:
             look = (r.cx, r.cy)
         out.append({"room": r, "cell": best[1], "look": [_r(look[0], 2), _r(look[1], 2)],
-                    "pan": 300 if r.w * r.h >= 9 and inside else 100})
+                    "pan": 300 if r.w * r.h >= 9 and inside else 100, "peek": peek})
     return out
+
+
+def _yard_items(site: List[Dict]) -> List[Dict]:
+    """What the guide shows around a house: the garden, the sump, the pool, the generator, the security cabin."""
+    order = ("GARDEN", "WATER_TANK", "POOL", "GENERATOR", "SECURITY")
+    out = []
+    for cat in order:                                    # the biggest of each (a garden can be two strips)
+        its = [it for it in site if it["cat"] == cat]
+        if its:
+            out.append(max(its, key=lambda it: (it["r"][2] - it["r"][0]) * (it["r"][3] - it["r"][1])))
+    return out
+
+
+def _terrace_spot(walk1: "_Grid", outer, toward: Tuple[float, float], avoid=None,
+                  reach=None) -> Optional[Tuple[int, int]]:
+    """
+    A place on the roof by the parapet on the side of what is worth seeing (the garden, else the road): along
+    that parapet, as near as possible in line with it, clear of the stair's head-room (`avoid`) and reachable
+    from where the stair arrives (`reach`); else further in.
+    """
+    cx, cy = (outer[0] + outer[2]) / 2, (outer[1] + outer[3]) / 2
+    hx, hy = (outer[2] - outer[0]) / 2, (outer[3] - outer[1]) / 2
+    dx, dy = toward[0] - cx, toward[1] - cy
+    # the parapet facing it: the side whose outward normal points most towards it (scaled by the half-sizes)
+    side = max((("x+", dx / max(hx, 1e-6)), ("x-", -dx / max(hx, 1e-6)), ("y+", dy / max(hy, 1e-6)),
+                ("y-", -dy / max(hy, 1e-6))), key=lambda t: t[1])[0]
+    for inset in (0.65, 1.0, 1.6, 2.4):
+        cands = []
+        if side[0] == "x":
+            x = cx + (hx - inset) * (1 if side == "x+" else -1)
+            y = outer[1] + 0.8
+            while y <= outer[3] - 0.8 + 1e-6:
+                cands.append((x, y, abs(y - min(max(toward[1], outer[1]), outer[3]))))
+                y += 0.4
+        else:
+            y = cy + (hy - inset) * (1 if side == "y+" else -1)
+            x = outer[0] + 0.8
+            while x <= outer[2] - 0.8 + 1e-6:
+                cands.append((x, y, abs(x - min(max(toward[0], outer[0]), outer[2]))))
+                x += 0.4
+        for x, y, _ in sorted(cands, key=lambda t: t[2]):
+            if avoid is not None and math.hypot(x - avoid[0], y - avoid[1]) <= 1.6:
+                continue
+            c = walk1.nearest_free(x, y, 0.3)
+            if c is None or (reach is not None and c not in reach):
+                continue
+            return c
+    return None
 
 
 def _journey(plan, lv, g0: "_Grid", tg: "_Grid", walk1: "_Grid", rooms, building, doors, gates: List[Dict],
@@ -2042,7 +2535,7 @@ def _journey(plan, lv, g0: "_Grid", tg: "_Grid", walk1: "_Grid", rooms, building
         return f"Flat {no}"
 
     options = [{"L": l["i"], "label": l["label"], "home": home_label(l["i"])} for l in homes]
-    default = next((o["L"] for o in options if o["L"] >= 1), options[0]["L"] if options else 0)
+    default = options[0]["L"] if options else 0          # one home on one floor first; the next floors on request
     via = ["lift", "stairs"] if has_lift else ["stairs"]
     ask = ("How would you like to go up — by the lift or by the stairs — and to which floor?" if has_lift
            else "Which floor shall we go up to? The stairs are right here.")
@@ -2097,18 +2590,23 @@ def _journey(plan, lv, g0: "_Grid", tg: "_Grid", walk1: "_Grid", rooms, building
             and r.name != lobby_name and (not first or r.name.startswith(first + " · "))
             and getattr(r, "role", "") != "COMMON"]
     vps = {v["cell"]: v for v in _viewpoints(tg, reach_t, mine, doors)}
+    parent_of = _attached_map(plan, mine, doors)
+    queue: List = []
     while vps:
-        par = tg.bfs(cur, set(vps))
-        got = [c for c in vps if c in par]
-        if not got:
+        nxt, par = _pick_next(tg, cur, vps, lambda q: q["room"].name, parent_of, queue)
+        if nxt is None:
             break
-        nxt = min(got, key=lambda c: len(tg.path(par, c)))
         v = vps.pop(nxt)
         r = v["room"]
         rm = info.get(r.name, {})
         tour.append({"kind": "room", "title": rm.get("name", r.name), "room": r.name, "say": rm.get("say", ""),
-                     "path": [], "target": pt(tg, nxt), "level": "chosen", "look": v["look"], "pan": v["pan"]})
+                     "path": [], "target": pt(tg, nxt), "level": "chosen", "look": v["look"], "pan": v["pan"],
+                     **({"peek": v["peek"]} if v.get("peek") else {})})
         cur = nxt
+
+    # 8b. on to the next floor (the same home, a floor up — walk.js goes back to the ride), or up to the terrace
+    tour.append({"kind": "more", "title": "Next floor?", "say": "Shall we go up to the next floor, or to the terrace?",
+                 "path": [], "look": None, "pan": 0})
 
     # 9. on up the stairs to the terrace
     top = level_list[-1]
@@ -2117,16 +2615,18 @@ def _journey(plan, lv, g0: "_Grid", tg: "_Grid", walk1: "_Grid", rooms, building
         ec = walk1.nearest_free((e[0] + e[2]) / 2, (e[1] + e[3]) / 2, 1.2) if e else None
         if ec is not None:
             reach_r = walk1.bfs(ec)
-            cxy = ((outer[0] + outer[2]) / 2, (outer[1] + outer[3]) / 2)
-            best = None
-            for c in reach_r:
-                x, y = walk1.centre(*c)
-                d_m = math.hypot(x - (e[0] + e[2]) / 2, y - (e[1] + e[3]) / 2)
-                if d_m < 2.0:
-                    continue
-                s = math.hypot(x - cxy[0], y - cxy[1])
-                if best is None or s < best[0]:
-                    best = (s, c)
+            spot = _terrace_spot(walk1, outer, (fx + fw / 2, H + VERGE + 3.0), ((e[0] + e[2]) / 2, (e[1] + e[3]) / 2),
+                                 reach_r)
+            best = (0, spot) if spot is not None and spot in reach_r else None
+            if best is None:
+                cxy = ((outer[0] + outer[2]) / 2, (outer[1] + outer[3]) / 2)
+                for c in reach_r:
+                    x, y = walk1.centre(*c)
+                    if math.hypot(x - (e[0] + e[2]) / 2, y - (e[1] + e[3]) / 2) < 2.0:
+                        continue
+                    sc_ = math.hypot(x - cxy[0], y - cxy[1])
+                    if best is None or sc_ < best[0]:
+                        best = (sc_, c)
             if best:
                 area = (outer[2] - outer[0]) * (outer[3] - outer[1])
                 say = (f"And on up the stairs to the terrace, open to the sky: about {area:.0f} square metres inside a "
@@ -2134,7 +2634,7 @@ def _journey(plan, lv, g0: "_Grid", tg: "_Grid", walk1: "_Grid", rooms, building
                        "It is the place for the water tanks, solar panels and drying clothes.")
                 tour.append({"kind": "terrace", "title": "Terrace", "say": say, "path": [],
                              "target": pt(walk1, best[1]), "level": top["i"],
-                             "look": [_r(fx + fw / 2, 2), _r(fy + fd + 3.0, 2)], "pan": 240})
+                             "look": [_r(fx + fw / 2, 2), _r(H + VERGE + 3.0, 2)], "pan": 0})
     seen = ["the gate"] + (["the parking"] if any(t["kind"] == "parking" for t in tour) else []) +         (["the stairs and the lift"] if has_lift else ["the stairs"]) + ["{home}"] +         (["the terrace"] if any(t["kind"] == "terrace" for t in tour) else [])
     tour.append({"kind": "end", "title": "That's the building",
                  "say": f"That was the whole building — {_join(seen)}. Now see it from above, every floor at once.",

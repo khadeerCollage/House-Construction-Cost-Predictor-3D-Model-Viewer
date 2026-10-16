@@ -247,6 +247,11 @@ SITE_CATEGORIES = {
     RoomCategory.SECURITY.value,
 }
 
+# Program relaxation steps (_relax_program): 0-3 always tried; 4-9 = compact-home steps (an attached bath shared,
+# one at a time ×3 · pooja shelf · NBC minimum widths · one bathroom), only when no band layout exists at all.
+# A plan's layout_state['relax_level'] = how many were applied (a re-plan replays them).
+MAX_RELAX = 10
+
 
 def _snap_to_grid(value: float, module: float = GRID_MODULE) -> float:
     """Snap a dimension to the nearest architectural grid module."""
@@ -259,6 +264,9 @@ def _clamp(value: float, min_val: float, max_val: float) -> float:
 
 
 LIFT_TOWER = "Lift / Elevator (External)"     # a lift tower outside the house walls
+TERRACE_STAIR = "Terrace Staircase (External)"
+# where the owner wants the outside terrace stair, in the words of the drawing (road at the top)
+STAIR_SIDES = {"front": "top", "back": "bottom", "left": "left", "right": "right"}
 ZONE_NAMES = {"N": "North", "NE": "North-East", "E": "East", "SE": "South-East", "S": "South",
               "SW": "South-West", "W": "West", "NW": "North-West", "CENTER": "centre"}
 
@@ -371,6 +379,7 @@ class LayoutEngine:
         flats_per_floor="auto",
         lift_position: str = "inside",
         road_width: float = 9.0,
+        terrace_stair: str = "auto",
         **kwargs,
     ):
         """
@@ -401,6 +410,10 @@ class LayoutEngine:
                            'entrance' (a tower beside the main door) or 'side' (a tower against a
                            side wall with its own landing). Apartments always use the common core.
             road_width: Width of the road in front of the plot (m) — sizes the car gate (gates.py).
+            terrace_stair: Single-storey houses — side of the house for the outside terrace stair:
+                           'auto' (South / West, never the road side) or 'front' | 'back' | 'left' |
+                           'right' as on the drawing (road at the top). A {"type": "terrace_stair",
+                           "side": …} wish in `design_intents` sets it too (Smart Re-Plan).
         """
         self.plot_width = max(plot_width, 4.0)
         self.plot_height = max(plot_height, 4.0)
@@ -422,7 +435,15 @@ class LayoutEngine:
         self.additional_components = additional_components or {}
         self.family_profile = family_profile
         self.custom_rooms = custom_rooms
-        self.design_intents = list(design_intents or [])
+        # the terrace-stair wish is a site choice, not a room arrangement: it sets the side, the room
+        # solver never sees it (its report line is added in generate_alternatives)
+        wishes = list(design_intents or [])
+        self.site_intents = [i for i in wishes if isinstance(i, dict) and i.get("type") == "terrace_stair"]
+        self.design_intents = [i for i in wishes if not (isinstance(i, dict) and i.get("type") == "terrace_stair")]
+        side = str(terrace_stair or "auto").lower()
+        for it in self.site_intents:
+            side = str(it.get("side", side)).lower()
+        self.terrace_stair = side if side in STAIR_SIDES else "auto"
         self.base_layout = base_layout or {}
         # Everything needed to rebuild this exact plan (the intent editor re-runs the pipeline)
         self.generation_params = dict(
@@ -450,6 +471,8 @@ class LayoutEngine:
             self.road_width = 9.0
         if abs(self.road_width - 9.0) > 1e-6:
             self.generation_params["road_width"] = self.road_width
+        if self.terrace_stair != "auto":
+            self.generation_params["terrace_stair"] = self.terrace_stair
 
         self.wall = WallThickness()
         self.north_edge = north_edge_for_facing(self.orientation)
@@ -529,9 +552,32 @@ class LayoutEngine:
             plan = self._assemble(c, res)
             report = solver.report(res) if hasattr(solver, "report") else {}
             report["label"] = label
+            self._site_intent_report(report, plan)
             plan.edit_report = report
             plans.append(plan)
         return plans
+
+    def _site_intent_report(self, report: Dict, plan) -> None:
+        """The terrace-stair wish in the option's report: met when the stair stands on that side."""
+        if not self.site_intents:
+            return
+        from floorplan_generator.intent_engine import describe_intent
+        info = (plan.engineering or {}).get("terrace_stair") or {}
+        want = STAIR_SIDES.get(self.terrace_stair)
+        ok = bool(info) and info.get("side") == want
+        if ok:
+            detail = f"on the {info['compass_name']} side, in the {info['zone_name']} · Vastu {info['vastu_word']}"
+        elif info:
+            detail = f"stays on the {info['compass_name']} side"
+        else:
+            detail = "this house has no outside terrace stair"
+        entry = {"text": describe_intent(self.site_intents[-1], plan.layout_state or {}), "satisfied": ok,
+                 "detail": detail}
+        if not ok:
+            entry["blocked_by"] = info.get("refused") or "that side has no room for it"
+        report.setdefault("intents", []).append(entry)
+        report["satisfied"] = sum(1 for d in report["intents"] if d.get("satisfied"))
+        report["total"] = len(report["intents"])
 
     def _make_solver(self, program, footprint, seed: int):
         from floorplan_generator.layout_solver import BandSpineSolver
@@ -579,8 +625,9 @@ class LayoutEngine:
             if program.lift_outside and program.lift:
                 lift_out = {"position": program.lift_outside, "w": program.lift.shaft_w,
                             "d": program.lift.shaft_d, "door": 0.9}
+            stair_want = STAIR_SIDES.get(self.terrace_stair)
             site = planner.plan_footprint(program.target_area * 1.12, program.min_area, min_w, min_d, ext_len,
-                                          lift_out=lift_out)
+                                          lift_out=lift_out, ext_stair_want=stair_want)
             if lift_out and site.lift_side is None:
                 # no yard can take the tower: the lift goes back inside, next to the stair
                 failed = [n for n in site.notes if n.startswith("The lift could not go outside")]
@@ -589,7 +636,8 @@ class LayoutEngine:
                     self.quality_level, self.has_lift, self.lift_capacity, self.stair_type)
                 planner = SitePlanner(self.plot_width, self.plot_height, self.orientation, self.vastu_enabled,
                                       self.building_type, self.num_floors, dict(comps), members)
-                site = planner.plan_footprint(program.target_area * 1.12, program.min_area, min_w, min_d, ext_len)
+                site = planner.plan_footprint(program.target_area * 1.12, program.min_area, min_w, min_d, ext_len,
+                                              ext_stair_want=stair_want)
                 site.notes.extend(failed)
 
         # User size wishes re-balance rooms inside the same envelope (footprint unchanged)
@@ -607,21 +655,22 @@ class LayoutEngine:
         relax_notes: List[str] = []
         # An edit re-plan replays the relaxations its base plan needed, so the program matches
         start = int(self.base_layout.get("relax_level", 0) or 0) if self.base_layout else 0
-        for attempt in range(min(start, 4)):
+        for attempt in range(min(start, MAX_RELAX)):
             relax_notes.extend(self._relax_program(program, attempt))
         relax_level = start
-        for attempt in range(min(start, 4), 5):
+        attempt = min(start, MAX_RELAX)
+        while True:                   # the always-tried steps 0-3 (an edit re-plan starts where its base was)
             relax_level = attempt
             solver = self._make_solver(program, site.footprint, seed)
             solver.door_exclusion = getattr(site, "door_exclusion", None)
             result = solver.solve()
-            if result is not None and result.penalties.get("access", 0) == 0 and \
-                    result.penalties.get("circulation", 0) == 0:
+            if result is not None and result.penalties.get("access", 0) == 0 and                     result.penalties.get("circulation", 0) == 0:
+                break
+            if attempt >= 4:
                 break
             step = self._relax_program(program, attempt)
             relax_notes.extend(step)
-            if not step and attempt > 2:
-                break
+            attempt += 1
         retry = getattr(self, "_lift_retry", False)
         if getattr(program, "lift_outside", None) and result is None and self.lift_position != "inside" and not retry:
             # the rooms cannot be laid out around the tower's yard: plan the lift inside, next to the stair
@@ -636,6 +685,23 @@ class LayoutEngine:
                 ctx["site"].notes.append("The lift could not fit inside the house on this plot (with the stair the "
                                          "rooms do not fit) — it stands outside, beside the main door.")
                 return ctx
+        # Still no layout at all: the compact-home steps (an attached bath shared, a pooja shelf, NBC minimum
+        # widths, one bathroom) — after moving the lift, because a room given up is worse than a lift outside;
+        # each step that changes something is solved again, and the first layout found is kept
+        if result is None:
+            attempt = max(attempt, 4)
+            while attempt < MAX_RELAX:
+                step = self._relax_program(program, attempt)
+                attempt += 1
+                if not step:
+                    continue
+                relax_notes.extend(step)
+                relax_level = attempt
+                solver = self._make_solver(program, site.footprint, seed)
+                solver.door_exclusion = getattr(site, "door_exclusion", None)
+                result = solver.solve()
+                if result is not None:
+                    break
         alts = []
         if alternatives and result is not None and hasattr(solver, "alternatives"):
             alts = solver.alternatives(alternatives)
@@ -651,6 +717,48 @@ class LayoutEngine:
             return self._solve_stage(alternatives)
         finally:
             self.lift_position, self._lift_retry = keep, False
+
+    def site_preview(self, door_x: Optional[Tuple[float, float]] = None) -> Dict:
+        """
+        Stages 1-2 + the amenities only (no room solve, a few milliseconds): the footprint, setbacks,
+        the outside terrace stair and everything in the yard exactly as a re-plan with these settings
+        builds them. `door_x` = where the main door is expected on the road face (the room solve picks
+        it; the current design's door is a good guess). Single-storey houses (the ones with a terrace
+        stair outside); returns {} for anything else.
+        """
+        from floorplan_generator.space_program import build_program
+        from floorplan_generator.site_planner import SitePlanner
+        if self._stack_mode() is not None or self._fixed_site is not None:
+            return {}
+        program = build_program(self.bhk_name, self.family_profile, self.building_type, self.num_floors,
+                                self.quality_level, self.has_lift, self.lift_capacity, self.stair_type,
+                                lift_position=self.lift_position)
+        if program.external_stair is None:
+            return {}
+        members = 4
+        if self.family_profile is not None:
+            fp = self.family_profile
+            members = max(1, getattr(fp, "adults", 2) + getattr(fp, "children", 0) + getattr(fp, "elderly", 0))
+        comps = dict(self.additional_components)
+        comps["_has_lift"] = False
+        planner = SitePlanner(self.plot_width, self.plot_height, self.orientation, self.vastu_enabled,
+                              self.building_type, self.num_floors, comps, members)
+        n_bed = int(program.bhk[0])
+        min_w = {1: 5.6, 2: 6.6, 3: 7.6, 4: 8.4}.get(n_bed, 6.6)
+        site = planner.plan_footprint(program.target_area * 1.12, program.min_area, min_w, 6.8,
+                                      program.external_stair.footprint_l,
+                                      ext_stair_want=STAIR_SIDES.get(self.terrace_stair))
+        fx, fy, fw, fd = site.footprint
+        if door_x is None:
+            door_x = (fx + fw / 2 - 0.5, fx + fw / 2 + 0.5)
+        w = door_x[1] - door_x[0]
+        x0 = min(max(door_x[0], fx + 0.45), fx + fw - 0.45 - w)
+        ex = site.door_exclusion
+        if ex and x0 < ex[1] and x0 + w > ex[0]:            # the door keeps off a front stair / car bay
+            x0 = ex[1] + 0.05 if ex[0] <= 0.05 else ex[0] - 0.05 - w
+        self._gate_brief(planner, site, [])
+        planner.place_amenities(site, x0, x0 + w, program.external_stair)
+        return {"site": site, "program": program, "door_x": (x0, x0 + w)}
 
     def _assemble(self, ctx: Dict, result) -> GeneratedFloorPlan:
         """Stages 4-9 for one solved layout: doors, amenities, walls, windows, audit, report."""
@@ -718,7 +826,7 @@ class LayoutEngine:
             windows = self._clear_windows(windows, rooms, doors, tower["outer"])
 
         # Staircases (internal + external terrace stair)
-        staircases = self._place_staircases(rooms, program)
+        staircases = self._place_staircases(rooms, program, site.footprint)
 
         # ── Stage 9: dimensions, areas, Vastu audit, engineering notes ───
         dimensions = self._generate_dimensions(rooms)
@@ -744,6 +852,9 @@ class LayoutEngine:
         plan.setbacks = {self.sides[k]: v for k, v in site.setbacks.items()}
 
         engineering = self._engineering_report(rooms, walls, program, site, carpet, built_up)
+        stair_info = self._terrace_stair_info(rooms, staircases, site)
+        if stair_info:
+            engineering["terrace_stair"] = stair_info
         if engineering.get("lift"):
             engineering["lift"]["position"] = "inside"
             if tower is not None:
@@ -757,6 +868,9 @@ class LayoutEngine:
                             f"Purusha Mandala (raw objective {result.score:.1f}).")
             plan.layout_state = self._layout_state(result, program, site.footprint)
             plan.layout_state["relax_level"] = ctx.get("relax_level", 0)
+            if stair_info:                     # the wish box and the side chooser read it
+                plan.layout_state["terrace_stair"] = {k: stair_info[k] for k in
+                                                      ("side", "word", "compass", "zone", "score", "want")}
             # quantities of the design the owner started from — edits are priced against it
             from floorplan_generator.quantities import layout_quantities
             ref = (self.base_layout or {}).get("ref_quantities")
@@ -771,7 +885,8 @@ class LayoutEngine:
         if getattr(site, "car_mode", None) == "stilt":
             from floorplan_generator import gates as _gates
             info = _gates.stilt_plan(rooms, site.footprint, self.additional_components, self.quality_level,
-                                     self.building_type, _is_site_room)
+                                     self.building_type, _is_site_room, grid_x=getattr(site, "grid_x", None),
+                                     walkways=getattr(site, "walkways", None))
             planner.stilt_info = info
             if info.get("note"):
                 site.notes.append(info["note"])
@@ -1048,7 +1163,55 @@ class LayoutEngine:
                     r.min_width = min(r.min_width, 2.4)
             program.living.min_width = 2.7
             return ["Bedroom minimum widths relaxed to the NBC 2.4 m limit."]
+        # Compact-home steps — only when no band layout exists at all (else the old legacy subdivision would
+        # drop rooms, put a bedroom in the Brahmasthan and lose Smart Re-Plan). What an architect gives up
+        # first on a small plot, keeping every bedroom the owner asked for:
+        from floorplan_generator.space_program import RoomGroup, _room
+        if 4 <= attempt <= 6:                # one attached bath at a time → the common bathroom (guest's first)
+            order = {"GUEST_BEDROOM": 0, "BEDROOM": 1, "CHILD_BEDROOM": 2}
+            suites = [g for g in program.groups if g.kind == "suite" and len(g.rooms) > 1
+                      and g.primary.role not in ("MASTER_BEDROOM", "ELDER_BEDROOM")]
+            if not suites:
+                return []
+            g = min(suites, key=lambda s: (order.get(s.primary.role, 1), -program.groups.index(s)))
+            g.rooms = g.rooms[:1]
+            g.kind = "single"
+            self._ensure_common_bath(program, RoomGroup, _room)
+            return [f"The {g.primary.name.lower()} shares the common bathroom — this footprint has no room for "
+                    "another attached bath."]
+        if attempt == 7:                     # a pooja shelf in the hall instead of a pooja room
+            for g in list(program.groups):
+                if g.key == "pooja":
+                    program.groups.remove(g)
+                    return ["Pooja: a pooja shelf in the North-East corner of the hall instead of a separate room "
+                            "(compact footprint)."]
+            return []
+        if attempt == 8:                     # kitchen and hall at the NBC minimum widths
+            for g in program.groups:
+                for r in g.rooms:
+                    if r.category == RoomCategory.KITCHEN.value:
+                        r.min_width = min(r.min_width, 1.8)
+            program.living.min_width = min(program.living.min_width, 2.4)
+            return ["Kitchen and hall at the NBC minimum widths (1.8 m and 2.4 m)."]
+        if attempt == 9:                     # one bathroom for the home, off the passage
+            if not any(g.key == "cbath" for g in program.groups):
+                return []
+            for g in program.groups:
+                if g.kind == "suite" and len(g.rooms) > 1:
+                    g.rooms = g.rooms[:1]
+                    g.kind = "single"
+                    return [f"One bathroom for the home: the {g.primary.name.lower()} uses the common bathroom "
+                            "off the passage, as in most compact homes."]
+            return []
         return []
+
+    @staticmethod
+    def _ensure_common_bath(program, RoomGroup, _room) -> None:
+        if not any(g.key == "cbath" for g in program.groups):
+            program.groups.append(RoomGroup(
+                key="cbath", kind="single",
+                rooms=[_room("cbath", "Common Bathroom", "bathroom", 3.0, wet=True, min_area=2.2, min_width=1.2)],
+                bands=("rear", "private", "front"), growth=0.1, min_depth=1.5))
 
     def _legacy_rooms(self, footprint) -> List[RoomRect]:
         fx, fy, fw, fd = footprint
@@ -1537,7 +1700,7 @@ class LayoutEngine:
     # Staircases
     # =========================================================================
 
-    def _place_staircases(self, rooms: List[RoomRect], program=None) -> List[StaircaseRect]:
+    def _place_staircases(self, rooms: List[RoomRect], program=None, footprint=None) -> List[StaircaseRect]:
         staircases = []
         for r in rooms:
             if r.category != RoomCategory.STAIRS.value:
@@ -1548,6 +1711,8 @@ class LayoutEngine:
                 design = program.external_stair if external else program.stair
             stype = "straight" if external else self.stair_type
             direction = "N" if r.h >= r.w else "E"
+            if external and footprint is not None:
+                direction = self._ext_stair_climb(r, footprint)
             if design is not None:
                 staircases.append(StaircaseRect(
                     name=r.name, stair_type=stype, x=r.x, y=r.y, w=r.w, h=r.h, direction=direction,
@@ -1558,6 +1723,37 @@ class LayoutEngine:
                 staircases.append(StaircaseRect(name=r.name, stair_type=stype, x=r.x, y=r.y,
                                                  w=r.w, h=r.h, direction=direction))
         return staircases
+
+    def _ext_stair_climb(self, r: RoomRect, footprint) -> str:
+        """Climb direction of the outside stair (SitePlanner.ext_stair_climb: top alongside, S / W)."""
+        from floorplan_generator.site_planner import SitePlanner
+        sp = SitePlanner(self.plot_width, self.plot_height, self.orientation, self.vastu_enabled)
+        return sp.ext_stair_climb((r.x, r.y, r.w, r.h), footprint)
+
+    def _terrace_stair_info(self, rooms: List[RoomRect], staircases, site) -> Dict:
+        """Where the outside terrace stair stands, measured, in the owner's words (engineering report)."""
+        r = next((x for x in rooms if x.name == TERRACE_STAIR), None)
+        side = getattr(site, "ext_stair_side", None)
+        if r is None or side is None:
+            return {}
+        from floorplan_generator.vastu_engine import VastuEngine
+        from floorplan_generator.intent_engine import ZONE_NAMES
+        eng = VastuEngine.for_facing(self.plot_width, self.plot_height, self.orientation)
+        zone = eng.get_zone_for_position(r.cx, r.cy).value
+        score = eng.get_room_score("STAIRS", zone)
+        sc = next((x for x in staircases if x.name == TERRACE_STAIR), None)
+        plan_side = {"N": "top", "S": "bottom", "E": "right", "W": "left"}
+        climb = self.sides[plan_side[sc.direction]] if sc is not None and sc.direction in plan_side else None
+        word = {v: k for k, v in STAIR_SIDES.items()}[side]
+        compass = self.sides[side]
+        return {"side": side, "word": word, "compass": compass, "compass_name": ZONE_NAMES[compass],
+                "zone": zone, "zone_name": ZONE_NAMES.get(zone, zone), "score": score,
+                "vastu_word": "good" if score >= 5 else ("fine" if score >= 0 else "not good"),
+                "taboo": eng.is_taboo("STAIRS", zone),
+                "climb": climb, "climb_ok": climb in ("S", "W"),
+                "rect": [round(r.x, 3), round(r.y, 3), round(r.w, 3), round(r.h, 3)],
+                "want": {v: k for k, v in STAIR_SIDES.items()}.get(getattr(site, "ext_stair_want", None)),
+                "refused": getattr(site, "ext_stair_refused", None)}
 
     # =========================================================================
     # Dimensions
@@ -1634,7 +1830,8 @@ class LayoutEngine:
 
         # Structural frame: RCC columns on a grid set out along wall centre-lines (bays 2.4–4.5 m)
         from floorplan_generator.structure import structural_grid
-        grid = structural_grid(rooms, site.footprint)
+        grid_x = getattr(site, "grid_x", None)            # columns set out for the cars under a stilt (apartment.py)
+        grid = structural_grid(rooms, site.footprint, x_lines=grid_x)
         columns = len(grid.columns)
         span = max((min(r.w, r.h) for r in building
                     if r.category in ("LIVING", "DINING", "BEDROOM", "KITCHEN", "STUDY")), default=3.0)
@@ -1643,6 +1840,10 @@ class LayoutEngine:
         notes.append(f"RCC frame: {columns} columns (230 × 300 mm) on a {len(grid.xs)} × {len(grid.ys)} grid "
                      f"(max bay {grid.max_bay:.2f} m); largest clear span {span:.2f} m → {slab} mm two-way slab, "
                      f"230 × {beam_d} mm beams (L/12), M20 concrete, Fe500 steel.")
+        if grid_x:
+            notes.append("Column lines across the front are set out for the cars on the stilt floor (between the bays, "
+                         "never in a car's way); walls above that are off these lines stand on the beams and slab, and a "
+                         "few columns show inside rooms as exposed columns — usual in stilt buildings.")
 
         # Plumbing stacks
         wet = [r for r in building if r.category in ("BATHROOM", "KITCHEN", "UTILITY")]
@@ -1678,6 +1879,7 @@ class LayoutEngine:
             "built_up_m2_total": round(built_up * floors, 2),
             "columns": columns,
             "grid": {"x": grid.xs, "y": grid.ys, "max_bay_m": round(grid.max_bay, 2)},
+            **({"grid_x": [round(v, 3) for v in grid_x]} if grid_x else {}),
             "max_span_m": round(span, 2),
             "slab_mm": slab,
             "beam_mm": [230, beam_d],

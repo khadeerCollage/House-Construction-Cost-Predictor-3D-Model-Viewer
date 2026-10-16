@@ -71,7 +71,11 @@ _P = {
                   "wash", "utility area"],
     "R:dining": ["dining", "dining room", "diningroom", "dining hall", "dining area", "eating area",
                  "dinning", "dinning room"],
-    "R:stairs": ["stairs", "staircase", "stair", "stair case", "steps", "sopanam", "seedi", "सीढ़ी"],
+    "R:stairs": ["stairs", "staircase", "stair", "stair case", "steps", "sopanam", "seedi", "सीढ़ी",
+                 "terrace stairs", "terrace stair", "terrace staircase", "terrace steps", "outside stairs",
+                 "outside stair", "outside steps", "outside staircase", "external stairs", "external stair",
+                 "external staircase", "roof stairs", "roof steps", "mettlu", "metlu", "meda mettlu", "seedhi",
+                 "sidhi", "sidi", "seediyan", "padikal", "padikkettu", "padigal", "మెట్లు", "सीढ़ियाँ"],
     "R:lift": ["lift", "elevator"],
     "R:servant": ["servant", "servant room", "maid", "maid room", "driver room", "helper room", "staff room"],
     # ---- actions
@@ -117,10 +121,11 @@ _P = {
     "S:W": ["west", "western", "west side", "paschim", "pashchim", "padinjaru", "padinjar", "padinjare",
             "merku", "padamara", "पश्चिम", "പടിഞ്ഞാറ്", "மேற்கு"],
     "P:front": ["front", "front side", "road side", "roadside", "entrance side", "gate side", "facing side",
-                "street side", "munbil", "munnil", "aage", "samne", "munpil"],
-    "P:back": ["back", "rear", "backside", "back side", "behind", "pinnil", "pichhe", "peeche", "pinpuram"],
-    "P:left": ["left", "left side", "baayen", "baaye", "idathu", "idath", "idathe"],
-    "P:right": ["right", "right side", "daayen", "daaye", "valathu", "valath", "valathe"],
+                "street side", "munbil", "munnil", "aage", "samne", "munpil", "mundu", "munduku", "mundhu"],
+    "P:back": ["back", "rear", "backside", "back side", "behind", "pinnil", "pichhe", "peeche", "pinpuram",
+               "piche", "venaka", "venuka", "venakala", "venka", "veenaka"],
+    "P:left": ["left", "left side", "baayen", "baaye", "idathu", "idath", "idathe", "edama", "yedama"],
+    "P:right": ["right", "right side", "daayen", "daaye", "valathu", "valath", "valathe", "kudi", "kudi vaipu"],
     # ---- modifiers
     "M:too": ["too", "so", "too much", "not enough", "not big enough"],
     "M:neg": ["not", "no", "dont", "don't", "do not", "never", "without", "nahi", "nahin", "mat", "venda",
@@ -428,6 +433,10 @@ def understand_clause(clause: str, layout_state: Dict) -> Dict:
         res["confidence"] = "medium" if fixes else "high"
         return res
 
+    # the outside terrace stair of a single-storey house (a site choice, not a room)
+    if "R:stairs" in kinds and layout_state.get("terrace_stair") and             not any(v.get("category") == "STAIRS" for v in rooms_all.values()):
+        return _terrace_stair_clause(tags, kinds, acts, layout_state, res, neg, fixes)
+
     if missing and not rooms:
         res["note"] = "Your house has no " + ", ".join(missing) + "."
         return res
@@ -543,6 +552,49 @@ def understand_clause(clause: str, layout_state: Dict) -> Dict:
         sugg.append(opp)
     res["suggestions"] = sugg
     res["note"] = f"What should change in the {nm(k)}?"
+    return res
+
+
+def _terrace_stair_clause(tags, kinds, acts, layout_state: Dict, res: Dict, neg: bool, fixes) -> Dict:
+    """'terrace stairs to the back' · 'steps on the right side' · 'no stairs in front' · 'move the stairs'."""
+    from floorplan_generator.vastu_engine import plan_sides_for_facing
+    from floorplan_generator.intent_engine import stair_side_name
+    facing = layout_state.get("facing", "N")
+    plan_word = {"top": "front", "bottom": "back", "left": "left", "right": "right"}
+    word_of = {c: plan_word[ps] for ps, c in plan_sides_for_facing(facing).items()}   # compass → side word
+    now = layout_state["terrace_stair"].get("word")
+    words: List[str] = []
+    for _, t, _ in tags:
+        if t.startswith("P:") and t[2:] in ("front", "back", "left", "right"):
+            words.append(t[2:])
+        elif t.startswith("S:"):
+            words.append(word_of.get(t[2:]))
+        elif t.startswith("D:") and t[2:] != "CENTER":
+            words.extend(word_of.get(c) for c in t[2:])
+    words = [w for w in dict.fromkeys(words) if w]
+    others = [w for w in ("back", "left", "right", "front") if w != now]
+    mk = lambda w: {"type": "terrace_stair", "side": w}
+    conf = "medium" if fixes else "high"
+    if neg and words:
+        if now not in words:
+            res["note"] = f"The terrace stair is already on the {stair_side_name(now, facing)}, not there."
+            res["confidence"] = "high"
+            return res
+        res["suggestions"] = [mk(w) for w in others if w not in words]
+        res["note"] = "Where should the terrace stair go instead?"
+        return res
+    if "A:opposite" in acts and not words:
+        words = [{"front": "back", "back": "front", "left": "right", "right": "left"}[now]]
+    if len(words) == 1:
+        if words[0] == now:
+            res["note"] = f"The terrace stair is already on the {stair_side_name(now, facing)}."
+            res["confidence"] = "high"
+        else:
+            res["intents"] = [mk(words[0])]
+            res["confidence"] = conf
+        return res
+    res["suggestions"] = [mk(w) for w in (words or others) if w != now]
+    res["note"] = "Which side of the house for the terrace stair?"
     return res
 
 

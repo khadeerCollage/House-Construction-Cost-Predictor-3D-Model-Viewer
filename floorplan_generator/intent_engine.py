@@ -32,6 +32,10 @@ Intent dicts (room fields are space-program keys: 'bed1', 'kitchen', 'bed1_bath'
     {"type": "lock",     "room": k}                         keep a room where it is
     {"type": "size",     "room": k, "factor": 1.2}          bigger / smaller (same house envelope)
     {"type": "mirror"}                                      mirror the plan left ↔ right
+    {"type": "terrace_stair", "side": "back"}               the outside terrace stair on the front / back /
+                                                            left / right of the house (as on the drawing);
+                                                            a site choice — LayoutEngine applies it, the room
+                                                            solver never sees it
 """
 
 import math
@@ -50,7 +54,8 @@ LOCK_MULT = 4.0        # locked rooms resist moving this much harder
 COLLATERAL_TABOO = 20.0  # a strict taboo in a room the user never mentioned
 SIZE_LIMITS = (0.6, 1.6)
 
-INTENT_TYPES = ("zone", "flip", "swap", "adjacent", "lock", "size", "mirror")
+INTENT_TYPES = ("zone", "flip", "swap", "adjacent", "lock", "size", "mirror", "terrace_stair")
+STAIR_WORDS = ("front", "back", "left", "right")
 
 _TABOO_REASON = {
     ("KITCHEN", "NE"): "fire in the sacred Ishan corner",
@@ -273,7 +278,21 @@ def normalise_intent(it: Dict) -> Optional[Dict]:
         return None
     if out["type"] in ("flip", "lock", "size") and not out.get("room"):
         return None
+    if out["type"] == "terrace_stair":
+        side = str(out.get("side", "")).lower()
+        if side not in STAIR_WORDS:
+            return None
+        out = {"type": "terrace_stair", "side": side}
     return out
+
+
+def stair_side_name(side: str, facing: str) -> str:
+    """'back side (South)' — the owner's word for a side of the house and its compass direction."""
+    plan = {"front": "top", "back": "bottom", "left": "left", "right": "right"}.get(side)
+    if not plan:
+        return side
+    compass = ZONE_NAMES[plan_sides_for_facing(facing)[plan]]
+    return f"{'road' if side == 'front' else side} side ({compass})"
 
 
 def describe_intent(it: Dict, layout_state: Dict) -> str:
@@ -303,6 +322,8 @@ def describe_intent(it: Dict, layout_state: Dict) -> str:
         return f"{nm(it['room'])} {'bigger' if f > 1 else 'smaller'} ({(f - 1) * 100:+.0f}% area)"
     if t == "mirror":
         return "Mirror the whole plan (left ↔ right)"
+    if t == "terrace_stair":
+        return f"Terrace stair → {stair_side_name(it.get('side', ''), (layout_state or {}).get('facing', 'N'))}"
     return str(it)
 
 
@@ -310,6 +331,15 @@ def validate_intent(it: Dict, layout_state: Dict) -> Optional[str]:
     """Plain-language reason an intent cannot be honoured in this topology, else None."""
     rooms = layout_state.get("rooms", {})
     t = it.get("type")
+    if t == "terrace_stair":
+        now = layout_state.get("terrace_stair")
+        if not now:
+            return ("This house has no outside terrace stair (houses of two or more floors climb by the "
+                    "staircase inside).")
+        if now.get("word") == it.get("side"):
+            return (f"The terrace stair is already on the "
+                    f"{stair_side_name(it['side'], layout_state.get('facing', 'N'))}.")
+        return None
     keys = [it.get(k) for k in ("room", "a", "b") if it.get(k)]
     for k in keys:
         if k not in rooms:

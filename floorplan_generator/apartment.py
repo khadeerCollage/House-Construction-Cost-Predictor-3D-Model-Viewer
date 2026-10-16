@@ -48,6 +48,10 @@ GALLERY = 1.5            # open gallery along the front (2 flats / floor)
 CORRIDOR4 = 1.8          # central corridor that is also the lift lobby (4 flats / floor)
 LOBBY_MIN = 1.5          # lift / stair lobby width (1 flat / floor)
 FLOOR_LANDING = 1.25     # an upright stair's floor landing inside its room (narrow plates, 1 flat / floor)
+STILT_WALK = 1.0         # walkway on the stilt floor from the gate to a rear core (and across its front)
+STILT_STALL = 2.5        # NBC car bay width (stalls side by side under the building)
+STILT_STALL_MAX = 3.0    # a bay wider than this leaves the rest as a wider last bay
+STILT_EDGE = 2.7         # the bay against the far wall (its car clears the wall's column)
 UNIT_MIN_W = {1: 5.6, 2: 6.6, 3: 7.6, 4: 8.4}
 UNIT_MIN_D = 6.8
 OPPOSITE = {"N": "S", "S": "N", "E": "W", "W": "E"}
@@ -95,6 +99,9 @@ class FloorLayout:
     open_edges: List[Tuple[float, float, float, float]] = field(default_factory=list)   # parapet lines
     door_exclusion: Optional[Tuple[float, float]] = None                              # unit-local x
     notes: List[str] = field(default_factory=list)
+    core_at: str = "front"                         # 'rear': a stilt building's core at the back (parking in front)
+    walkways: List[Rect] = field(default_factory=list)                                # stilt: gate → core
+    grid_x: Optional[List[float]] = None           # stilt: column lines set out between the car bays
 
 
 def core_parts(stair_type: str, has_lift: bool, lift_capacity: str, mode: str = "apartment"):
@@ -109,7 +116,8 @@ def core_parts(stair_type: str, has_lift: bool, lift_capacity: str, mode: str = 
 
 
 def floor_layout(n: int, footprint: Rect, facing: str, vastu: bool, sw: float, sl: float,
-                 lw: float, ld: float, mode: str = "apartment", stair_end: Optional[str] = None) -> Optional[FloorLayout]:
+                 lw: float, ld: float, mode: str = "apartment", stair_end: Optional[str] = None,
+                 core_at: str = "front") -> Optional[FloorLayout]:
     """Split the building footprint into flats, core and common spaces (None if it cannot)."""
     vm = importlib.import_module("floorplan_generator.vastu_engine")
     fx, fy, fw, fd = footprint
@@ -183,7 +191,8 @@ def floor_layout(n: int, footprint: Rect, facing: str, vastu: bool, sw: float, s
                 break
         else:
             return None
-        by = _snap(fy + fd - cd)
+        rear = core_at == "rear"
+        by = fy if rear else _snap(fy + fd - cd)
         best = None
         for left in (True, False):
             sx = fx if left else _snap(fx + fw - run)
@@ -200,20 +209,63 @@ def floor_layout(n: int, footprint: Rect, facing: str, vastu: bool, sw: float, s
         excl = [((stair[0] - fx) - 0.1, (stair[0] + sw - fx) + 0.1)]
         if lw > 0:
             lx = _snap(fx + fw - lw) if left else fx
-            lift = (lx, by, lw, _snap(min(ld, cd)))
+            ly = _snap(by + cd - min(ld, cd)) if rear else by          # the lift next to the flat, the duct outside
+            lift = (lx, ly, lw, _snap(min(ld, cd)))
             if cd - ld > 0.3:
-                common.append(("Duct / Meter Room", "CORRIDOR", (lx, _snap(by + ld), lw, _snap(cd - ld)),
+                common.append(("Duct / Meter Room", "CORRIDOR", (lx, by if rear else _snap(by + ld), lw, _snap(cd - ld)),
                                COMMON_COLORS["duct"]))
             excl.append(((lx - fx) - 0.1, (lx + lw - fx) + 0.1))
-        slot = Slot("", (fx, fy, fw, _snap(fd - cd)), False)
         mid = lobby[0] + lobby[2] / 2
+        if not rear:
+            slot = Slot("", (fx, fy, fw, _snap(fd - cd)), False)
+            return FloorLayout(
+                n=1, footprint=footprint, slots=[slot], common=common, stair=stair, lift=lift,
+                lobby="Lift & Stair Lobby", lift_side="W" if left else "E", stair_side="E" if left else "W",
+                entrance=("N", _snap(mid - 0.6), _snap(mid + 0.6)),
+                door_exclusion=[(round(a, 3), round(b, 3)) for a, b in excl],
+                notes=[f"Typical floor: one flat behind a front core — the stair, "
+                       f"{'the lift and ' if lw else ''}the flat's main door all open onto a {lobby_w:.2f} m lobby."])
+        # a stilt building: the core at the back, the flat in front turned to open onto it, the stilt floor open
+        # at the front for the cars — bays side by side, a walkway along one side from the gate to the lobby and a
+        # passage across the front of the core; column lines between the bays, never in a car's way
+        slot = Slot("", (fx, _snap(fy + cd), fw, _snap(fd - cd)), True)
+        excl = [(round(fw - b, 3), round(fw - a, 3)) for a, b in excl]           # the turned flat's own x
+        walk_left = (mid - fx) <= fw / 2
+        park = fw - STILT_WALK
+        cars = max(1, int((park - 0.1) // STILT_STALL))
+        # bays from the walkway side: the walkway's own bay, middle bays, and the bay at the far wall a little
+        # wider (its car keeps clear of the wall's column too)
+        edge = max(park / cars, STILT_EDGE) if cars > 1 else park
+        mid_bay = min((park - edge) / (cars - 1), STILT_STALL_MAX) if cars > 1 else park
+        widths = [mid_bay] * (cars - 1) + [park - mid_bay * (cars - 1)]          # walkway side → far wall
+        if walk_left:
+            xs, acc = [fx], fx + STILT_WALK
+            for w_ in widths[:-1]:
+                acc += w_
+                xs.append(_snap(acc))
+            xs.append(fx + fw)
+            walk = (fx, _snap(fy + cd), STILT_WALK, _snap(fd - cd))
+        else:
+            xs, acc = [fx + fw], fx + fw - STILT_WALK
+            for w_ in widths[:-1]:
+                acc -= w_
+                xs.append(_snap(acc))
+            xs.append(fx)
+            walk = (_snap(fx + fw - STILT_WALK), _snap(fy + cd), STILT_WALK, _snap(fd - cd))
+        xs = sorted(set(round(v, 3) for v in xs))
+        for i in range(len(xs) - 1, 0, -1):          # a leftover sliver merges into its neighbour bay
+            if xs[i] - xs[i - 1] < 1.2 and 0 < i < len(xs) - 1:
+                xs.pop(i)
+        passage = (fx, _snap(fy + cd), fw, STILT_WALK)
         return FloorLayout(
             n=1, footprint=footprint, slots=[slot], common=common, stair=stair, lift=lift,
             lobby="Lift & Stair Lobby", lift_side="W" if left else "E", stair_side="E" if left else "W",
             entrance=("N", _snap(mid - 0.6), _snap(mid + 0.6)),
-            door_exclusion=[(round(a, 3), round(b, 3)) for a, b in excl],
-            notes=[f"Typical floor: one flat behind a front core — the stair, "
-                   f"{'the lift and ' if lw else ''}the flat's main door all open onto a {lobby_w:.2f} m lobby."])
+            door_exclusion=excl, core_at="rear", walkways=[walk, passage], grid_x=xs,
+            notes=[f"Typical floor: one flat in front of a rear core — the stair, {'the lift and ' if lw else ''}"
+                   f"the flat's main door open onto a {lobby_w:.2f} m lobby at the back. Below, the stilt floor is open "
+                   f"at the front for {cars} car{'s' if cars > 1 else ''} side by side, with a {STILT_WALK:.1f} m walkway "
+                   "from the gate to the lift and stair; the column lines are set out between the car bays."])
 
     if n == 2:
         C = GALLERY
@@ -310,6 +362,17 @@ def _plate_needs(n: int, program, nb: int, sw, sl, lw, ld, mode: str = "apartmen
         4 * unit_min + CORRIDOR4 * width, width, 2 * md + CORRIDOR4
 
 
+def _stilt_estimate(lay: FloorLayout) -> int:
+    """Cars that can drive straight in under a 1-flat floor: through the lobby of a front core, else side by side."""
+    fx, fy, fw, fd = lay.footprint
+    if lay.core_at == "rear":
+        return max(0, int((fw - STILT_WALK - 0.1) // STILT_STALL))
+    lob = next((c[2] for c in lay.common if c[0] == lay.lobby), None)
+    if lob is None or fd - lob[3] < 5.15:
+        return 0
+    return max(0, int((lob[2] - 0.25) // STILT_STALL))
+
+
 def _unit_fits(slot: Slot, program, nb: int, comfy: bool) -> bool:
     w, h = slot.rect[2], slot.rect[3]
     mw = UNIT_MIN_W.get(nb, 6.6)
@@ -346,6 +409,12 @@ def plan_floor(plot_w: float, plot_h: float, facing: str, vastu: bool, bhk: str,
         if getattr(site, "lift_side", None) in ("left", "right"):     # the lobby reaches the tower's side wall
             end = "right" if site.lift_side == "left" else "left"
         lay = floor_layout(n, site.footprint, facing, vastu, sw, sl, lw, ld, mode, end)
+        if lay is not None and n == 1 and mode == "apartment" and getattr(site, "car_mode", None) == "stilt":
+            # a front core leaves only its lobby open for the cars: the core goes to the back when that parks more
+            rear = floor_layout(n, site.footprint, facing, vastu, sw, sl, lw, ld, mode, end, core_at="rear")
+            want = max(1, int(((comps.get("car_parking") or {}).get("slots")) or 1))
+            if rear is not None and min(want, _stilt_estimate(rear)) > min(want, _stilt_estimate(lay)):
+                lay = rear
         fits = bool(lay) and all(_unit_fits(s, program, nb, False) for s in lay.slots)
         comfy = bool(lay) and all(_unit_fits(s, program, nb, True) for s in lay.slots)
         u = lay.slots[0].rect if lay else None
@@ -420,17 +489,19 @@ def generate(eng, alternatives: int = 0):
 
     def solve_units(lay):
         types = {}
+        only_turned = all(s.turned for s in lay.slots)          # a rear core: the one flat is turned
         for turned in sorted({s.turned for s in lay.slots}):
             slot = next(s for s in lay.slots if s.turned == turned)
             facing = OPPOSITE[eng.orientation] if turned else eng.orientation
+            main = (not turned) or only_turned                   # the flat type the owner edits
             sub = le.LayoutEngine(slot.rect[2], slot.rect[3], eng.bhk_name, eng.vastu_enabled, facing,
                                   eng.quality_level, eng.project_name, eng.family_description, None, False,
                                   eng.lift_capacity, eng.stair_type, 1, "Independent House", {}, eng.family_profile,
-                                  design_intents=None if turned else eng.design_intents,
-                                  base_layout=None if turned else unit_base)
+                                  design_intents=eng.design_intents if main else None,
+                                  base_layout=unit_base if main else None)
             sub._fixed_site = le.SitePlanFixed(slot.rect[2], slot.rect[3], facing,
-                                               None if turned else _local_exclusion(lay))
-            if alternatives and not turned:
+                                               _local_exclusion(lay) if main else None)
+            if alternatives and main:
                 types[turned] = sub.generate_alternatives(alternatives)
             else:
                 types[turned] = [sub.generate()]
@@ -461,9 +532,10 @@ def generate(eng, alternatives: int = 0):
                                              "behind it, so the stair is inside the home (the floors share it).")
                 return old if alternatives else old[0]
     plans = []
-    for unit in types[False]:
+    main_turned = False not in types                           # a rear core: the turned flat is the type
+    for unit in types[True if main_turned else False]:
         plan = compose(eng, copy.deepcopy(lay), copy.deepcopy(site), copy.deepcopy(planner), unit,
-                       (types.get(True) or [None])[0], stair, lift, report, mode=mode,
+                       None if main_turned else (types.get(True) or [None])[0], stair, lift, report, mode=mode,
                        lift_design=lift_design if lift_out else None)
         plans.append(plan)
     return plans if alternatives else plans[0]
@@ -520,8 +592,9 @@ def compose(eng, lay: FloorLayout, site, planner, unit, unit_turned, stair, lift
     rooms, doors, windows, openings = [], [], [], []
     owner_of: Dict[str, str] = {}
     carpet = 0.0
+    main_turned = all(s.turned for s in lay.slots)           # a rear core: the one flat is turned, and is the type
     for slot in lay.slots:
-        up = unit_turned if slot.turned else unit
+        up = unit if (main_turned or not slot.turned) else unit_turned
         T = _T(slot)
         pre = f"{slot.label} · " if slot.label else ""
         for r in up.rooms:
@@ -529,7 +602,7 @@ def compose(eng, lay: FloorLayout, site, planner, unit, unit_turned, stair, lift
                 continue
             x, y, w, h = T.rect(r.x, r.y, r.w, r.h)
             nr = le.RoomRect(name=pre + r.name, category=r.category, x=x, y=y, w=w, h=h, color=r.color,
-                             area=r.area, role=r.role, key="" if (slot.turned or upper) else r.key)
+                             area=r.area, role=r.role, key="" if ((slot.turned and not main_turned) or upper) else r.key)
             rooms.append(nr)
             owner_of[nr.name] = "home" if duplex else (slot.label or "flat")
         carpet += up.total_carpet_area
@@ -603,7 +676,11 @@ def compose(eng, lay: FloorLayout, site, planner, unit, unit_turned, stair, lift
                                           swing_direction="RIGHT", room_name=lr.name))
     # building entrance (ground floor): the lobby's front, or the corridor's end
     side, a, b = lay.entrance
-    if upper:                                        # a duplex's first floor: a window where the door is below
+    main = None
+    if lay.core_at == "rear":                        # people come in on the stilt floor, along the walkway: no door
+        walk = lay.walkways[0]                       # on the typical floor (the lobby's front is the flat's door)
+        door_x = (round(walk[0], 3), round(walk[0] + walk[2], 3))
+    elif upper:                                      # a duplex's first floor: a window where the door is below
         door_x = (a, b)
         windows.append(le.WindowPlacement(x=round((a + b) / 2, 3), y=round(lobby.top, 3), width=1.2, height=1.2,
                                           wall_side="N", room_name=lobby.name))
@@ -616,7 +693,7 @@ def compose(eng, lay: FloorLayout, site, planner, unit, unit_turned, stair, lift
                                 wall_side=side, swing_direction="RIGHT", room_name=lobby.name, is_main_entrance=True)
         sb_left = fx
         door_x = ((max(0.25, fx - sb_left + 0.25), max(0.9, fx - 0.25)) if fx >= 1.15 else (fx + 0.3, fx + 1.3))
-    if not upper:
+    if not upper and main is not None:
         doors.append(main)
     if lay.n == 4:                                   # the corridor's far end gets a window
         windows.append(le.WindowPlacement(x=round(lobby.right, 3), y=round(lobby.cy, 3), width=1.2,
@@ -634,6 +711,8 @@ def compose(eng, lay: FloorLayout, site, planner, unit, unit_turned, stair, lift
             tnotes.append("The lift tower could not be fitted outside the walls of this layout.")
 
     # ---- site amenities around the whole building (the ground floor of a duplex carries them)
+    if lay.grid_x:                                   # the stilt's columns between the car bays, its walkway
+        site.grid_x, site.walkways = list(lay.grid_x), [list(w) for w in lay.walkways]
     if not upper:
         eng._gate_brief(planner, site, rooms)
         planner.place_amenities(site, door_x[0], door_x[1], None)
@@ -720,6 +799,7 @@ def compose(eng, lay: FloorLayout, site, planner, unit, unit_turned, stair, lift
             "flat_carpet_m2": round(unit.total_carpet_area, 2),
             "labels": [s.label for s in lay.slots], "turned": [s.turned for s in lay.slots],
             "slots": [list(s.rect) for s in lay.slots], "lobby": lay.lobby, "stair_open": lay.stair_side,
+            "core_at": lay.core_at, "walkways": [list(w) for w in lay.walkways],
             "options": {str(k): v for k, v in report.items()}}
     plan.engineering = engineering
     unit_notes = [n for n in unit.design_notes if not n.startswith(("Setbacks:", "Single storey", "Layout:",

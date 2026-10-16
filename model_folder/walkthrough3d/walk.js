@@ -1596,9 +1596,41 @@ function pickVoice() {
 }
 if ("speechSynthesis" in window) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
 const say = { list: [], i: 0, audio: null, token: 0 };
+// ── the guide's camera. Every sentence the guide says may carry a point (narration cue → line.at = [x, y, z, g]:
+// z above the floor the guide stands on, or above the ground when g = 1). When the sentence starts, the camera
+// turns and tilts to it and eases the lens in a little for things far away; a sentence without one looks back
+// at the room. The owner dragging the view wins for a while (walker.lastLook).
+const FOV0 = 62;
+const director = { aim: null, base: null, lean: 0 };
+function aimFor(at) {
+  if (!at) return null;
+  const z = at[3] ? at[2] : zf(walker.level) + at[2];
+  const dx = at[0] - walker.x, dy = at[1] - walker.y, d = Math.hypot(dx, dy);
+  if (d < 0.4) return null;
+  // on the roof, something down on the ground: lean over the parapet like anyone would
+  const over = at[3] && walker.level === TOP() && z < walker.h - 1.5;
+  return { yaw: Math.atan2(dy, dx), pitch: clamp(Math.atan2(z - walker.h, Math.max(0.3, d - (over ? 0.5 : 0))), over ? -1.2 : -0.9, 0.55),
+    fov: clamp(64 - d * 1.5, 46, FOV0), lean: over ? 0.5 : 0 };
+}
+function onLine(i, line) {                              // a sentence starts: look at it, light its words
+  if (!tour.on) return;
+  const a = line && line.at ? aimFor(line.at) : null;
+  director.aim = a || director.base;
+  $("capS").querySelectorAll("span.ln").forEach((el, k) => el.classList.toggle("now", k === i));
+}
+function steer(dt) {
+  const A = director.aim, goal = A && A.fov ? A.fov : FOV0;
+  director.lean += (((A && A.lean) || 0) - director.lean) * (1 - Math.exp(-dt * 1.8));
+  if (Math.abs(camera.fov - goal) > 0.05) { camera.fov += (goal - camera.fov) * (1 - Math.exp(-dt * 1.6)); camera.updateProjectionMatrix(); }
+  if (!A || performance.now() - walker.lastLook < 2500) return;
+  const k = 1 - Math.exp(-dt * 2.2);
+  const d = ((A.yaw - walker.yaw + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+  walker.yaw += d * k; walker.pitch += (A.pitch - walker.pitch) * k;
+}
+function cued(st) { return ((words(st).speech) || []).some((l) => l.at); }
 function neuralOn() { const v = VOICES[state.lang]; return !!(v && v.neural); }
 function stopSpeech() {
-  say.token++;
+  say.token++; say.silent = 0;
   if (say.audio) { try { say.audio.pause(); } catch (e) { /* gone */ } say.audio = null; }
   if ("speechSynthesis" in window) speechSynthesis.cancel();
 }
@@ -1622,6 +1654,7 @@ function playNext(tok) {
   if (tok !== say.token) return;
   if (say.i >= say.list.length) { tour.spoken = true; return; }
   const line = say.list[say.i++];
+  onLine(say.i - 1, line);
   let finished = false;
   const done = () => { if (finished) return; finished = true; say.audio = null; if (tok === say.token) setTimeout(() => playNext(tok), 140); };
   const v = VOICES[state.lang];
@@ -1637,13 +1670,19 @@ function playNext(tok) {
 }
 function speakLines(lines, text) {
   stopSpeech();
-  tour.spoken = true;
-  if (!state.voice) return;
   say.list = lines && lines.length ? lines : (text ? [{ k: "", t: text }] : []);
   say.i = 0;
+  tour.spoken = !say.list.length;
   if (!say.list.length) return;
-  tour.spoken = false;
+  if (!state.voice) { silentNext(say.token); return; }   // voice off: the camera still follows the words
   playNext(say.token);
+}
+function silentNext(tok) {                              // reading time per sentence, counted by tourUpdate
+  if (tok !== say.token) return;
+  if (say.i >= say.list.length) { tour.spoken = true; say.silent = 0; return; }
+  const line = say.list[say.i++];
+  onLine(say.i - 1, line);
+  say.silent = Math.max(1.6, String(line.t || "").split(/\s+/).length * 0.3); say.silentTok = tok;
 }
 // one line in the browser's voice, outside the guide's words (the lift calling out its floor)
 function speak(text, lang = "en") {
@@ -1662,13 +1701,15 @@ function roomWords(name) {
 // the stop's words in the chosen language (a stop after the floor choice has one version per floor / lift-or-stairs)
 function words(st) {
   const tk = st.talk && (st.talk[state.lang] || st.talk.en);
-  if (!tk) return { title: st.title, say: st.say, speech: null };
+  if (!tk) return { title: st.title, say: st.say, speech: null, lines: null, options: null };
   let w = tk;
-  if (tk.by) {
+  if (tour.loop && st.kind === "room" && tk.again) w = tk.again;      // the same home, a floor up
+  else if (tk.by) {
     const c = tour.choice || {};
     w = tk.by[`${c.L}|${c.via}`] || tk.by[`${c.L}`] || Object.values(tk.by)[0] || tk;
   }
-  return { title: w.title || tk.title || st.title, say: w.say || st.say, speech: w.speech || null };
+  return { title: w.title || tk.title || st.title, say: w.say || st.say, speech: w.speech || null,
+    lines: w.lines || null, options: w.options || null };
 }
 function setLang(l, fromApp = false) {
   if (!LANGS.includes(l)) return;
@@ -1720,7 +1761,7 @@ async function pollVoice() {                             // while the app speaks
 setInterval(() => { if (!state.started || tour.on) pollVoice(); }, 5000);
 function tourStart() {
   if (!S || !S.tour || !S.tour.length) { toast("No guided walk for this plan."); return; }
-  hideStart(); tour.on = true; tour.paused = false; tour.i = -1;
+  hideStart(); tour.on = true; tour.paused = false; tour.i = -1; tour.loop = 0; director.aim = null;
   const ch = S.tour.find((s) => s.kind === "choice");
   tour.choice = ch ? { L: ch.default.L, via: ch.default.via } : null;
   showChoice(null);
@@ -1728,7 +1769,7 @@ function tourStart() {
   const st0 = S.tour[0];
   walker.level = S.tour_level || 0;
   setMode("walk", { at: st0.path[0], level: S.tour_level || 0, yaw: yawTo(st0.path[0], st0.look) });
-  setTimeout(tourNext, 1150);
+  setTimeout(() => { if (tour.on && tour.i === -1) tourNext(); }, 1150);   // unless Next was pressed already
 }
 function yawTo(from, to) { return to ? Math.atan2(to[1] - from[1], to[0] - from[0]) : walker.yaw; }
 // a building of floors: stops after the choice say 'chosen' for the floor; titles and words name it
@@ -1772,9 +1813,21 @@ function tourNext() {
   if (tour.i >= S.tour.length) return tourEnd(true);
   const st = resolveStop(S.tour[tour.i]);
   tour.cur = st;
+  director.aim = null;
   $("capN").textContent = `${tour.i + 1} / ${S.tour.length}`;
-  if (st.kind === "end") { caption(st); tour.phase = "end"; tour.t = 0; return; }
+  if (st.kind === "end") { director.base = null; caption(st); tour.phase = "end"; tour.t = 0; return; }
   if (st.kind === "choice") { caption(st); showChoice(st); tour.phase = "choice"; tour.t = 0; return; }
+  if (st.kind === "more") { caption(st); showMore(st); tour.phase = "choice"; tour.t = 0; return; }
+  if (st.kind === "terrace" && tour.choice && tour.choice.via === "lift" && lift.ok && S.lift && st.level !== walker.level) {
+    // straight up by the lift to its highest stop, then the last flight on foot
+    const Ls = (S.lift.stops || []).map((q) => q.L).filter((L) => L <= st.level);
+    const Lt = Ls.length ? Math.max(...Ls) : walker.level;
+    if (Lt !== walker.level && stopOf(Lt) >= 0 && stopOf(walker.level) >= 0 && liftTrip(Lt, true)) {
+      tour.phase = "ride"; tour.t = 0;
+      $("capT").textContent = words(st).title; $("capS").textContent = UI.lift[state.lang];
+      return;
+    }
+  }
   if (st.kind === "ride" && st.level !== walker.level && tour.choice && tour.choice.via === "lift" && lift.ok &&
       stopOf(st.level) >= 0 && stopOf(walker.level) >= 0 && liftTrip(st.level, true)) {
     tour.phase = "ride"; tour.t = 0;
@@ -1791,9 +1844,38 @@ function tourNext() {
   walker.path = st.path.slice(1); tour.phase = "walk"; tour.t = 0;
   $("capT").textContent = UI.walking[state.lang] + words(st).title; $("capS").textContent = "";
 }
+// 'Next floor?' after a home: the same home a floor up (back to the ride, shorter words), the terrace, or the end
+function showMore(st) {
+  const box = $("capC"); box.innerHTML = ""; box.style.display = "flex";
+  const row = document.createElement("div"); row.className = "crow";
+  for (const o of words(st).options || []) {
+    const b = document.createElement("button"); b.className = "b" + (o.act === "next" ? " go" : "");
+    b.textContent = o.label; b.onclick = () => moreGo(o);
+    row.appendChild(b);
+  }
+  box.appendChild(row);
+}
+function moreGo(o) {
+  if (!tour.on) return;
+  showChoice(null); stopSpeech(); tour.spoken = true;
+  const at = (k) => S.tour.findIndex((q) => q.kind === k);
+  let i = -1;
+  if (o.act === "next" && at("ride") >= 0) {
+    tour.choice.L = o.L; tour.choice.via = o.via; tour.loop = (tour.loop || 0) + 1; i = at("ride");
+  } else if (o.act !== "end" && at("terrace") >= 0) { if (o.via) tour.choice.via = o.via; i = at("terrace"); }
+  if (i < 0) i = at("end");
+  tour.i = i - 1; tour.phase = "";
+  tourNext();
+}
+function captionText(w) {
+  const box = $("capS"); box.innerHTML = "";
+  const ls = w.lines && w.lines.length ? w.lines : [w.say || ""];
+  for (const t of ls) { const el = document.createElement("span"); el.className = "ln"; el.textContent = t + " "; box.appendChild(el); }
+}
 function caption(st) {
   const w = words(st);
-  $("capT").textContent = w.title; $("capS").textContent = w.say;
+  director.base = { yaw: walker.yaw, pitch: -0.08, fov: FOV0 };
+  $("capT").textContent = w.title; captionText(w);
   tour.capWords = w.say || ""; tour.capAt = performance.now();
   const n = (w.say || "").split(/\s+/).length / 3.0;
   tour.capMax = state.voice && neuralOn() ? Math.max(30, n * 2.6 + 20) : Math.max(3.5, n) + 4;
@@ -1802,6 +1884,7 @@ function caption(st) {
 function tourInterrupt() { if (tour.on) tourEnd(false); }
 function tourEnd(finished) {
   tour.on = false; tour.phase = ""; walker.path = []; showChoice(null);
+  director.aim = null; director.base = null; director.lean = 0; camera.fov = FOV0; camera.updateProjectionMatrix();
   if (lift.auto && lift.auto.tour) lift.auto = null;
   stopSpeech();
   $("cap").style.display = "none";
@@ -1811,12 +1894,12 @@ function tourUpdate(dt) {
   if (!tour.on || tour.paused) return;
   const st = tour.cur; if (!st) return;
   tour.t += dt;
-  if (tour.phase === "ride") {                       // out of the lift on the chosen floor: walk into the lobby
-    if (!lift.auto && !lift.rider && !lift.anim && walker.level === st.level) {
+  steer(dt);
+  if (say.silent > 0) { say.silent -= dt; if (say.silent <= 0) silentNext(say.silentTok); }
+  if (tour.phase === "ride") {                       // out of the lift: walk on (the terrace: up the last flight)
+    if (!lift.auto && !lift.rider && !lift.anim && (walker.level === st.level || st.kind === "terrace" || tour.t > 4)) {
       walkTo(st.target[0], st.target[1], st.level);
       tour.phase = walker.path.length ? "walk" : "turn"; tour.t = 0; tour.from = walker.yaw; tour.to = walker.yaw;
-    } else if (!lift.auto && !lift.rider && !lift.anim && tour.t > 4) {   // the lift could not take us: the stairs
-      walkTo(st.target[0], st.target[1], st.level); tour.phase = "walk"; tour.t = 0;
     }
     return;
   }
@@ -1833,7 +1916,7 @@ function tourUpdate(dt) {
     tour.to = tour.from + ((((tour.to - tour.from) % (2 * Math.PI)) + 3 * Math.PI) % (2 * Math.PI) - Math.PI);
   } else if (tour.phase === "turn") {
     const k = Math.min(1, tour.t / 0.8); walker.yaw = lerp(tour.from, tour.to, ease(k)); walker.pitch = lerp(walker.pitch, -0.08, 0.1);
-    if (k >= 1) { caption(st); tour.phase = st.pan ? "pan" : "wait"; tour.t = 0; tour.base = walker.yaw; }
+    if (k >= 1) { caption(st); tour.phase = st.pan && !cued(st) ? "pan" : "wait"; tour.t = 0; tour.base = walker.yaw; }
   } else if (tour.phase === "pan") {
     const total = st.pan * DEG, dur = Math.max(3, st.pan / 38), k = Math.min(1, tour.t / dur);
     // look left, sweep right, come back: sin curve over the sweep
@@ -2014,7 +2097,7 @@ function updateHud() {
     const nm = r.name.includes(" · ") ? r.name.split(" · ")[1] : r.name;
     const flatTxt = S.apartment && flat !== null && r.role !== "COMMON"
       ? `<span class="fl">🏠 ${houseKind() ? homeName(L) : "Flat " + flatNo(L, flat)}</span> ` : "";
-    const badge = { best: "🟢 best Vastu spot", good: "🟢 good Vastu", ok: "🟡 acceptable Vastu", poor: "🔴 not ideal for Vastu" }[r.vastu] || "";
+    const badge = { best: "🟢 best Vastu spot", good: "🟢 good Vastu" }[r.vastu] || "";   // the walk shows a home's good side (the Vastu tab has the full audit)
     html = `<b>📍 ${esc(nm)}</b><div class="sub">${floorTxt}${flatTxt}${r.size} (${r.ft}) · ${r.area} m² · ${r.sqft} sq ft · ` +
       `${r.zone_word ? esc(r.zone_word) + " · " : ""}ceiling ${ch.toFixed(2)} m (${Math.floor(ft / 12)}'${ft % 12}")${badge ? " · " + badge : ""}</div>` +
       (canWish && r.key ? `<div class="row"><button class="b" id="hudWish">✏️ Change this room</button><button class="b" id="hudSay">🔊 Tell me</button></div>`
@@ -2793,7 +2876,8 @@ function update(dt) {
     }
     const gz = groundAt(walker.x, walker.y) + walker.eye;
     if (Math.abs(gz - walker.h) > 0.002) { walker.h += (gz - walker.h) * Math.min(1, dt * 7); active = true; }
-    camera.position.set(walker.x, walker.h, -walker.y);
+    const ln = tour.on ? director.lean : 0;                // the guide leans over the parapet to look down
+    camera.position.set(walker.x + Math.cos(walker.yaw) * ln, walker.h - ln * 0.2, -(walker.y + Math.sin(walker.yaw) * ln));
     camera.lookAt(camera.position.clone().add(lookDir()));
     updateHud();
   } else {
@@ -2808,22 +2892,58 @@ function update(dt) {
       if (o.pivot.visible === open) { o.pivot.visible = !open; active = true; }
       continue;
     }
-    const near = hasRooms(walker.level) && planOf(walker.level) === (o.plan || 0) &&
-      Math.hypot(walker.x - o.d.mid[0], walker.y - o.d.mid[1]) < 1.7;
-    o.target = state.mode === "walk" ? (near ? 1 : 0) : (state.mode === "outside" ? 0 : 1);
+    const here = hasRooms(walker.level) && planOf(walker.level) === (o.plan || 0);
+    const near = here && Math.hypot(walker.x - o.d.mid[0], walker.y - o.d.mid[1]) < 1.7;
+    let use = near;
+    if (tour.on || walker.path.length) {                // a route: open to pass, closed behind you
+      const half = o.d.w / 2 + 0.15;
+      use = here && (routeCrosses(o.d.mid, o.d.n, half, 2.4) || inOpening(o.d.mid, o.d.n, half, o.d.w + 0.25) ||
+        (tour.on && tour.cur && tour.cur.peek && !walker.path.length &&      // shown from its doorway: kept open
+         Math.hypot(o.d.mid[0] - tour.cur.peek[0], o.d.mid[1] - tour.cur.peek[1]) < 0.05));
+    }
+    o.target = state.mode === "walk" ? (use ? 1 : 0) : (state.mode === "outside" ? 0 : 1);
     if (Math.abs(o.target - o.cur) > 1e-3) { o.cur += clamp(o.target - o.cur, -dt * 1.6, dt * 1.6); o.pivot.rotation.y = o.d.closed * DEG + o.delta * ease(o.cur); active = true; }
   }
   if (driveUpdate(dt)) active = true;
   for (const o of registry.gates) {
-    const near = state.mode === "walk" && Math.hypot(walker.x - o.mid[0], walker.y - o.mid[1]) < 3.2;
+    let near = state.mode === "walk" && Math.hypot(walker.x - o.mid[0], walker.y - o.mid[1]) < 3.2;
+    if (state.mode === "walk" && (tour.on || walker.path.length) && walker.level === 0) {
+      const half = (o.g.x1 - o.g.x0) / 2 + 0.2;          // a gate opens for the walker coming through, then shuts
+      near = routeCrosses(o.gmid, [0, 1], half, 5.5) || inOpening(o.gmid, [0, 1], half, Math.min(3.0, half + 0.6));
+    }
     const car = drive.on && drive.at && Math.hypot(drive.at[0] - o.gmid[0], drive.at[1] - o.gmid[1]) < 8.5 &&
       S.gates[S.drive.gate] === o.g;
-    o.target = near || tour.on || car ? 1 : 0;
+    o.target = near || car ? 1 : 0;
     if (Math.abs(o.target - o.cur) > 1e-3) { o.cur += clamp(o.target - o.cur, -dt * 0.7, dt * 0.7); const e = ease(o.cur); for (const f of o.parts) f(e); active = true; }
   }
   if (state.mode === "walk" && registry.fans.length) { for (const f of registry.fans) f.rotation.y += dt * 4.2; active = true; }
   sky.position.copy(camera.position);
   return active;
+}
+// ── doors and gates the way a person uses them: on a walk with a route (the guided walk, tap-to-walk) a door
+// opens just before you reach it, stays open while you pass, and closes once you are through — so the guide
+// shows a room whole, nothing hidden behind an open leaf; walking freely with the keys, a door opens while you
+// stand near it.
+function routeCrosses(mid, nrm, half, ahead) {        // does the route of the next `ahead` metres pass through?
+  const side = (x, y) => (x - mid[0]) * nrm[0] + (y - mid[1]) * nrm[1];
+  const along = (x, y) => -(x - mid[0]) * nrm[1] + (y - mid[1]) * nrm[0];
+  let px = walker.x, py = walker.y, left = ahead;
+  for (const q of walker.path) {
+    const s0 = side(px, py), s1 = side(q[0], q[1]);
+    if ((s0 < 0 && s1 >= 0) || (s0 > 0 && s1 <= 0)) {
+      const k = s0 / ((s0 - s1) || 1e-9);
+      if (Math.abs(along(px + (q[0] - px) * k, py + (q[1] - py) * k)) <= half) return true;
+    }
+    left -= Math.hypot(q[0] - px, q[1] - py);
+    if (left <= 0) break;
+    px = q[0]; py = q[1];
+  }
+  return false;
+}
+function inOpening(mid, nrm, half, depth) {             // still in the doorway, or within the leaf's swing
+  const s = (walker.x - mid[0]) * nrm[0] + (walker.y - mid[1]) * nrm[1];
+  const a = -(walker.x - mid[0]) * nrm[1] + (walker.y - mid[1]) * nrm[0];
+  return Math.abs(s) < depth && Math.abs(a) <= half;
 }
 function frame() {
   requestAnimationFrame(frame);

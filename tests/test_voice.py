@@ -45,6 +45,7 @@ def _all_speech(stop, lang):
     out = list(tk.get("speech") or [])
     for v in (tk.get("by") or {}).values():
         out += v.get("speech") or []
+    out += (tk.get("again") or {}).get("speech") or []          # the same room, a floor up
     return out
 
 
@@ -104,15 +105,13 @@ class TestWords(unittest.TestCase):
             f = st["facts"]
             self.assertEqual(f["w"], rooms[st["room"]]["facts"]["w"])
             say = st["talk"]["en"]["say"]
-            if f["kind"] not in ("POOJA", "BATHROOM", "ATTACHED_BATH", "STORE", "UTILITY", "FOYER", "BALCONY", "SERVANT"):
+            if f["kind"] not in ("POOJA", "BATHROOM", "ATTACHED_BATH", "STORE", "UTILITY", "FOYER", "BALCONY", "SERVANT",
+                                 "CORRIDOR", "LOBBY"):
                 self.assertIn(f"{round(f['w'] / 0.3048)} by {round(f['h'] / 0.3048)} feet", say, st["room"])
                 n_rooms += 1
             s = f.get("score")
-            if s is not None and s < -10 and f["kind"] not in ("BATHROOM", "ATTACHED_BATH", "STORE", "UTILITY"):
-                self.assertIn("Honestly", say, st["room"])                  # a weak point is said, softly
-                self.assertIn("నిజం చెప్పాలంటే", st["talk"]["te"]["say"])
-            if s is not None and s >= 3:
-                self.assertNotIn("Honestly", say)
+            if s is not None and s < 0:                                    # a weak Vastu place is simply not talked about
+                self.assertNotIn("Vastu", say.replace("Vastu-wise too", ""), st["room"])
         self.assertGreaterEqual(n_rooms, 4)
         start = sc["tour"][0]["talk"]
         cents = plan.plot_width * plan.plot_height / nar.M2_PER_CENT
@@ -120,7 +119,22 @@ class TestWords(unittest.TestCase):
         self.assertIn("గజాలు", start["te"]["say"])                        # Telugu buyers hear gajalu too
         self.assertIn("गज", start["hi"]["say"])                             # Hindi buyers hear gaj
         end = sc["tour"][-1]["talk"]["en"]["say"]
-        self.assertIn(f"Vastu score {round(plan.vastu_score)} out of hundred", end)
+        if plan.vastu_score >= 70:
+            self.assertIn(f"Vastu score {round(plan.vastu_score)} out of hundred", end)
+
+    def test_03b_only_the_good(self):
+        """The guide shows a home in its best light: no weak point, no 'honestly', no 'too small' in any language."""
+        bad = {"en": ("Honestly", "honest", "small compared", "weak", "tight", "not a good", "can be improved",
+                      "worry", "warm, a curtain"),
+               "te": ("నిజం చెప్పాలంటే", "నిజం చెప్తా", "అంత మంచిది కాదు", "ఇరుకు —", "చిన్నవి"),
+               "hi": ("सच कहूँ", "सच बताऊँ", "ठीक नहीं", "कमज़ोर", "तंग है", "छोटे हैं")}
+        for name in CASES:
+            plan, sc = _scene(name)
+            for st in sc["tour"]:
+                for lang in nar.LANGS:
+                    for ln in _all_speech(st, lang):
+                        for w in bad[lang]:
+                            self.assertNotIn(w, ln["t"], (name, st["kind"], lang))
 
     def test_04_floor_choice_in_every_language(self):
         plan, sc = _scene("apartment")

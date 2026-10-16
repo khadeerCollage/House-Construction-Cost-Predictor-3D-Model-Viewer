@@ -123,6 +123,44 @@ def _bhk_fit(plot_w, plot_h, facing, family_kw, building_type, floors, vastu, ve
     return bhk_options(plot_w, plot_h, facing, FamilyProfile(**family_kw), building_type, floors, vastu)
 
 
+@st.cache_data(show_spinner=False, max_entries=64)
+def _stair_sides_form(plot_w, plot_h, facing, bhk, family_kw, quality, vastu, components, road_w, version=0.0):
+    """One-storey house: which sides can take the outside terrace stair with these amenities (cached)."""
+    from floorplan_generator.terrace_stair import form_sides
+    return form_sides(plot_width=plot_w, plot_height=plot_h, bhk_config=bhk, vastu_enabled=vastu, orientation=facing,
+                      quality_level=quality, family_profile=FamilyProfile(**family_kw),
+                      additional_components=components, road_width=road_w)
+
+
+def _stair_side_picker(choices: dict) -> str:
+    """'🪜 Stair to the terrace — which side?': only the sides that keep everything else; the rest locked with why."""
+    if not choices or not choices.get("available"):
+        return "auto"
+    opts = {o["side"]: o for o in choices["options"]}
+    auto = opts.get(choices.get("auto")) or {}
+
+    def label(k):
+        if k == "auto":
+            v = auto.get("vastu") or {}
+            return f"✨ Best for this plot — {auto.get('title', '')}" + (f" · {v['emoji']} Vastu {v['word']}" if v else "")
+        o, v = opts[k], opts[k]["vastu"]
+        extra = f" · house {abs(o['d_sqft'])} sq ft {'smaller' if o['d_sqft'] < 0 else 'bigger'}" if abs(o["d_sqft"]) >= 5 else ""
+        return f"{o['title']} · {v['emoji']} Vastu {v['word']}{extra}"
+    keys = ["auto"] + [o["side"] for o in choices["options"] if o["ok"] and not o["auto"]]
+    if st.session_state.get("ts_side") not in keys:
+        st.session_state["ts_side"] = "auto"
+    sel = st.selectbox("🪜 Stair to the terrace — which side?", keys, format_func=label, key="ts_side",
+                       help="A single-storey house climbs to its terrace by a straight stair outside the walls. "
+                            "Only sides that keep your parking, garden and other choices are offered.")
+    o = auto if sel == "auto" else opts[sel]
+    if o.get("vastu"):
+        st.caption(f"{o['vastu']['emoji']} {o['vastu']['line']} {o['vastu']['climb_line']}")
+    locked = [x for x in choices["options"] if not x["ok"]]
+    if locked:
+        st.caption("🔒 " + " · ".join(f"**{x['title']}** — {x['reason']}" for x in locked))
+    return sel
+
+
 @st.cache_data(show_spinner=False, max_entries=128)
 def _flats_fit(plot_w, plot_h, facing, bhk, family_kw, floors, vastu, has_lift, lift_capacity, version=0.0):
     """Apartments: how 1, 2 and 4 flats per floor fit (each flat planned around a common core)."""
@@ -228,6 +266,50 @@ def _location_picker(plot_area_sqm: float):
                f"({lv.rate_text(lv.per_unit(mid, land.alt_unit))} {land.alt_unit}) · {tag}. "
                f"Your plot ≈ **{_lakh(land.value[1])}**.")
     return land
+
+
+def _elevation_section(plan, mode: str) -> None:
+    """🏠 The front elevation (the street face) under the floor plan — from the same model as the 3D walk."""
+    key = (id(plan), mode)
+    hit = st.session_state.get("elev_cache")
+    if not hit or hit[0] != key:
+        try:
+            el = _importlib.import_module("floorplan_renderer.elevation")
+            svg = el.front_elevation_svg(plan, mode=mode)
+        except Exception as e:  # noqa: BLE001 — the elevation is an extra; the plan above still stands
+            st.caption(f"🏠 The front elevation could not be drawn for this design ({e}).")
+            return
+        st.session_state["elev_cache"] = hit = (key, svg)
+    st.markdown("##### 🏠 Front elevation — your house as seen from the road")
+    bg = '#0A2342' if mode == 'blueprint' else '#FFFFFF'
+    # no indented lines: Markdown would show indented HTML as a code block
+    st.markdown("<style>.elev-box svg { max-width: 100%; height: auto; max-height: 620px; }</style>"
+                f'<div class="elev-box" style="background: {bg}; padding: 12px; border-radius: 8px; '
+                f'border: 2px solid #334155; text-align: center; overflow-x: auto;">{hit[1]}</div>',
+                unsafe_allow_html=True)
+    st.download_button("🏠 Front elevation (.svg)", data=hit[1].encode("utf-8"),
+                       file_name=f"{plan.bhk_config}_front_elevation.svg", mime="image/svg+xml", key="dl_elev_svg")
+
+
+def _pack_section(plan, cost_data: dict, quality: str) -> None:
+    """📦 One PDF for the engineer, the mason and the bank (model_folder/builder_pack.py)."""
+    sig = (id(plan), cost_data.get("total_cost"), cost_data.get("region"), quality)
+    have = st.session_state.get("pack_cache")
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        if have and have[0] == sig:
+            st.download_button("📦 Builder & bank pack (.pdf)", data=have[1], type="primary",
+                               file_name=f"{plan.bhk_config}_house_plan_and_cost_pack.pdf", mime="application/pdf",
+                               use_container_width=True, key="dl_pack")
+        elif st.button("📦 Make the builder & bank pack (PDF)", use_container_width=True, key="make_pack"):
+            with st.spinner("Putting the plan, elevation, BOQ, stage payments and Vastu report together…"):
+                bp = _importlib.import_module("model_folder.builder_pack")
+                st.session_state["pack_cache"] = (sig, bp.build_pack(plan, cost_data, quality))
+            st.rerun()
+    with c2:
+        st.caption("One PDF to hand over: the floor plan, the front elevation, room / door / window / gate schedules, "
+                   "the cost with the materials measured from your drawing, the stage-by-stage payment plan a bank "
+                   "releases loan instalments against, the Vastu report and the structure notes.")
 
 
 def _money_card(plan, cost_data: dict, land) -> None:
@@ -732,6 +814,18 @@ def render_design_tab():
     from floorplan_generator.site_feasibility import apply_fit
     additional_components = apply_fit(additional_components, site_fit)
 
+    # The outside stair to the terrace (one storey): the side, chosen with everything above kept
+    terrace_side = "auto"
+    if _independent and int(floors) == 1:
+        try:
+            import floorplan_generator.site_planner as _spm, floorplan_generator.terrace_stair as _tsm
+            _ver = max(os.path.getmtime(_spm.__file__), os.path.getmtime(_tsm.__file__), _checker_version())
+            _ch = _stair_sides_form(round(plot_w, 3), round(plot_h, 3), orient_code, effective_bhk, family_kw, quality,
+                                    vastu_on, additional_components, road_w, _ver)
+            terrace_side = _stair_side_picker(_ch)
+        except Exception as _e:  # the form must never break over this
+            st.caption(f"Terrace stair: placed automatically ({_e}).")
+
     st.write("---")
 
     # ---------------------------------------------------------
@@ -802,6 +896,7 @@ def render_design_tab():
                     "flats_per_floor": flats_per_floor,
                     "lift_position": lift_position,
                     "road_width": road_w,
+                    "terrace_stair": terrace_side,
                 }
                 init_sig = inspect.signature(LayoutEngine.__init__)
                 has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in init_sig.parameters.values())
@@ -975,6 +1070,7 @@ def render_design_tab():
                                file_name=f"{plan.bhk_config}_duplex_first_floor.svg", mime="image/svg+xml",
                                key="dl_upper_svg")
 
+        _elevation_section(plan, "blueprint" if "Blueprint" in view_mode else "clean")
         st.write("")
 
         # ---------------------------------------------------------
@@ -1034,6 +1130,7 @@ def render_design_tab():
                 use_container_width=True,
                 help="300 DPI high-resolution image"
             )
+        _pack_section(plan, cost_data, quality)
 
         st.write("---")
 

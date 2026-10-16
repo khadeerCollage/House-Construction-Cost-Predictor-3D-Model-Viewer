@@ -41,3 +41,5 @@ drawsvg>=2.0             # SVG vector rendering (pure Python)
 shapely>=2.0.0           # Computational geometry for wall polygons
 reportlab>=4.0           # PDF blueprint generation
 streamlit-drawable-canvas>=0.13.0 # Interactive 2D floor plan editor
+
+svglib>=2.3            # builder & bank pack: the drawings into the PDF as vectors

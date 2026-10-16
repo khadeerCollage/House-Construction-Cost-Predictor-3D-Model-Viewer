@@ -88,7 +88,9 @@ class SVGRenderer:
         p.dimensions = [rep(dm, y1=round(H - dm.y1, 4), y2=round(H - dm.y2, 4),
                             offset=-dm.offset if abs(dm.y2 - dm.y1) < abs(dm.x2 - dm.x1) else dm.offset)
                         for dm in plan.dimensions]
-        p.staircases = [rep(s, y=round(H - s.y - s.h, 4)) for s in getattr(plan, "staircases", [])]
+        p.staircases = [rep(s, y=round(H - s.y - s.h, 4),
+                            direction=swap_ns.get(getattr(s, "direction", "N"), getattr(s, "direction", "N")))
+                        for s in getattr(plan, "staircases", [])]
         return p
 
     def _build_svg(self, plan: GeneratedFloorPlan, mode: str):
@@ -472,10 +474,11 @@ class SVGRenderer:
     # =========================================================================
     def _draw_staircases(self, d, plan, colors):
         """Draw staircase tread lines and lift shaft X-pattern for all stair/lift rooms."""
-        stair_map = {}
+        stair_map, climb_map = {}, {}
         if hasattr(plan, 'staircases') and plan.staircases:
             for sc in plan.staircases:
                 stair_map[sc.name] = getattr(sc, 'stair_type', 'dog_leg')
+                climb_map[sc.name] = getattr(sc, 'direction', None)
 
         default_stair = getattr(plan, 'stair_type', 'dog_leg')
 
@@ -485,9 +488,9 @@ class SVGRenderer:
                     self._draw_lift_room(d, room, colors)
                 elif room.category == 'STAIRS':
                     s_type = stair_map.get(room.name, default_stair)
-                    self._draw_stair_room(d, room, colors, stair_type=s_type)
+                    self._draw_stair_room(d, room, colors, stair_type=s_type, climb=climb_map.get(room.name))
 
-    def _draw_stair_room(self, d, room, colors, stair_type="dog_leg"):
+    def _draw_stair_room(self, d, room, colors, stair_type="dog_leg", climb=None):
         """Draw staircase treads, risers, landings, and arrows according to stair_type."""
         if room.w <= 0 or room.h <= 0:
             return
@@ -507,16 +510,34 @@ class SVGRenderer:
         stype = str(stair_type).lower()
 
         if stype == "straight":
-            # Single continuous flight of treads with directional arrow
-            num_treads = max(6, int(rh / (0.25 * PPM)))
+            # One flight: treads across the run, the walking line from the foot to the arrow at the top
+            # (`climb` = the end it arrives at, in this y-down frame: N = +y, S = −y, E = +x, W = −x)
+            along_y = rh >= rw
+            run = rh if along_y else rw
+            num_treads = max(6, int(run / (0.25 * PPM)))
             for i in range(1, num_treads):
-                y_t = ry + i * (rh / num_treads)
-                d.append(draw.Line(rx, y_t, rx + rw, y_t, stroke=tread_stroke, stroke_width=0.8))
-            # Directional arrow
-            d.append(draw.Line(cx, ry + 12, cx, ry + rh - 12, stroke=arrow_fill, stroke_width=1.2))
-            d.append(draw.Lines(cx - 4, ry + rh - 20, cx, ry + rh - 12, cx + 4, ry + rh - 20,
-                                close=False, fill='none', stroke=arrow_fill, stroke_width=1.5))
-            d.append(draw.Text('UP ▲', 8.5, cx + 6, cy, fill=text_fill, font_weight='bold'))
+                if along_y:
+                    y_t = ry + i * (rh / num_treads)
+                    d.append(draw.Line(rx, y_t, rx + rw, y_t, stroke=tread_stroke, stroke_width=0.8))
+                else:
+                    x_t = rx + i * (rw / num_treads)
+                    d.append(draw.Line(x_t, ry, x_t, ry + rh, stroke=tread_stroke, stroke_width=0.8))
+            up = climb if climb in (("N", "S") if along_y else ("E", "W")) else ("N" if along_y else "E")
+            sgn = 1 if up in ("N", "E") else -1
+            if along_y:
+                y0, y1 = (ry + 12, ry + rh - 12) if sgn > 0 else (ry + rh - 12, ry + 12)
+                d.append(draw.Line(cx, y0, cx, y1, stroke=arrow_fill, stroke_width=1.2))
+                d.append(draw.Lines(cx - 4, y1 - 8 * sgn, cx, y1, cx + 4, y1 - 8 * sgn,
+                                    close=False, fill='none', stroke=arrow_fill, stroke_width=1.5))
+                d.append(draw.Text('UP', 8.5, cx + 6, y1 - 4 * sgn + (6 if sgn < 0 else 0), fill=text_fill,
+                                   font_weight='bold'))
+            else:
+                x0, x1 = (rx + 12, rx + rw - 12) if sgn > 0 else (rx + rw - 12, rx + 12)
+                d.append(draw.Line(x0, cy, x1, cy, stroke=arrow_fill, stroke_width=1.2))
+                d.append(draw.Lines(x1 - 8 * sgn, cy - 4, x1, cy, x1 - 8 * sgn, cy + 4,
+                                    close=False, fill='none', stroke=arrow_fill, stroke_width=1.5))
+                d.append(draw.Text('UP', 8.5, x1 - 4 * sgn, cy + 12, fill=text_fill, font_weight='bold',
+                                   text_anchor='start' if sgn < 0 else 'end'))
 
         elif stype == "l_shaped":
             # Two perpendicular flights meeting at a corner landing

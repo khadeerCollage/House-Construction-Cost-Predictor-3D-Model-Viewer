@@ -174,7 +174,10 @@ class TestGates(unittest.TestCase):
             st = plan.engineering.get("stilt")
             self.assertIsNotNone(st)
             self.assertGreaterEqual(st["fitted"], 1)
-            shafts, lobby, cols = gt.stilt_context(plan.rooms, plan.building_footprint, _is_site_room)
+            # the columns the engine, the drawing and the 3D use (set out for the cars under a rear core)
+            ap = plan.engineering.get("apartment") or {}
+            shafts, lobby, cols = gt.stilt_context(plan.rooms, plan.building_footprint, _is_site_room,
+                                                   plan.engineering.get("grid_x"), ap.get("walkways"))
             car = gt.CARS[st["car"]]
             for b in st["bays"]:
                 cx = (b[0] + b[2]) / 2

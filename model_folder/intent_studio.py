@@ -11,6 +11,9 @@ saying what they want — no CAD skills, no dragging:
   … or type it in their own words (Indian English, spelling mistakes, Hindi /
      Malayalam / Tamil words — floorplan_generator.wish_parser); the studio shows
      what it understood and asks "did you mean …" when unsure.
+  🪜 a single-storey house also chooses the side of its outside terrace stair: every
+     side is judged first (floorplan_generator.terrace_stair — fits?, Vastu in simple
+     words, house size, yard, daily use, safety) and the owner taps one.
 
 Wishes stack up; "Re-plan my house" re-solves the whole layout around them
 (floorplan_generator.intent_engine) and shows three complete options with why
@@ -29,6 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import streamlit as st
 
 from floorplan_generator import intent_engine as ie
+from floorplan_generator import terrace_stair as ts_adv
 from floorplan_generator.vastu_engine import plan_sides_for_facing
 from floorplan_generator.wish_parser import understand, suggest_wishes
 from floorplan_renderer.svg_renderer import SVGRenderer
@@ -45,12 +49,18 @@ VERSIONS = "design_history"              # applied designs, for the price histor
 BASE_ID = "intent_base_plan_id"
 SEL = "intent_sel"
 PENDING = "intent_pending"
+STAIR_OPEN = "stair_panel_open"          # the terrace-stair side chooser is open
+STAIR_CACHE = "stair_sides_cache"        # {id(plan): terrace_stair.stair_sides(plan)}
 GEN_KEYS = ("gen_plan", "gen_cost", "gen_svg_clean", "gen_svg_blueprint", "gen_dxf_bytes",
             "gen_pdf_bytes", "gen_png_bytes", "gen_svg_bytes", "gen_mask")
 
 ICONS = {"BEDROOM": "🛏️", "KITCHEN": "🍳", "BATHROOM": "🚿", "POOJA": "🪔", "LIVING": "🛋️",
          "DINING": "🍽️", "STUDY": "💻", "STORE": "📦", "UTILITY": "🧺", "STAIRS": "🪜",
          "LIFT": "🛗", "SERVANT": "🧹", "CORRIDOR": "🚪"}
+
+# what a re-plan must never take away from the design being edited
+KEEP = {"PARKING": "car parking", "BIKE_PARKING": "two-wheeler parking", "GARDEN": "garden", "POOL": "swimming pool",
+        "WATER_TANK": "water sump", "GENERATOR": "generator", "SECURITY": "security cabin"}
 
 ACTIONS = [("move", "📍 Move it"), ("opposite", "🔁 Other side"), ("swap", "⇄ Swap with…"),
            ("adjacent", "🤝 Next to…"), ("bigger", "➕ Bigger"), ("smaller", "➖ Smaller"),
@@ -140,6 +150,18 @@ def build_options(plan, intents: List[Dict], cost_params: Dict[str, Any], k: int
     engine = LayoutEngine(**dict(plan.generation_params), design_intents=list(intents),
                           base_layout=plan.layout_state)
     options = engine.generate_alternatives(k)
+    # a re-plan never takes away what the owner already has (car, two-wheelers, garden, pool, sump …): an option
+    # that would is dropped when another keeps everything, else it says so in plain words
+    have = {r.category for r in plan.rooms if r.category in KEEP}
+    for p in options:
+        lost = sorted(have - {r.category for r in p.rooms})
+        if lost:
+            rep = dict(p.edit_report or {})
+            rep["lost"] = [KEEP[c] for c in lost]
+            rep["warnings"] = [f"This option would lose the {KEEP[c]}." for c in lost] + list(rep.get("warnings") or [])
+            p.edit_report = rep
+    keep = [p for p in options if not (p.edit_report or {}).get("lost")]
+    options = keep or options
     current = _estimate(plan, cost_params)
     svg = SVGRenderer()
     out = []
@@ -198,7 +220,7 @@ def _push(intent: Dict) -> None:
     stack = _stack()
 
     def same(a, b):
-        if a["type"] == "mirror" and b["type"] == "mirror":
+        if a["type"] == b["type"] and a["type"] in ("mirror", "terrace_stair"):    # one wish of each kind
             return True
         return a.get("type") == b.get("type") and a.get("room") == b.get("room") and \
             {a.get("a"), a.get("b")} == {b.get("a"), b.get("b")}
@@ -211,8 +233,37 @@ def _push(intent: Dict) -> None:
     st.session_state.pop(OPTIONS, None)
 
 
+def stair_sides_for(plan) -> Dict:
+    """terrace_stair.stair_sides(plan), computed once per design (a few milliseconds per side)."""
+    cache = st.session_state.setdefault(STAIR_CACHE, {})
+    key = id(plan)
+    if key not in cache:
+        cache.clear()
+        try:
+            cache[key] = ts_adv.stair_sides(plan)
+        except Exception as e:                    # the editor stays usable without the chooser
+            cache[key] = {"available": False, "options": [], "why": f"Could not check the stair sides ({e})."}
+    return cache[key]
+
+
+def _stair_refusal(intent: Dict) -> Optional[str]:
+    """Why a terrace-stair wish cannot be built on this plot (measured), else None."""
+    if intent.get("type") != "terrace_stair":
+        return None
+    plan = st.session_state.get("gen_plan")
+    if plan is None:
+        return None
+    card = next((c for c in stair_sides_for(plan).get("options", []) if c["side"] == intent.get("side")), None)
+    if card and card.get("status") == "no":
+        return f"The terrace stair cannot go on the {card['title'].lower()}: {card.get('reason', '')}."
+    return None
+
+
 def _add(intent: Dict, ls: Dict) -> bool:
     n, why = ie.check_intent(intent, ls)
+    if n and not why:
+        why = _stair_refusal(n)
+        n = None if why else n
     if not n:
         _feedback().insert(0, {"kind": "warn", "text": why})
         return False
@@ -271,6 +322,9 @@ def _understand_text(ls: Dict) -> None:
         fixes = ", ".join(f"“{a}” → {b}" for a, b in r["corrections"])
         for it in r["intents"]:
             n, why = ie.check_intent(it, ls)
+            if n and not why:
+                why = _stair_refusal(n)
+                n = None if why else n
             if n:
                 _push(n)
                 fb.append({"kind": "ok", "text": ie.describe_intent(n, ls), "fixes": fixes, "clause": r["clause"]})
@@ -355,6 +409,7 @@ def _reset_editor() -> None:
     st.session_state[FEEDBACK] = []
     st.session_state[PENDING] = None
     st.session_state[SEL] = None
+    st.session_state[STAIR_OPEN] = False
 
 
 # =============================================================================
@@ -384,6 +439,13 @@ _CSS = """
 .ir-cell{font-size:.92rem}
 .ir-chg{padding:4px 0;border-bottom:1px solid rgba(148,163,184,.15);font-size:.92rem}
 .ir-view svg{width:100%;height:66vh}
+.ir-stair-h{font-weight:700;font-size:1.0rem;margin-bottom:2px}
+.ir-fit{color:#4ADE80;font-size:.82rem;font-weight:600}.ir-tight{color:#FBBF24;font-size:.82rem;font-weight:600}
+.ir-lock{color:#F87171;font-size:.82rem;font-weight:600}
+.ir-star{color:#0A2342;background:#FBBF24;border-radius:5px;padding:1px 6px;font-size:.72rem;font-weight:700;margin-left:6px}
+.ir-vastu{margin:6px 0 2px 0;font-size:.92rem}.ir-line{font-size:.88rem;padding:2px 0}
+.ir-house{text-align:center;border:2px dashed rgba(0,229,255,.45);border-radius:10px;padding:38px 6px;
+  font-weight:700;letter-spacing:.06em;color:#00E5FF;margin-top:30px}
 .ir-view.half svg{height:52vh}
 </style>
 """
@@ -431,9 +493,12 @@ def render_intent_studio(current_plan, cost_params: Dict[str, Any]) -> None:
     with col_map:
         _house_map(ls)
         _actions(ls)
+        _stair_bar(current_plan, ls)
     with col_talk:
         _talk_box(ls)
         go = _wish_list(ls)
+    if st.session_state.get(STAIR_OPEN) and ls.get("terrace_stair"):
+        _stair_panel(current_plan, ls)
 
     if go and _stack():
         with st.spinner("Re-designing your house around your wishes (Vastu, NBC rules, doors, light, plumbing)…"):
@@ -515,6 +580,89 @@ def _zone_grid(key: str, ls: Dict) -> None:
                            on_click=_pick_zone, args=(z, ls))
 
 
+_STAIR_STATUS = {"now": ("📍 Now here", "ir-now"), "ok": ("✅ Fits", "ir-fit"), "tight": ("⚠️ Fits, with a cost", "ir-tight"),
+                 "no": ("🔒 Can't go here", "ir-lock")}
+
+
+def _toggle_stair_panel() -> None:
+    st.session_state[STAIR_OPEN] = not st.session_state.get(STAIR_OPEN, False)
+
+
+def _pick_stair_side(side: str, ls: Dict) -> None:
+    if _add({"type": "terrace_stair", "side": side}, ls):
+        st.session_state[STAIR_OPEN] = False
+
+
+def _stair_bar(plan, ls: Dict) -> None:
+    """One line under the map: where the terrace stair is now, and a button to choose its side."""
+    now = ls.get("terrace_stair")
+    if not now:
+        return
+    info = (plan.engineering or {}).get("terrace_stair") or {}
+    word, emoji, _ = ts_adv._vastu_words(info.get("zone", ""), int(info.get("score", 0)), bool(info.get("taboo")))
+    wish = next((w for w in _stack() if w.get("type") == "terrace_stair"), None)
+    side_now = ie.stair_side_name(now["word"], ls.get("facing", "N"))
+    extra = f" → wish: **{ie.stair_side_name(wish['side'], ls.get('facing', 'N'))}**" if wish else ""
+    st.markdown(f"**🪜 Terrace stair:** {side_now} · {emoji} Vastu {word}{extra}")
+    st.button("✖ Close the stair chooser" if st.session_state.get(STAIR_OPEN) else "🪜 Choose the terrace stair's side",
+              key="stair_toggle", width="stretch", on_click=_toggle_stair_panel,
+              type="primary" if st.session_state.get(STAIR_OPEN) else "secondary")
+
+
+def _stair_card(card: Dict, ls: Dict) -> None:
+    label, css = _STAIR_STATUS.get(card["status"], ("", "ir-muted"))
+    star = " <span class='ir-star'>⭐ Recommended</span>" if card.get("recommended") else ""
+    with st.container(border=True):
+        st.markdown(f"<div class='ir-stair-h'>{escape(card['title'])}</div>"
+                    f"<span class='{css}'>{label}</span>{star}", unsafe_allow_html=True)
+        if card["status"] == "no":
+            st.markdown(f"<div class='ir-muted'>{escape(card.get('reason', ''))}.</div>", unsafe_allow_html=True)
+            return
+        v = card["vastu"]
+        html = [f"<div class='ir-vastu'>{v['emoji']} <b>Vastu {v['word']}</b> — {escape(v['line'])}</div>"]
+        if v.get("climb_line"):
+            html.append(f"<div class='ir-muted'>{escape(v['climb_line'])}</div>")
+        if card.get("why"):
+            html.append(f"<div class='ir-ok'>{escape(card['why'])}</div>")
+        icons = {"house": "🏠", "yard": "🌿", "use": "🚶", "care": "🔐"}
+        for key in ("house", "yard", "use", "care"):
+            for line in card["lines"].get(key, []):
+                html.append(f"<div class='ir-line'>{icons[key]} {escape(line)}</div>")
+        st.markdown("".join(html), unsafe_allow_html=True)
+        if card["status"] != "now":
+            st.button("👉 Put the stair here", key=f"stair_pick_{card['side']}", width="stretch",
+                      type="primary" if card.get("recommended") else "secondary",
+                      on_click=_pick_stair_side, args=(card["side"], ls))
+
+
+def _stair_panel(plan, ls: Dict) -> None:
+    """Every side of the house for the terrace stair, laid out like the map (road at the top)."""
+    res = stair_sides_for(plan)
+    st.markdown("#### 🪜 Where should the terrace stair go?")
+    if not res.get("available"):
+        st.info(res.get("why") or "This house has no outside terrace stair.")
+        return
+    st.caption("Each side is checked on your plot first: does it fit, what Vastu says, what it does to the house "
+               "and the yard, and how it feels every day. Tap one — it is added to your wishes; press "
+               "**Re-plan my house** to see the full designs.")
+    cards = {c["side"]: c for c in res["options"]}
+    top = st.columns([1, 1.2, 1], gap="small")
+    with top[1]:
+        st.markdown("<div class='ir-road'>🛣️ ROAD · MAIN GATE</div>", unsafe_allow_html=True)
+        _stair_card(cards["front"], ls)
+    mid = st.columns([1, 1, 1], gap="small")
+    with mid[0]:
+        _stair_card(cards["left"], ls)
+    with mid[1]:
+        st.markdown("<div class='ir-house'>🏠<br>YOUR HOUSE<br><span class='ir-muted'>(as on the drawing)</span></div>",
+                    unsafe_allow_html=True)
+    with mid[2]:
+        _stair_card(cards["right"], ls)
+    bot = st.columns([1, 1.2, 1], gap="small")
+    with bot[1]:
+        _stair_card(cards["back"], ls)
+
+
 def _talk_box(ls: Dict) -> None:
     st.markdown("**💬 Or tell us in your own words**")
     st.text_area("Your wish", key="intent_text", height=90, label_visibility="collapsed",
@@ -539,10 +687,17 @@ def _talk_box(ls: Dict) -> None:
                 st.button(f"👉 {ie.describe_intent(s, ls)}", key=f"fb_{i}_{j}", on_click=_accept, args=(i, j, ls))
     have = {ie.describe_intent(i, ls) for i in _stack()}
     ideas = [s for s in suggest_wishes(ls) if ie.check_intent(s, ls)[0] and ie.describe_intent(s, ls) not in have]
+    plan = st.session_state.get("gen_plan")
+    if ls.get("terrace_stair") and plan is not None and getattr(plan, "layout_state", None) is ls:
+        best = next((c for c in stair_sides_for(plan).get("options", []) if c.get("recommended")), None)
+        if best and best["status"] != "now":
+            it = dict(best["intent"], why="recommended")
+            if ie.describe_intent(it, ls) not in have:
+                ideas.append(it)
     if ideas:
         st.markdown("**💡 Ideas for your house**")
         for j, s in enumerate(ideas):
-            why = " (best Vastu)" if s.get("why") else ""
+            why = (" (recommended)" if s.get("why") == "recommended" else " (best Vastu)") if s.get("why") else ""
             st.button(f"{ie.describe_intent(s, ls)}{why}", key=f"idea_{j}", on_click=_add, args=(s, ls))
 
 
@@ -648,6 +803,12 @@ def version_changes(old, new, limit: int = 10) -> List[str]:
         if parts:
             (moved if za != zb else resized).append((abs(r.area - p.area), f"{icon} **{name}** — " + ", ".join(parts)))
     gone = [f"▫️ **{n}** — removed" for n in before if n not in after]
+    s0 = ((old.engineering or {}).get("terrace_stair") or {})
+    s1 = ((new.engineering or {}).get("terrace_stair") or {})
+    if s0 and s1 and s0.get("side") != s1.get("side"):
+        f = new.orientation
+        moved.append((50.0, f"🪜 **Terrace stair** — moved {ie.stair_side_name(s0['word'], f)} → "
+                            f"**{ie.stair_side_name(s1['word'], f)}**"))
     # rooms that changed zone first, then the biggest size changes (the wish itself usually leads)
     out = [t for _, t in sorted(moved, key=lambda x: -x[0])] + [t for _, t in sorted(resized, key=lambda x: -x[0])] + gone
     return out[:limit] + ([f"…and {len(out) - limit} more"] if len(out) > limit else [])

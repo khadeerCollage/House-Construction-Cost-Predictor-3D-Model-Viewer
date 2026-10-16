@@ -96,6 +96,8 @@ class SitePlan:
     footprint: Rect                          # house footprint (wall centre-lines)
     car_mode: Optional[str] = None           # 'front' | 'left' | 'right' | 'stilt' | None
     ext_stair_side: Optional[str] = None     # plan side holding the terrace stair
+    ext_stair_want: Optional[str] = None     # the side the owner asked for (plan side), None = automatic
+    ext_stair_refused: Optional[str] = None  # why the owner's side could not take it (plain words)
     notes: List[str] = field(default_factory=list)
     items: List[SiteItem] = field(default_factory=list)
     gates: List[Tuple[float, float]] = field(default_factory=list)  # x-ranges on the top edge
@@ -171,9 +173,55 @@ class SitePlanner:
         """Side setback for a lift tower against the side wall (tower + its walls + clearance to the compound)."""
         return round(0.23 + lift_out["w"] + 0.115 + MARGIN_PLOT + 0.05, 2)
 
+    # an outside stair on the road side: the stair band along the house face + a walk past it to the gate
+    EXT_STAIR_BAND = 1.15                 # 0.9 m flight + 0.15 m off the wall + the wall's outer half
+    EXT_STAIR_FRONT = 2.25                # front yard: the band + 1.1 m to walk past it to the stair foot
+    EXT_STAIR_DOOR = 2.6                  # facade length the main door + its steps need beside a front stair
+
+    def ext_stair_need(self, side: str) -> float:
+        """Setback a side needs for the outside terrace stair hugging the house."""
+        return self.EXT_STAIR_FRONT if side == "top" else self.EXT_STAIR_BAND
+
     def plan_footprint(self, target_area: float, min_area: float,
                        min_w: float, min_d: float, ext_stair_len: float = 0.0,
-                       lift_out: Optional[Dict] = None) -> SitePlan:
+                       lift_out: Optional[Dict] = None, ext_stair_want: Optional[str] = None) -> SitePlan:
+        """
+        Setbacks, footprint and the reservations of the site. A side asked for the outside terrace stair is
+        taken only when it costs nothing else the owner asked for: the plot is planned both ways and, if the
+        stair's side would push out the car parking or the swimming pool, the stair keeps its automatic side
+        and the reason is kept (site.ext_stair_refused) — a wish never takes away another wish.
+        """
+        want = ext_stair_want if ext_stair_want in ("top", "bottom", "left", "right") else None
+        if not want or ext_stair_len <= 0:
+            return self._plan_footprint(target_area, min_area, min_w, min_d, ext_stair_len, lift_out, want)
+        import copy
+        comps0 = copy.deepcopy(self.components)
+        base = self._plan_footprint(target_area, min_area, min_w, min_d, ext_stair_len, lift_out, None)
+        comps_base = self.components
+        self.components = copy.deepcopy(comps0)
+        site = self._plan_footprint(target_area, min_area, min_w, min_d, ext_stair_len, lift_out, want)
+        if site.ext_stair_side != want or base.ext_stair_side == want:
+            return site
+        lost = []
+        if base.car_mode and not site.car_mode:
+            lost.append("car parking")
+        pool = lambda c: bool((c.get("swimming_pool") or {}).get("enabled"))       # noqa: E731
+        if pool(comps_base) and not pool(self.components):
+            lost.append("swimming pool")
+        if not lost:
+            return site
+        self.components = comps_base
+        cname = {"N": "North", "E": "East", "S": "South", "W": "West"}
+        why = f"the {' and the '.join(lost)} would no longer fit beside it"
+        base.notes.append(f"Terrace stair: the {cname[self.sides[want]]} side cannot take it — {why}. "
+                          f"It stays on the {cname[self.sides[base.ext_stair_side]]} side."
+                          if base.ext_stair_side else f"Terrace stair: {why}.")
+        base.ext_stair_want, base.ext_stair_refused = want, why
+        return base
+
+    def _plan_footprint(self, target_area: float, min_area: float, min_w: float, min_d: float,
+                        ext_stair_len: float = 0.0, lift_out: Optional[Dict] = None,
+                        ext_stair_want: Optional[str] = None) -> SitePlan:
         plot_area = self.W * self.H
         f, r, s = bylaw_setbacks(plot_area, self.floors)
         if "apartment" in self.building_type.lower() and plot_area > 200:
@@ -221,19 +269,30 @@ class SitePlanner:
                 notes.append("Vastu site rule applied: North and East setbacks kept ≥ South and West "
                              "(more open sky and morning light on the Ishan side).")
 
-        # External terrace stair strip (single storey) on a S or W side, never the road side
+        # External terrace stair strip (single storey): automatically on a S or W side, never the road
+        # side; the owner may ask for any side (Smart Re-Plan) — that side is tried first and, when it
+        # cannot take the stair, the reason is kept and the automatic side is used
         ext_side = None
+        want = ext_stair_want if ext_stair_want in ("top", "bottom", "left", "right") else None
+        refused = None
         if ext_stair_len > 0:
             candidates = [self.side_of[c] for c in ("S", "W", "E", "N") if self.side_of[c] != "top"]
+            if want:
+                candidates = [want] + [c for c in candidates if c != want]
             for side in candidates:
                 cand = dict(sb)
-                cand[side] = max(cand[side], 1.15)
+                cand[side] = max(cand[side], self.ext_stair_need(side) if side == want else 1.15)
                 avail = self._available(cand)
-                length_ok = (avail[3] if side in ("left", "right") else avail[2]) >= ext_stair_len + 0.3
+                run = avail[3] if side in ("left", "right") else avail[2]
+                need_run = ext_stair_len + 0.3 + (self.EXT_STAIR_DOOR if side == "top" else 0.0)
+                length_ok = run >= need_run
                 if feasible(cand) and length_ok:
                     sb = cand
                     ext_side = side
                     break
+                if side == want:
+                    refused = self._ext_stair_refusal(side, cand, run, need_run, ext_stair_len, min_area,
+                                                      min_w, min_d)
 
         if ext_stair_len > 0 and ext_side is None:
             notes.append("No setback can take an external terrace stair — provide an internal "
@@ -296,14 +355,15 @@ class SitePlanner:
             path_w = 1.9                      # entrance path to the main door
             options = []
             # front open parking, cars perpendicular to the road (5.0 m bay + clearances)
+            stair_f = self.EXT_STAIR_BAND if ext_side == "top" else 0.0   # a front stair hugs the house face
             if slots * 2.6 + path_w <= self.W - 0.4:
                 cand = dict(sb)
-                cand["top"] = max(cand["top"], 5.8)
+                cand["top"] = max(cand["top"], 5.8 + stair_f)
                 options.append(("front", cand))
             # front parallel parking along the compound wall (2.6 m bay + clearances)
             if slots * 5.5 + path_w <= self.W - 0.4:
                 cand = dict(sb)
-                cand["top"] = max(cand["top"], 3.3)
+                cand["top"] = max(cand["top"], 3.3 + stair_f)
                 options.append(("front_parallel", cand))
             # side parking (tandem along the depth)
             for side in ("left", "right"):
@@ -340,7 +400,7 @@ class SitePlanner:
                 # (NW / SE) and keep the main door on the rest of the facade, instead of dropping
                 # the car the owner asked for.
                 cand = dict(sb)
-                cand["top"] = max(cand["top"], 3.3)
+                cand["top"] = max(cand["top"], 3.3 + stair_f)
                 if feasible(cand):
                     chosen = ("front_parallel", cand, 0.0)
                     bay = slots * 5.5
@@ -443,9 +503,99 @@ class SitePlanner:
         if coverage > cap + 0.01:
             notes.append("Ground coverage exceeds the indicative cap — consider an additional floor instead.")
 
+        if ext_side == "top":
+            # a stair along the road face takes one end of it: the main door stays on the rest
+            door_exclusion = self._front_stair_exclusion(ext_stair_len, (fx, fy, fw, fd), door_exclusion)
+        cname = {"N": "North", "E": "East", "S": "South", "W": "West"}
+        if want and refused:
+            notes.append(f"Terrace stair: the {cname[self.sides[want]]} side cannot take it — {refused}."
+                         + (f" It stays on the {cname[self.sides[ext_side]]} side." if ext_side else ""))
+        elif want and ext_side == want:
+            notes.append(f"Terrace stair on the {cname[self.sides[want]]} side, as you asked.")
         return SitePlan(plot_w=self.W, plot_h=self.H, facing=self.facing, setbacks=final_sb,
                         footprint=(fx, fy, fw, fd), car_mode=car_mode, ext_stair_side=ext_side,
-                        notes=notes, coverage=coverage, door_exclusion=door_exclusion, lift_side=lift_side)
+                        notes=notes, coverage=coverage, door_exclusion=door_exclusion, lift_side=lift_side,
+                        ext_stair_want=want, ext_stair_refused=refused)
+
+    def ext_stair_climb(self, rect: Rect, footprint: Rect) -> str:
+        """
+        Which way the outside stair climbs (plan N/S/E/W = the end it arrives at). Its top must lie
+        alongside the house (a short bridge crosses onto the roof — walkthrough._stair measures the
+        same overlap); of the ends that do, Vastu wants the climb clockwise, rising towards the South
+        or the West. Without Vastu (or when only one end reaches the house) the old rule stands.
+        """
+        fx, fy, fw, fd = footprint
+        x, y, w, h = rect
+        along_y = h >= w
+        lo_o, hi_o = ((fy - 0.115, fy + fd + 0.115) if along_y else (fx - 0.115, fx + fw + 0.115))
+        lo_r, hi_r = (y, y + h) if along_y else (x, x + w)
+        ends = {}
+        for d, (a, b) in ((("N", (hi_r - 0.9, hi_r)), ("S", (lo_r, lo_r + 0.9))) if along_y else
+                          (("E", (hi_r - 0.9, hi_r)), ("W", (lo_r, lo_r + 0.9)))):
+            ends[d] = min(b, hi_o - 0.2) - max(a, lo_o + 0.2)
+        default = "N" if along_y else "E"
+        reach = [d for d, ov in ends.items() if ov >= 0.6 - 1e-6]
+        if not reach:
+            return max(ends, key=lambda d: (ends[d] - (1e-6 if d != default else 0.0)))
+        if self.vastu:
+            plan_side = {"N": "top", "S": "bottom", "E": "right", "W": "left"}
+            good = [d for d in reach if self.sides[plan_side[d]] in ("S", "W")]
+            if good:
+                return good[0]
+        return default if default in reach else reach[0]
+
+    CLIMB_BONUS = 3.0     # a clockwise climb (rising towards S / W) against the zone score (-50 … +10)
+
+    def ext_stair_vastu(self, rect: Rect, footprint: Rect) -> float:
+        """Vastu worth of an outside stair here: its zone on the plot mandala + a clockwise climb."""
+        from floorplan_generator.vastu_engine import VastuEngine
+        eng = VastuEngine.for_facing(self.W, self.H, self.facing)
+        zone = eng.get_zone_for_position(rect[0] + rect[2] / 2, rect[1] + rect[3] / 2).value
+        climb = self.ext_stair_climb(rect, footprint)
+        plan_side = {"N": "top", "S": "bottom", "E": "right", "W": "left"}
+        ok = self.sides[plan_side[climb]] in ("S", "W")
+        return eng.get_room_score("STAIRS", zone) + (self.CLIMB_BONUS if ok else 0.0)
+
+    def _ext_stair_refusal(self, side: str, cand: Dict[str, float], run: float, need_run: float,
+                           stair_len: float, min_area: float, min_w: float, min_d: float) -> str:
+        """Why `side` cannot take the outside stair, in plain words (measured)."""
+        avail = self._available(cand)
+        if run < need_run:
+            fmt = ".2f" if f"{run:.1f}" == f"{need_run:.1f}" else ".1f"
+            if side == "top":
+                return (f"the front of the house is only {run:{fmt}} m wide; the stair ({stair_len:.1f} m long) "
+                        f"and the main door with its steps need {need_run:{fmt}} m")
+            return f"that side is only {run:{fmt}} m long and the stair needs {need_run:{fmt}} m"
+        if avail[2] < min_w:
+            return (f"with a {cand[side]:.2f} m strip for it the house could be only {avail[2]:.1f} m wide — "
+                    f"the rooms need {min_w:.1f} m")
+        if avail[3] < min_d:
+            return (f"with a {cand[side]:.2f} m strip for it the house could be only {avail[3]:.1f} m deep — "
+                    f"the rooms need {min_d:.1f} m")
+        if avail[2] * avail[3] < min_area:
+            return (f"a {cand[side]:.2f} m strip there would leave a house of {avail[2] * avail[3]:.0f} m², "
+                    f"less than the {min_area:.0f} m² the rooms need")
+        return "the plot has no room for it there"
+
+    def _front_stair_exclusion(self, stair_len: float, footprint: Rect,
+                               door_exclusion: Optional[Tuple[float, float]]) -> Tuple[float, float]:
+        """
+        x-range of the road face a front stair takes (the main door is kept off it). The stair goes
+        to the end a front car bay already blocks (one blocked end, not two), else the Vastu end
+        (towards the South / West, where a heavy stair belongs).
+        """
+        fx, fy, fw, fd = footprint
+        span = stair_len + 0.45
+        if door_exclusion is not None:
+            left = door_exclusion[0] <= 0.05
+        else:
+            sx, _ = self.corner_point("SW")
+            left = sx == 0.0
+        if left:
+            hi = fx - 0.115 + span
+            return (0.0, max(hi, door_exclusion[1]) if door_exclusion else hi)
+        lo = fx + fw + 0.115 - span
+        return (min(lo, door_exclusion[0]) if door_exclusion else lo, self.W)
 
     def _car_corner_side(self, bay: float, facade: Rect) -> str:
         """
@@ -642,16 +792,40 @@ class SitePlanner:
                 along_x = side in ("top", "bottom")
                 w, h = (L, Wd) if along_x else (Wd, L)
                 # hug the building face
-                if side == "bottom":
-                    y = fy - 0.115 - 0.15 - h
-                    strip_rect = (strip[0], y, strip[2], h)
-                elif side == "top":
-                    strip_rect = (strip[0], fy + fd + 0.115 + 0.15, strip[2], h)
-                elif side == "left":
-                    strip_rect = (fx - 0.115 - 0.15 - w, strip[1], w, strip[3])
-                else:
-                    strip_rect = (fx + fw + 0.115 + 0.15, strip[1], w, strip[3])
-                rect = self._slide_place(w, h, strip_rect, self.corner_point("SW"), occupied)
+                # Two runs along a front / back face: the whole strip (the foot may pass the house corner)
+                # and the house face itself (both ends alongside the house, so either can be the top —
+                # its bridge crosses onto the roof). The better for Vastu is kept: the zone the stair
+                # stands in, and a climb rising towards the South / West (clockwise).
+                runs = [(strip[0], strip[2])]
+                if side in ("top", "bottom") and fw + 0.23 >= w - 1e-6:
+                    # the house face, kept inside the compound wall when the house stands on the boundary
+                    f0, f1 = max(fx - 0.115, MARGIN_PLOT / 2), min(fx + fw + 0.115, self.W - MARGIN_PLOT / 2)
+                    face = [(f0, f1 - f0)] if f1 - f0 >= w - 1e-6 else []
+                    runs = face + ([] if side == "top" else runs)
+                toward = self.corner_point("SW")
+                if side == "top" and site.door_exclusion:
+                    toward = (0.0 if site.door_exclusion[0] <= 0.05 else self.W, self.H)
+                best = None
+                for x0, span in runs:
+                    # 0.15 m off the house face, but never over the compound wall (a tight side yard
+                    # gives up part of that gap)
+                    lo_x, hi_x = MARGIN_PLOT / 2, self.W - MARGIN_PLOT / 2
+                    lo_y = MARGIN_PLOT / 2
+                    if side == "bottom":
+                        strip_rect = (x0, max(lo_y, fy - 0.115 - 0.15 - h), span, h)
+                    elif side == "top":        # alongside the road face, at the end kept off the main door
+                        strip_rect = (x0, fy + fd + 0.115 + 0.15, span, h)
+                    elif side == "left":
+                        strip_rect = (max(lo_x, fx - 0.115 - 0.15 - w), strip[1], w, strip[3])
+                    else:
+                        strip_rect = (min(hi_x - w, fx + fw + 0.115 + 0.15), strip[1], w, strip[3])
+                    cand = self._slide_place(w, h, strip_rect, toward, occupied)
+                    if cand is None:
+                        continue
+                    key = self.ext_stair_vastu(cand, site.footprint) if self.vastu else 0.0
+                    if best is None or key > best[0] + 1e-6:
+                        best = (key, cand)
+                rect = best[1] if best else None
                 if rect:
                     occupied.append(rect)
                     items.append(SiteItem("ext_stair", "Terrace Staircase (External)", "STAIRS", rect, "#94A3B8"))
